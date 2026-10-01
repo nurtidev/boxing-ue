@@ -420,13 +420,20 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 		PrevTargetCoreTime = CoreTime;
 		PrevTargetPos = WorldTarget;
 	}
+	// Вне боя (нокдаун/перерыв/финал) ядро не двигает бойцов, а в перерыве и время стоит — прошлая скорость не «залипает».
+	const bool bFighting = Snapshot.Phase == EFightPhase::Fighting;
+	if (!bFighting)
+	{
+		FightTargetVelocity = FVector::ZeroVector;
+	}
 	FightTarget = WorldTarget;
 	FightYaw = YawDeg;
 	bHasTarget = true;
 
 	// --- поля для AnimBP/HUD ---
-	bPunching = F.bPunching;
-	if (F.bPunching)
+	// Вне боя ядро держит удар/уклон замороженными (фаза упёрта в 1, сброс — лишь на следующем шаге боя) — не играем их.
+	bPunching = F.bPunching && bFighting && F.PunchPhase < 1.f;
+	if (bPunching)
 	{
 		CurrentPunch = BoxingBP::Punch(F.Punch);
 		PunchTarget = BoxingBP::Target(F.PunchTarget);
@@ -437,14 +444,14 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 			PunchContactFraction = FMath::Clamp(F.PunchPhase + F.PunchTimeToContact / F.PunchDuration, 0.f, 1.f);
 		}
 	}
-	PunchPhase = F.bPunching ? F.PunchPhase : 0.f;
-	PunchPhaseAnim = F.bPunching ? F.PunchPhaseAnim : 0.f;
+	PunchPhase = bPunching ? F.PunchPhase : 0.f;
+	PunchPhaseAnim = bPunching ? F.PunchPhaseAnim : 0.f;
 	bBlocking = F.bBlocking;
 	GuardIntegrity = F.GuardIntegrity;
-	SlipAmount = F.Slip;
-	SlipPhase = F.SlipPhase;
-	SlipSide = F.Slip > 0.f ? 1 : (F.Slip < 0.f ? -1 : 0);
-	if (SlipSide == 0 && F.SlipPhase > 0.f && F.SlipPhase < 1.f)
+	SlipAmount = bFighting ? F.Slip : 0.f;
+	SlipPhase = bFighting ? F.SlipPhase : 0.f;
+	SlipSide = SlipAmount > 0.f ? 1 : (SlipAmount < 0.f ? -1 : 0);
+	if (SlipSide == 0 && SlipPhase > 0.f && SlipPhase < 1.f)
 	{
 		SlipSide = PrevSlipSide; // края синуса (sin 0 = 0) — сторона прежняя
 	}
@@ -481,13 +488,13 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	}
 	bWasFinale = bFinale;
 
-	// --- фронт: новый удар (время старта цикла сменилось) ---
+	// --- фронт: новый удар (момент контакта сменился; он постоянен весь цикл, в отличие от зажатой фазы) ---
 	if (bPunching)
 	{
-		const double Start = CoreTime - static_cast<double>(F.PunchPhase) * F.PunchDuration;
-		if (!bWasPunching || FMath::Abs(Start - LastPunchStart) > 0.02)
+		const double Contact = CoreTime + static_cast<double>(F.PunchTimeToContact);
+		if (!bWasPunching || FMath::Abs(Contact - LastPunchContact) > 0.02)
 		{
-			LastPunchStart = Start;
+			LastPunchContact = Contact;
 			OnPunchStarted(CurrentPunch, PunchTarget);
 		}
 	}

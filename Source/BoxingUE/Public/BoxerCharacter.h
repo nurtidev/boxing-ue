@@ -450,7 +450,7 @@ private:
 	bool bWasBlocking = false;
 	bool bWasFinale = false;
 	int32 PrevSlipSide = 0;
-	double LastPunchStart = -100.0;
+	double LastPunchContact = -100.0;
 	double CoreNow = 0.0;
 	double PrevTargetCoreTime = -1.0;
 	FVector PrevTargetPos = FVector::ZeroVector;
