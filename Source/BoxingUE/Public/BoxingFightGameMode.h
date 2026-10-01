@@ -11,7 +11,9 @@
 // Командная строка (для headless-проверок): -BoxAutopilot (оба под ИИ), -BoxSeed=N,
 // -BoxRoundSec=S, -BoxBreakSec=S, -BoxQuitAfter=S (выход через S сек реального времени),
 // -BoxLogEvery=S (лог позиций/состояния), -BoxLogEvents (лог всех событий),
-// -BoxShots=5,9,14 (скриншоты в Docs/screens/fight_<сек>.png).
+// -BoxShots=5,9,14 (скриншоты в Docs/screens/fight_<сек>.png), -BoxHitShots=N (скриншоты в кадре
+// контакта первых N попаданий/блоков, с интервалом ≥ 1.5 с), -BoxShotPrefix=ring_fight (имя файлов),
+// -BoxVisual=<класс>|none (визуальная подмена), -BoxPhysHits=0|1 (физреакция).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -68,10 +70,14 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Ring")
 	TSubclassOf<ABoxerCharacter> BoxerClass;
 
-	// Визуальная подмена бойцов (например /Game/MetaHumans/Kellan/BP_Kellan.BP_Kellan_C): пусто — манекен GASP.
-	// Командная строка: -BoxVisual=<путь класса>.
+	// Визуальная подмена бойцов: MetaHuman Kellan из GASP (ретаргет позы с логического манекена).
+	// Пусто — виден манекен GASP. Командная строка: -BoxVisual=<путь класса> или -BoxVisual=none.
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
-	FSoftClassPath VisualOverridePath;
+	FSoftClassPath VisualOverridePath = FSoftClassPath(TEXT("/Game/MetaHumans/Kellan/BP_Kellan.BP_Kellan_C"));
+
+	// Физреакция на попадание (на видимом меше подмены). -1 — как в классе бойца; 0/1 — принудительно.
+	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
+	int32 PhysHitsOverride = -1;
 
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
 	FSoftClassPath BoxerClassPath = FSoftClassPath(TEXT("/Game/Boxing/Blueprints/BP_Boxer.BP_Boxer_C"));
@@ -162,6 +168,11 @@ private:
 	float LogEvery = -1.f;
 	bool bLogEvents = false;
 	TArray<float> ShotTimes;
+	int32 HitShotsLeft = 0;
+	float LastHitShotAt = -100.f;
+	int32 HitShotIndex = 0;
+	FString ShotPrefix = TEXT("fight");
+	void TakeShot(const FString& Name);
 	float RealTime = 0.f;
 	float LogTimer = 0.f;
 	int32 EventCount[8] = {0, 0, 0, 0, 0, 0, 0, 0};

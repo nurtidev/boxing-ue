@@ -15,6 +15,10 @@
 // Камера — как в вебе (InteractiveFight.tsx): игрок слева, вид с его правого плеча (1.5 м за
 // серединой пары, 3.05 м вбок), высота 1.72 м, взгляд в 0.15 м впереди середины на 1.05 м;
 // курс за осью «игрок → соперник» с мёртвой зоной ±20° (followYaw), середина — плавно.
+// Ближние канаты: камера на высоте веба (1.72 м) за рингом смотрит сквозь ближнюю сторону канатов —
+// как в вебе (Ring.tsx fadeNearCamera), сторона канатов/столбов, за которой стоит камера, не рисуется
+// (SetRenderInMainPass(false): тень остаётся). Канаты — акторы с тегом RingRope или с меткой
+// Ring_Rope*/Ring_Post*/Ring_Pad*/Ring_RopeTie* (L_Ring трека A), Rope*/Post* (L_FightTest).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -87,6 +91,14 @@ public:
 	UPROPERTY(Transient, BlueprintReadOnly, Category = "Boxing|Camera")
 	TObjectPtr<ACameraActor> FightCamera;
 
+	// Не рисовать сторону канатов между камерой и парой.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Camera")
+	bool bHideNearRopes = true;
+
+	// Сторона прячется, когда камера дальше этой линии от центра ринга (см, вдоль нормали стороны).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Camera")
+	float RopeHideFrom = 255.f;
+
 	// Курс камеры с мёртвой зоной (порт followYaw из web/src/ui/fightFx.ts), радианы.
 	static float FollowYaw(float CamYaw, float WantYaw, float Dt, float DeadZone, float FollowRate, float RecenterRate);
 
@@ -109,6 +121,17 @@ private:
 
 	void UpdateHeldInput();
 	void UpdateCamera(float DeltaSeconds);
+	void CollectRopes();
+	void UpdateRopeVisibility(const FVector& Cam, const FVector& Floor);
+
+	struct FRopePart
+	{
+		TWeakObjectPtr<class UPrimitiveComponent> Comp;
+		int32 SideMask = 0; // биты: 0 +X, 1 −X, 2 +Y, 3 −Y
+		bool bHidden = false;
+	};
+	TArray<FRopePart> RopeParts;
+	bool bRopesCollected = false;
 
 	bool bCamInit = false;
 	FVector CamMid = FVector::ZeroVector;

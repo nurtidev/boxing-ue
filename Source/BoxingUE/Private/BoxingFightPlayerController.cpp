@@ -5,7 +5,10 @@
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Engine/LocalPlayer.h"
+#include "Components/PrimitiveComponent.h"
+#include "GameFramework/Pawn.h"
 #include "Engine/World.h"
+#include "EngineUtils.h"
 #include "EnhancedInputComponent.h"
 #include "EnhancedInputSubsystems.h"
 #include "EnhancedPlayerInput.h"
@@ -324,6 +327,7 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	Cam.Z = Floor.Z + CamHeight + FMath::Min(80.0, Out * 0.35);
 	const FVector Look = CamMid + U * LookAhead + FVector(0.f, 0.f, LookHeight);
 	FightCamera->SetActorLocationAndRotation(Cam, (Look - Cam).Rotation());
+	UpdateRopeVisibility(Cam, Floor);
 
 	// Вертикальный FOV веба → горизонтальный FOV UE по аспекту вьюпорта.
 	int32 VX = 16, VY = 9;
@@ -331,6 +335,92 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	const float Aspect = VY > 0 ? static_cast<float>(VX) / static_cast<float>(VY) : 16.f / 9.f;
 	const float HFov = 2.f * FMath::RadiansToDegrees(FMath::Atan(FMath::Tan(FMath::DegreesToRadians(VerticalFov * 0.5f)) * Aspect));
 	FightCamera->GetCameraComponent()->SetFieldOfView(FMath::Clamp(HFov, 30.f, 120.f));
+}
+
+void ABoxingFightPlayerController::CollectRopes()
+{
+	bRopesCollected = true;
+	const ABoxingFightGameMode* GM = GetFightMode();
+	const FVector Floor = GM ? GM->GetRingFloorCenter() : FVector::ZeroVector;
+	static const TCHAR* Prefixes[] = {TEXT("Ring_Rope"), TEXT("Ring_Post"), TEXT("Ring_Pad"), TEXT("Rope"), TEXT("Post")};
+	for (TActorIterator<AActor> It(GetWorld()); It; ++It)
+	{
+		AActor* A = *It;
+		if (!A || A->IsA<APawn>())
+		{
+			continue;
+		}
+		bool bRope = A->ActorHasTag(TEXT("RingRope"));
+		if (!bRope)
+		{
+			const FString Label = A->GetActorNameOrLabel();
+			for (const TCHAR* Prefix : Prefixes)
+			{
+				if (!Label.Contains(TEXT("Process")) && Label.StartsWith(Prefix)) // PostProcessVolume — не столб
+				{
+					bRope = true;
+					break;
+				}
+			}
+		}
+		if (!bRope)
+		{
+			continue;
+		}
+		// Сторона ринга — по положению актора относительно центра (угловые столбы — сразу двух сторон).
+		const FVector P = A->GetActorLocation() - Floor;
+		const float Edge = RopeHalf - 60.f;
+		int32 Mask = 0;
+		if (P.X > Edge) Mask |= 1;
+		if (P.X < -Edge) Mask |= 2;
+		if (P.Y > Edge) Mask |= 4;
+		if (P.Y < -Edge) Mask |= 8;
+		if (Mask == 0)
+		{
+			continue;
+		}
+		TArray<UPrimitiveComponent*> Prims;
+		A->GetComponents(Prims);
+		for (UPrimitiveComponent* C : Prims)
+		{
+			if (C)
+			{
+				FRopePart Part;
+				Part.Comp = C;
+				Part.SideMask = Mask;
+				RopeParts.Add(Part);
+			}
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("FIGHT CAMERA: частей канатов/столбов для скрытия у камеры: %d"), RopeParts.Num());
+}
+
+void ABoxingFightPlayerController::UpdateRopeVisibility(const FVector& Cam, const FVector& Floor)
+{
+	if (!bRopesCollected)
+	{
+		CollectRopes();
+	}
+	const FVector C = Cam - Floor;
+	int32 Hide = 0;
+	if (bHideNearRopes)
+	{
+		if (C.X > RopeHideFrom) Hide |= 1;
+		if (C.X < -RopeHideFrom) Hide |= 2;
+		if (C.Y > RopeHideFrom) Hide |= 4;
+		if (C.Y < -RopeHideFrom) Hide |= 8;
+	}
+	for (FRopePart& Part : RopeParts)
+	{
+		const bool bHide = (Part.SideMask & Hide) != 0;
+		if (bHide != Part.bHidden && Part.Comp.IsValid())
+		{
+			// Ни основной проход, ни depth-prepass (иначе остаётся чёрный силуэт); тень (shadow depth) остаётся.
+			Part.Comp->SetRenderInMainPass(!bHide);
+			Part.Comp->SetRenderInDepthPass(!bHide);
+			Part.bHidden = bHide;
+		}
+	}
 }
 
 void ABoxingFightPlayerController::Tick(float DeltaSeconds)

@@ -19,20 +19,20 @@
 
 | Монтаж | Клип | Слот | Длина, с | Нотифай | Время, с | Доля | t_ext, с | Рука / смещение головы, см |
 |---|---|---|---|---|---|---|---|---|
-| AM_Jab | jab | UpperBody | 1.733 | Contact | 0.433 | 0.25 | 0.433 | рука l |
-| AM_Cross | cross | UpperBody | 2.133 | Contact | 0.667 | 0.31 | 0.667 | рука r |
-| AM_HookL | hookL | UpperBody | 2.000 | Contact | 0.467 | 0.23 | 0.467 | рука l |
-| AM_HookR | hookR | UpperBody | 2.167 | Contact | 0.700 | 0.32 | 0.533 | рука r |
-| AM_UpperL | upperL | UpperBody | 2.200 | Contact | 0.767 | 0.35 | 0.567 | рука l |
-| AM_UpperR | upperR | UpperBody | 2.200 | Contact | 0.700 | 0.32 | 0.533 | рука r |
-| AM_BodyHook | bodyHook | UpperBody | 1.900 | Contact | 0.900 | 0.47 | 0.800 | рука l |
-| AM_Block | block | UpperBody | 2.867 | GuardUp | 1.733 | 0.60 | — |  |
-| AM_BlockHit | blockHit | UpperBody | 1.333 | GuardUp | 0.233 | 0.17 | — |  |
-| AM_SlipL | slipL | UpperBody | 2.233 | Peak | 0.500 | 0.22 | — | голова dx=36 dy=3 dz=-4 |
-| AM_SlipR | slip | UpperBody | 2.233 | Peak | 0.500 | 0.22 | — | голова dx=-36 dy=3 dz=-4 |
-| AM_HitHead | hitHead | UpperBody | 1.367 | Peak | 0.633 | 0.46 | — | голова dx=-6 dy=11 dz=-7 |
-| AM_HitBody | hitBody | UpperBody | 1.600 | Peak | 0.700 | 0.44 | — | голова dx=4 dy=36 dz=-29 |
-| AM_Guard | guard | UpperBody | 2.200 | — | — | — | — | петля ×1000 (стойка-оверлей) |
+| AM_Jab | jab | DefaultSlot | 1.733 | Contact | 0.433 | 0.25 | 0.433 | рука l |
+| AM_Cross | cross | DefaultSlot | 2.133 | Contact | 0.667 | 0.31 | 0.667 | рука r |
+| AM_HookL | hookL | DefaultSlot | 2.000 | Contact | 0.467 | 0.23 | 0.467 | рука l |
+| AM_HookR | hookR | DefaultSlot | 2.167 | Contact | 0.700 | 0.32 | 0.533 | рука r |
+| AM_UpperL | upperL | DefaultSlot | 2.200 | Contact | 0.767 | 0.35 | 0.567 | рука l |
+| AM_UpperR | upperR | DefaultSlot | 2.200 | Contact | 0.700 | 0.32 | 0.533 | рука r |
+| AM_BodyHook | bodyHook | DefaultSlot | 1.900 | Contact | 0.900 | 0.47 | 0.800 | рука l |
+| AM_Block | block | DefaultSlot | 2.867 | GuardUp | 1.733 | 0.60 | — |  |
+| AM_BlockHit | blockHit | DefaultSlot | 1.333 | GuardUp | 0.233 | 0.17 | — |  |
+| AM_SlipL | slipL | DefaultSlot | 2.233 | Peak | 0.500 | 0.22 | — | голова dx=36 dy=3 dz=-4 |
+| AM_SlipR | slip | DefaultSlot | 2.233 | Peak | 0.500 | 0.22 | — | голова dx=-36 dy=3 dz=-4 |
+| AM_HitHead | hitHead | DefaultSlot | 1.367 | Peak | 0.633 | 0.46 | — | голова dx=-6 dy=11 dz=-7 |
+| AM_HitBody | hitBody | DefaultSlot | 1.600 | Peak | 0.700 | 0.44 | — | голова dx=4 dy=36 dz=-29 |
+| AM_Guard | guard | DefaultSlot | 2.200 | — | — | — | — | петля ×1000 (стойка-оверлей) |
 | AM_Knockdown | knockdown | DefaultSlot | 2.133 | Peak | 1.800 | 0.84 | — | голова dx=23 dy=-69 dz=-56 |
 | AM_Knockout | knockout | DefaultSlot | 4.933 | Peak | 3.000 | 0.61 | — | голова dx=-37 dy=-47 dz=-52 |
 | AM_GetUp | getUp | DefaultSlot | 2.700 | Peak | 1.067 | 0.40 | — | голова dx=39 dy=42 dz=-7 |
@@ -52,7 +52,7 @@
  {
   "montage": "AM_Jab",
   "clip": "jab",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 1.733,
   "kind": "punch",
   "notify": "Contact",
@@ -66,7 +66,7 @@
  {
   "montage": "AM_Cross",
   "clip": "cross",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.133,
   "kind": "punch",
   "notify": "Contact",
@@ -80,7 +80,7 @@
  {
   "montage": "AM_HookL",
   "clip": "hookL",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.0,
   "kind": "punch",
   "notify": "Contact",
@@ -94,7 +94,7 @@
  {
   "montage": "AM_HookR",
   "clip": "hookR",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.167,
   "kind": "punch",
   "notify": "Contact",
@@ -108,7 +108,7 @@
  {
   "montage": "AM_UpperL",
   "clip": "upperL",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.2,
   "kind": "punch",
   "notify": "Contact",
@@ -122,7 +122,7 @@
  {
   "montage": "AM_UpperR",
   "clip": "upperR",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.2,
   "kind": "punch",
   "notify": "Contact",
@@ -136,7 +136,7 @@
  {
   "montage": "AM_BodyHook",
   "clip": "bodyHook",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 1.9,
   "kind": "punch",
   "notify": "Contact",
@@ -150,7 +150,7 @@
  {
   "montage": "AM_Block",
   "clip": "block",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.867,
   "kind": "guard_up",
   "notify": "GuardUp",
@@ -164,7 +164,7 @@
  {
   "montage": "AM_BlockHit",
   "clip": "blockHit",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 1.333,
   "kind": "guard_up",
   "notify": "GuardUp",
@@ -178,7 +178,7 @@
  {
   "montage": "AM_SlipL",
   "clip": "slipL",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.233,
   "kind": "head_peak",
   "notify": "Peak",
@@ -196,7 +196,7 @@
  {
   "montage": "AM_SlipR",
   "clip": "slip",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.233,
   "kind": "head_peak",
   "notify": "Peak",
@@ -214,7 +214,7 @@
  {
   "montage": "AM_HitHead",
   "clip": "hitHead",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 1.367,
   "kind": "head_peak",
   "notify": "Peak",
@@ -232,7 +232,7 @@
  {
   "montage": "AM_HitBody",
   "clip": "hitBody",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 1.6,
   "kind": "head_peak",
   "notify": "Peak",
@@ -250,7 +250,7 @@
  {
   "montage": "AM_Guard",
   "clip": "guard",
-  "slot": "UpperBody",
+  "slot": "DefaultSlot",
   "length": 2.2,
   "kind": "head_peak",
   "notify": "",

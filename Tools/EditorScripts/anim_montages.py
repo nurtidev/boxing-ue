@@ -29,7 +29,9 @@ SETS = {  # набор: (папка клипов, папка монтажей, I
     "UEFN": (RTG_OUT + "/UEFN", ROOT, "/Game/Characters/UEFN_Mannequin/Rigs/IK_UEFN_Mannequin"),
     "Manny": (RTG_OUT + "/Manny", ROOT + "/Manny", "/Game/Characters/UE5_Mannequins/Rigs/IK_UE5_Mannequin_Retarget"),
 }
-UB, FB = "UpperBody", "DefaultSlot"
+# Слот ударов/защиты/реакций: DefaultSlot (полное тело, слой UpperBody в ABP_Boxer отложен — Docs/ANIM_SETUP.md).
+# ANIM_UB_SLOT=UpperBody — вернуть «верх отдельно», когда в AnimBP будет слой.
+UB, FB = os.environ.get("ANIM_UB_SLOT", "DefaultSlot"), "DefaultSlot"
 # монтаж, клип, слот, бленд in/out (с), петля
 MONTAGES = [
     ("AM_Jab", "jab", UB, 0.06, 0.15, 1), ("AM_Cross", "cross", UB, 0.06, 0.15, 1),

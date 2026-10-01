@@ -1,17 +1,19 @@
 // ABoxerCharacter — визуальный боец (S-41, трек B).
 //
 // Логики боя здесь НЕТ: место, курс и всё состояние приходят из FBoxingFightCore через
-// ABoxingFightGameMode::ApplyFightState каждый кадр. Персонаж только:
+// ABoxingFightGameMode каждый кадр (ApplyFightState / HandleFightEvent). Персонаж только:
 //  * доводит капсулу до точки ядра ЧЕРЕЗ CharacterMovement (скорость + входное ускорение), чтобы
 //    AnimBP Game Animation Sample (Motion Matching) видел настоящие Velocity/Acceleration;
 //  * выставляет состояние для AnimBP (BlueprintReadOnly, категория "Boxing|Anim");
-//  * проигрывает монтажи ударов/защиты/реакций, синхронизируя кадр контакта с резолюцией в ядре;
-//  * зовёт события OnPunchStarted / OnHitReceived / OnKnockdown / OnGetUp (+ делегаты).
+//  * проигрывает монтажи трека C (UEFN-скелет, /Game/BoxingLocal/Anim/AM_*), синхронизируя кадр
+//    контакта (нотифай «Contact») с резолюцией удара в ядре;
+//  * зовёт события OnPunchStarted / OnHitReceived / OnBlockedPunch / OnKnockdown / OnGetUp (+ делегаты);
+//  * физреакция на попадание на ВИДИМОМ меше (MetaHuman/Manny) через UPhysicalAnimationComponent
+//    и таблицу пружин DT_HitReaction_PhysAnim (Docs/HIT_REACTION.md).
 //
 // Ноги (локомоция) — AnimBP GASP: BP_Boxer = копия SandboxCharacter_CMC, перепривязанная к этому
-// классу (Tools/EditorScripts/fight_blueprints.py). AnimBP берёт данные через интерфейс
-// BPI_SandboxCharacter_Pawn, который реализован в самом BP; режим «стрейф + шаг» задаётся
-// через Set_CharacterInputState (рефлексией, см. PushGaspInputState).
+// классу, с AnimClass = ABP_Boxer (Tools/EditorScripts/fight_blueprints.py). Видимый персонаж —
+// child actor (BP_Kellan / BP_Manny из GASP), копирует позу ретаргетом (ABP_GenericRetarget).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -20,23 +22,29 @@
 #include "BoxerCharacter.generated.h"
 
 class UAnimMontage;
+class UChildActorComponent;
+class UDataTable;
 class UPhysicalAnimationComponent;
+class USkeletalMeshComponent;
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FBoxerPunchStartedSignature, EBoxPunchType, Punch, EBoxPunchTarget, Target);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_FourParams(FBoxerHitReceivedSignature, EBoxPunchType, Punch, EBoxPunchTarget, Target, float, Magnitude, FVector, Direction);
 DECLARE_DYNAMIC_MULTICAST_DELEGATE(FBoxerSimpleSignature);
 
-// Какой монтаж сейчас ведёт персонаж (приоритет: нокдаун > удар > уклон > реакция > блок).
+// Какой монтаж сейчас ведёт персонаж (приоритет: финал > нокдаун > удар > уклон > реакция/блок).
 UENUM(BlueprintType)
 enum class EBoxMontageSlot : uint8
 {
 	None,
 	Punch,
 	Block,
+	BlockHit,
 	Slip,
 	Hit,
 	Knockdown,
 	GetUp,
+	Finale,
+	Guard,
 };
 
 UCLASS(Blueprintable)
@@ -49,12 +57,12 @@ public:
 
 	// ---------- Связка с GameMode ----------
 
-	// Вызывается GameMode каждый кадр после шагов ядра. Snapshot — весь снимок (нужен соперник/фаза),
-	// CoreTime — внутреннее время боя ядра (сек). WorldTarget — точка ядра в мире (см), YawDeg — курс.
-	// DeltaSeconds — кадр игры: тут же выставляются скорость/ввод CharacterMovement (до его тика).
+	// Вызывается GameMode каждый кадр после шагов ядра. CoreTime — время боя ядра (сек),
+	// WorldTarget — точка ядра в мире (см), YawDeg — курс; DeltaSeconds — кадр игры: тут же
+	// выставляются скорость/ввод CharacterMovement (он тикает после GameMode).
 	void ApplyFightState(const FFightSnapshot& Snapshot, double CoreTime, const FVector& WorldTarget, float YawDeg, float DeltaSeconds);
 
-	// Событие ядра, касающееся этого бойца (GameMode раздаёт обоим участникам).
+	// Событие ядра (GameMode раздаёт обоим, реагирует защищающийся).
 	void HandleFightEvent(const FFightEvent& Event, const FVector& AttackerLocation);
 
 	// Мгновенно поставить в точку ядра (старт боя/раунда), без скорости.
@@ -69,7 +77,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing")
 	FBoxerPreset Preset;
 
-	// ---------- Состояние для AnimBP (читать в Event Blueprint Update Animation через TryGetPawnOwner) ----------
+	// ---------- Состояние для AnimBP (TryGetPawnOwner → Cast to BoxerCharacter) ----------
 
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	bool bPunching = false;
@@ -84,7 +92,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	EBoxPunchArm PunchArm = EBoxPunchArm::Lead;
 
-	// 0..1 по времени цикла удара; контакт ядра — PunchContactFraction (≈ 0.45).
+	// 0..1 по времени цикла удара; контакт ядра — на PunchContactFraction (≈ 0.45).
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	float PunchPhase = 0.f;
 
@@ -92,7 +100,7 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	float PunchPhaseAnim = 0.f;
 
-	// Длина цикла удара в ядре (с) и доля цикла, на которой ядро резолвит контакт.
+	// Длина цикла удара в ядре (с).
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	float PunchDuration = 0.f;
 
@@ -166,21 +174,32 @@ public:
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
 	EBoxMontageSlot ActiveMontageSlot = EBoxMontageSlot::None;
 
-	// ---------- Монтажи (трек C: /Game/Boxing/Anim/AM_*) ----------
-	// Пустые слоты при BeginPlay подхватываются по имени из MontageFolder (AM_Jab, AM_Cross, AM_HookL,
-	// AM_HookR, AM_UpperL, AM_UpperR, AM_Block, AM_SlipL, AM_SlipR, AM_HitHead, AM_HitBody, AM_Knockdown, AM_GetUp).
-	// Монтажи играют в слоте DefaultSlot AnimBP GASP (полное тело поверх локомоции).
+	// ---------- Монтажи (трек C, Docs/ANIM_CONTACTS.md) ----------
+	// Пустые слоты на BeginPlay подхватываются по имени AM_<Имя> из MontageFolders (по порядку):
+	// Jab, Cross, HookL, HookR, UpperL, UpperR, BodyHook, Block, BlockHit, SlipL, SlipR, HitHead, HitBody,
+	// Guard (слот UpperBody), Knockdown, Knockout, GetUp, Victory, Defeat (DefaultSlot).
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TArray<FString> MontageFolders = {TEXT("/Game/BoxingLocal/Anim"), TEXT("/Game/Boxing/Anim")};
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TMap<EBoxPunchType, TObjectPtr<UAnimMontage>> PunchMontages;
 
-	// Время кадра контакта в монтаже удара (сек от начала монтажа). Нет записи / ≤ 0 — ищется
-	// AnimNotify с именем «Contact» (или «Hit») в монтаже, иначе — середина монтажа (как в вебе).
+	// Время кадра контакта (сек от начала монтажа). Нет записи / ≤ 0 — нотифай «Contact» монтажа,
+	// иначе — середина монтажа.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TMap<EBoxPunchType, float> PunchContactTimes;
 
+	// Хук в корпус (HookL/HookR + цель Body). Пусто — обычный монтаж хука.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TObjectPtr<UAnimMontage> BodyHookMontage;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TObjectPtr<UAnimMontage> BlockMontage;
+
+	// Попадание в блок (удар принят на руки).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TObjectPtr<UAnimMontage> BlockHitMontage;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TObjectPtr<UAnimMontage> SlipLeftMontage;
@@ -197,16 +216,58 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TObjectPtr<UAnimMontage> KnockdownMontage;
 
+	// Падение, после которого боец не встаёт (досрочка в финале).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TObjectPtr<UAnimMontage> KnockoutMontage;
+
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	TObjectPtr<UAnimMontage> GetUpMontage;
 
-	// Папка автоподхвата монтажей (долгое имя пакета).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
-	FString MontageFolder = TEXT("/Game/Boxing/Anim");
+	TObjectPtr<UAnimMontage> VictoryMontage;
 
-	// Окно уклона ядра (SLIP_WINDOW) — монтаж уклона растягивается на него целиком.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TObjectPtr<UAnimMontage> DefeatMontage;
+
+	// Боевая стойка (AM_Guard, петля в DefaultSlot): idle GASP — руки вниз, поэтому стоящий боец
+	// (скорость < GuardStartSpeed дольше GuardSettleSeconds, нет удара/реакции) переходит в стойку,
+	// а на ходу (скорость > GuardStopSpeed) — обратно в локомоцию GASP; бленд GuardBlendSeconds.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	TObjectPtr<UAnimMontage> GuardMontage;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	bool bPlayGuardMontage = true;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float GuardStartSpeed = 20.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float GuardStopSpeed = 40.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float GuardSettleSeconds = 0.12f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float GuardBlendSeconds = 0.2f;
+
+	// Окно уклона ядра (SLIP_WINDOW) — пик монтажа уклона (нотифай «Peak») ставится на середину окна.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	float SlipWindowSeconds = 0.36f;
+
+	// Отход после контакта/пика проигрывается не дольше (время до контакта × фактор): хвост клипа
+	// Mixamo длинный (джеб 1.3 с после контакта), а ядро даёт на возврат ~0.2 с.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float RecoverFactor = 1.3f;
+
+	// Подъём рук в блок (с до нотифая «GuardUp» монтажа блока).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float BlockRaiseSeconds = 0.15f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float HitMontageRate = 1.6f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
+	float GetUpMontageRate = 1.3f;
 
 	// Рассинхрон позиции монтажа с фазой ядра, после которого позиция подтягивается рывком (сек).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
@@ -216,9 +277,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Montages")
 	float HitMontageMinMagnitude = 0.35f;
 
-	// Время контакта для монтажа удара (сек от начала монтажа): PunchContactTimes → notify «Contact» → середина.
+	// Время контакта для монтажа удара в голову (сек от начала): PunchContactTimes → «Contact» → середина.
 	UFUNCTION(BlueprintCallable, Category = "Boxing|Montages")
 	float GetPunchContactTime(EBoxPunchType Punch) const;
+
+	// Время нотифая монтажа по имени (AnimNotify_PlayMontageNotify NotifyName или имя нотифая); −1 — нет.
+	UFUNCTION(BlueprintCallable, Category = "Boxing|Montages")
+	static float GetMontageNotifyTime(const UAnimMontage* Montage, FName NotifyName);
+
+	// Монтаж для удара с учётом цели (хук в корпус → BodyHookMontage).
+	UFUNCTION(BlueprintCallable, Category = "Boxing|Montages")
+	UAnimMontage* GetPunchMontage(EBoxPunchType Punch, EBoxPunchTarget Target) const;
 
 	// ---------- События (BP может переопределить; C++-реализация по умолчанию играет монтажи) ----------
 
@@ -229,20 +298,19 @@ public:
 	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
 	void OnHitReceived(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction);
 
+	// Удар принят в блок (Magnitude — утечка сквозь блок).
+	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
+	void OnBlockedPunch(EBoxPunchType Punch, float Magnitude, FVector Direction);
+
 	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
 	void OnKnockdown();
 
 	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
 	void OnGetUp();
 
-	// Удар принят в блок (Magnitude — утечка сквозь блок).
+	// Физическая реакция на попадание (зовётся из OnHitReceived и, с bBlocked, из OnBlockedPunch).
 	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
-	void OnBlockedPunch(EBoxPunchType Punch, float Magnitude, FVector Direction);
-
-	// Физическая реакция на попадание (трек C). C++-заглушка: импульс в кость через
-	// UPhysicalAnimationComponent с частичной смесью физики, гаснет за PhysHitDuration.
-	UFUNCTION(BlueprintNativeEvent, Category = "Boxing|Events")
-	void HitReaction(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction);
+	void HitReaction(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction, bool bBlocked);
 
 	UPROPERTY(BlueprintAssignable, Category = "Boxing|Events")
 	FBoxerPunchStartedSignature OnPunchStartedDelegate;
@@ -256,39 +324,55 @@ public:
 	UPROPERTY(BlueprintAssignable, Category = "Boxing|Events")
 	FBoxerSimpleSignature OnGetUpDelegate;
 
-	// ---------- Физреакция (заглушка) ----------
+	// ---------- Физреакция (Docs/HIT_REACTION.md, подход 1) ----------
 
 	UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category = "Boxing|Physics")
 	TObjectPtr<UPhysicalAnimationComponent> PhysicalAnimation;
 
-	// ВЫКЛ по умолчанию: на меше GASP (UEFN-манекен + SandboxCharacter_CMC_ABP) частичная симуляция тел
-	// роняет движок через кадр после включения (Array index out of bounds: 64 into an array of size 0 в
-	// смешивании физики с позой) — см. Docs/FIGHT_GAMEPLAY.md. Трек C: физреакция через PhysicsControl/
-	// RigidBody-узел в AnimBP, либо разобраться с этим путём.
+	// Физика только на ВИДИМОМ меше подмены (MetaHuman/Manny); без подмены — выкл. (на логическом
+	// UEFN-меше GASP симуляция роняла движок, см. Docs/FIGHT_GAMEPLAY.md). Командная строка: -BoxPhysHits=0/1.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
 	bool bPhysicalHitReactions = false;
 
-	// Пружины UPhysicalAnimationComponent к анимационной позе (иначе — чистая симуляция с частичной смесью).
+	// Таблица пружин FPhysicalAnimationData по костям (строки применяются по порядку).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	bool bUsePhysicalAnimationDrive = true;
+	TSoftObjectPtr<UDataTable> HitReactionTable = TSoftObjectPtr<UDataTable>(FSoftObjectPath(TEXT("/Game/Boxing/Anim/DT_HitReaction_PhysAnim.DT_HitReaction_PhysAnim")));
 
-	// Кость, ниже которой включается физика при попадании в голову / в корпус.
+	// Корень симулируемой части (ноги и таз — анимация).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	FName PhysHeadBone = TEXT("neck_01");
-
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	FName PhysBodyBone = TEXT("spine_04");
-
-	// Импульс (изменение скорости, см/с) на единицу Magnitude.
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	float PhysImpulsePerMagnitude = 220.f;
-
-	// Пиковая доля физики в позе и время её угасания (с).
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	float PhysBlendPeak = 0.45f;
+	FName PhysRootBone = TEXT("spine_01");
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
-	float PhysHitDuration = 0.35f;
+	FName PhysHeadBone = TEXT("head");
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	FName PhysBodyBone = TEXT("spine_03");
+
+	// Огибающая смеси физики: пик = clamp(Base + PerMag × mag, 0, Max), экспоненциальный спад.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	float PhysBlendBase = 0.35f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	float PhysBlendPerMag = 0.25f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	float PhysBlendMax = 0.85f;
+
+	// Постоянная времени спада смеси (с): ~0.35 с до нуля.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	float PhysBlendTau = 0.1f;
+
+	// Масштаб импульсов таблицы HIT_REACTION.md (см/с при mag 1).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Physics")
+	float PhysImpulseScale = 1.f;
+
+	// Видимый меш, на котором работает физреакция (после инициализации; иначе null).
+	UFUNCTION(BlueprintPure, Category = "Boxing|Physics")
+	USkeletalMeshComponent* GetVisibleMesh() const;
+
+	// Текущая доля физики в позе (огибающая) — для отладки.
+	UFUNCTION(BlueprintPure, Category = "Boxing|Physics")
+	float GetPhysBlend() const { return PhysBlend; }
 
 	// ---------- Локомоция ----------
 
@@ -307,12 +391,12 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Locomotion")
 	float MaxTrackSpeed = 700.f;
 
-	// Опциональная «визуальная подмена» (BP_Kellan / BP_Manny из GASP): child actor на меше,
-	// ретаргет позы с базового манекена (ABP_GenericRetarget). Пусто — виден сам манекен.
+	// Визуальная подмена (BP_Kellan / BP_Manny из GASP): child actor на меше, ретаргет позы с
+	// логического манекена (ABP_GenericRetarget); сам манекен скрывается. Пусто — виден манекен.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Visual")
 	TSubclassOf<AActor> VisualOverrideClass;
 
-	// Последняя точка ядра в мире (см) — для отладки/камеры.
+	// Последняя точка ядра в мире (см) и курс — для отладки/камеры.
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing")
 	FVector FightTarget = FVector::ZeroVector;
 
@@ -336,22 +420,35 @@ private:
 	// Монтажи: старт/слежение/стоп.
 	bool PlaySlotMontage(EBoxMontageSlot Slot, UAnimMontage* Montage, float Rate, float StartPos = 0.f);
 	void StopSlotMontage(float BlendOut);
-	void UpdateMontages();
-	void SyncPunchMontage();
-	void SyncSlipMontage();
+	void UpdateMontages(float DeltaSeconds);
+	// Скраб «до пика / после пика»: Phase 0..1 цикла ядра, пик ядра на PeakFrac (доля), длина цикла
+	// CycleSeconds; пик монтажа — PeakTime (сек). Отход после пика ужат до RecoverFactor × PeakTime.
+	void SyncPeakMontage(float Phase, float PeakFrac, float CycleSeconds, float PeakTime);
+	void HoldAt(float Time);
 	void HoldAtEnd();
+	void StartBlockMontage(float Lead);
+	float BlockGuardUpTime() const;
 
 	void TrackFightTarget(float DeltaSeconds);
 	void PushGaspInputState();
-	void UpdatePhysicalReaction(float DeltaSeconds);
 	void ApplyVisualOverride();
+
+	void InitPhysics();
+	void UpdatePhysics(float DeltaSeconds);
 
 	UPROPERTY(Transient)
 	TObjectPtr<UAnimMontage> ActiveMontage;
 
+	UPROPERTY(Transient)
+	TObjectPtr<USkeletalMeshComponent> PhysMesh;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UChildActorComponent> VisualChild;
+
 	bool bWasDown = false;
 	bool bWasPunching = false;
 	bool bWasBlocking = false;
+	bool bWasFinale = false;
 	int32 PrevSlipSide = 0;
 	double LastPunchStart = -100.0;
 	double CoreNow = 0.0;
@@ -360,8 +457,13 @@ private:
 	bool bHasTarget = false;
 	bool bGaspStateSent = false;
 	float GaspStateTimer = 0.f;
+	EBoxPunchTarget ActivePunchTarget = EBoxPunchTarget::Head;
 
 	// Физреакция.
-	FName PhysBone = NAME_None;
-	float PhysTimeLeft = 0.f;
+	bool bPhysReady = false;
+	int32 PhysInitTries = 0;
+	float PhysBlend = 0.f;
+
+	// Стойка: сколько боец уже стоит (с).
+	float GuardStill = 0.f;
 };

@@ -17,3 +17,6 @@ Plugins/*/Intermediate/
 # Контент Game Animation Sample (Fab, лицензия Epic, ~6 ГБ) — не в git; наш — только Content/Boxing
 Content/*
 !Content/Boxing/
+
+# Python (скрипты Tools/EditorScripts)
+__pycache__/

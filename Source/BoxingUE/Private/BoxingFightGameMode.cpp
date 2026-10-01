@@ -136,8 +136,11 @@ void ABoxingFightGameMode::ReadCommandLine()
 	FString Visual;
 	if (FParse::Value(Cmd, TEXT("BoxVisual="), Visual))
 	{
-		VisualOverridePath = FSoftClassPath(Visual);
+		VisualOverridePath = Visual.Equals(TEXT("none"), ESearchCase::IgnoreCase) ? FSoftClassPath() : FSoftClassPath(Visual);
 	}
+	FParse::Value(Cmd, TEXT("BoxPhysHits="), PhysHitsOverride);
+	FParse::Value(Cmd, TEXT("BoxHitShots="), HitShotsLeft);
+	FParse::Value(Cmd, TEXT("BoxShotPrefix="), ShotPrefix);
 	FString Shots;
 	if (FParse::Value(Cmd, TEXT("BoxShots="), Shots, false))
 	{
@@ -191,6 +194,10 @@ void ABoxingFightGameMode::StartPlay()
 		if (VisualCls)
 		{
 			B->VisualOverrideClass = VisualCls;
+		}
+		if (PhysHitsOverride >= 0)
+		{
+			B->bPhysicalHitReactions = PhysHitsOverride != 0;
 		}
 		B->FinishSpawning(Xf);
 		if (!B->GetController())
@@ -353,6 +360,14 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 		{
 			UE_LOG(LogTemp, Log, TEXT("FIGHT ИТОГ: %s"), *GetResultText());
 		}
+		// Скриншот в кадре контакта (событие ядра = кадр «Contact» монтажа удара).
+		if (HitShotsLeft > 0 && (E.Kind == EFightEventKind::Hit || E.Kind == EFightEventKind::Blocked) && RealTime - LastHitShotAt >= 1.5f)
+		{
+			--HitShotsLeft;
+			LastHitShotAt = RealTime;
+			TakeShot(FString::Printf(TEXT("%s_hit%d_%s_%s"), *ShotPrefix, ++HitShotIndex, PunchName(E.Punch),
+				E.Kind == EFightEventKind::Hit ? TEXT("land") : TEXT("block")));
+		}
 		const ABoxerCharacter* Att = GetBoxer(E.Attacker);
 		const FVector AttLoc = Att ? Att->GetActorLocation() : FVector::ZeroVector;
 		for (int32 I = 0; I < 2; ++I)
@@ -408,6 +423,13 @@ FString ABoxingFightGameMode::GetResultText() const
 	return Text;
 }
 
+void ABoxingFightGameMode::TakeShot(const FString& Name)
+{
+	const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") / (Name + TEXT(".png")));
+	FScreenshotRequest::RequestScreenshot(Path, true, false);
+	UE_LOG(LogTemp, Log, TEXT("FIGHT: скриншот %s"), *Path);
+}
+
 void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 {
 	RealTime += DeltaSeconds;
@@ -442,11 +464,11 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 				const UCharacterMovementComponent* Cmc = B->GetCharacterMovement();
 				const float Speed = Cmc ? Cmc->Velocity.Size2D() : 0.f;
 				const float Acc = Cmc ? Cmc->GetCurrentAcceleration().Size2D() : 0.f;
-				Line += FString::Printf(TEXT(" | %s core(%.2f,%.2f) act(%.0f,%.0f,%.0f) yaw=%.0f err=%.1f v=%.0f a=%.0f abpV=%.0f hp=%.0f st=%.0f %s%s%s mont=%d"),
+				Line += FString::Printf(TEXT(" | %s core(%.2f,%.2f) act(%.0f,%.0f,%.0f) yaw=%.0f err=%.1f v=%.0f a=%.0f abpV=%.0f hp=%.0f st=%.0f %s%s%s mont=%d phys=%.2f"),
 					I == 0 ? TEXT("R") : TEXT("B"), F.X, F.Z, L.X, L.Y, L.Z, B->GetActorRotation().Yaw,
 					(L - B->FightTarget).Size2D(), Speed, Acc, AbpSeenSpeed(B), F.Health, F.StaminaPct,
 					F.bPunching ? PunchName(F.Punch) : TEXT("-"), F.bBlocking ? TEXT(" blk") : TEXT(""), F.bDown ? TEXT(" DOWN") : TEXT(""),
-					static_cast<int32>(B->ActiveMontageSlot));
+					static_cast<int32>(B->ActiveMontageSlot), B->GetPhysBlend());
 			}
 			UE_LOG(LogTemp, Log, TEXT("%s"), *Line);
 		}
@@ -456,10 +478,7 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 	{
 		if (RealTime >= ShotTimes[S])
 		{
-			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") /
-				FString::Printf(TEXT("fight_%02d.png"), FMath::RoundToInt(ShotTimes[S])));
-			FScreenshotRequest::RequestScreenshot(Path, true, false);
-			UE_LOG(LogTemp, Log, TEXT("FIGHT: скриншот %s"), *Path);
+			TakeShot(FString::Printf(TEXT("%s_%02d"), *ShotPrefix, FMath::RoundToInt(ShotTimes[S])));
 			ShotTimes.RemoveAt(S);
 		}
 	}

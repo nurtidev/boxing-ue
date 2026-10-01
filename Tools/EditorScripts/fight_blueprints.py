@@ -8,10 +8,14 @@
 #
 # Запуск (редактор закрыт или открыт — не важно, пишет только /Game/Boxing/Blueprints):
 #   UnrealEditor-Cmd.exe <BoxingUE.uproject> -run=pythonscript -script=<абс.путь>/fight_blueprints.py -unattended -nosplash -nullrhi
+import os
 import unreal
 
 SRC = "/Game/Blueprints/SandboxCharacter_CMC"
 DST = "/Game/Boxing/Blueprints/BP_Boxer"
+# AnimClass логического меша: по умолчанию исходный SandboxCharacter_CMC_ABP GASP (в нём есть DefaultSlot,
+# куда идут все монтажи боя). FIGHT_ABP=/Game/Boxing/Anim/ABP_Boxer — назначить AnimBP трека C.
+ABP = os.environ.get("FIGHT_ABP", "/Game/Blueprints/SandboxCharacter_CMC_ABP")
 
 
 def log(msg):
@@ -36,13 +40,24 @@ try:
 except Exception:
     cur_parent = None
 log("текущий родитель: %s" % cur_parent)
-unreal.BlueprintEditorLibrary.reparent_blueprint(bp, parent)
+if not isinstance(unreal.get_default_object(gen), unreal.BoxerCharacter):
+    unreal.BlueprintEditorLibrary.reparent_blueprint(bp, parent)
+    log("перепривязан к BoxerCharacter")
 unreal.BlueprintEditorLibrary.compile_blueprint(bp)
-eal.save_asset(DST, only_if_is_dirty=False)
 
 gen = unreal.load_object(None, DST + ".BP_Boxer_C")
 cdo = unreal.get_default_object(gen)
 mesh = cdo.get_editor_property("mesh")
+abp = unreal.load_object(None, ABP + "." + ABP.rsplit("/", 1)[1] + "_C") if eal.does_asset_exist(ABP) else None
+if abp is not None:
+    mesh.set_editor_property("anim_class", abp)
+    log("AnimClass логического меша = %s" % abp.get_path_name())
+else:
+    log("нет %s — AnimClass не менялся" % ABP)
+# Флаги боя — к значениям класса (прошлые тесты сохраняли в BP выключенную физреакцию).
+cdo.set_editor_property("physical_hit_reactions", False)  # падает движок — Docs/FIGHT_GAMEPLAY.md
+cdo.set_editor_property("play_guard_montage", True)
+eal.save_asset(DST, only_if_is_dirty=False)
 log("готово: %s, родитель BoxerCharacter=%s, меш %s, AnimClass %s" % (
     gen.get_name(), isinstance(cdo, unreal.BoxerCharacter),
     mesh.get_editor_property("skeletal_mesh_asset").get_path_name(),

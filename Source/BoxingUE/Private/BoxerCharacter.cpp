@@ -2,9 +2,11 @@
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
+#include "Animation/AnimNotifies/AnimNotify.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/ChildActorComponent.h"
 #include "Components/SkeletalMeshComponent.h"
+#include "Engine/DataTable.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "Misc/PackageName.h"
@@ -18,8 +20,18 @@ namespace
 	constexpr float TRACK_GAIN = 12.f;
 	// Ниже этой ошибки (см) и без упреждения — стоим (Motion Matching видит «стойку»).
 	constexpr float TRACK_DEADBAND = 0.4f;
-	// Запас до конца монтажа, на котором держим «последний кадр» (блок, нокдаун).
+	// Запас до конца монтажа, на котором держим «последний кадр» (нокдаун, финал).
 	constexpr float HOLD_MARGIN = 0.03f;
+	// Плавный выход из удара/уклона, когда цикл ядра закончился, — назад в стойку слота UpperBody.
+	constexpr float PUNCH_BLEND_OUT = 0.18f;
+	// Тяжёлое попадание (порог хит-стопа веба).
+	constexpr float HEAVY_MAG = 1.1f;
+	// Попыток найти видимый меш подмены (child actor создаётся при регистрации — обычно сразу).
+	constexpr int32 PHYS_INIT_TRIES = 30;
+
+	const FName NAME_Contact(TEXT("Contact"));
+	const FName NAME_Peak(TEXT("Peak"));
+	const FName NAME_GuardUp(TEXT("GuardUp"));
 }
 
 ABoxerCharacter::ABoxerCharacter()
@@ -35,21 +47,10 @@ void ABoxerCharacter::BeginPlay()
 {
 	Super::BeginPlay();
 
-	USkeletalMeshComponent* Sk = GetMesh();
-	if (Sk)
+	if (USkeletalMeshComponent* Sk = GetMesh())
 	{
-		// Без рендера (сервер, -nullrhi, скрытый базовый меш под ретаргетом) поза всё равно считается.
+		// Без рендера (-nullrhi, скрытый логический меш под ретаргетом) поза всё равно считается.
 		Sk->VisibilityBasedAnimTickOption = EVisibilityBasedAnimTickOption::AlwaysTickPoseAndRefreshBones;
-		if (PhysicalAnimation)
-		{
-			PhysicalAnimation->SetSkeletalMeshComponent(Sk);
-		}
-		// Физреакции нужны тела физассета: у меша GASP коллизия может быть выключена — тогда тел нет.
-		if (bPhysicalHitReactions && Sk->GetPhysicsAsset() &&
-			(Sk->GetCollisionEnabled() == ECollisionEnabled::NoCollision || Sk->GetCollisionEnabled() == ECollisionEnabled::QueryOnly))
-		{
-			Sk->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
-		}
 	}
 	if (UCharacterMovementComponent* Cmc = GetCharacterMovement())
 	{
@@ -59,6 +60,7 @@ void ABoxerCharacter::BeginPlay()
 	LoadDefaultMontages();
 	ApplyVisualOverride();
 	PushGaspInputState();
+	InitPhysics();
 }
 
 void ABoxerCharacter::PossessedBy(AController* NewController)
@@ -68,18 +70,25 @@ void ABoxerCharacter::PossessedBy(AController* NewController)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Монтажи: автоподхват и время контакта
+// Монтажи: автоподхват, нотифаи
 // ---------------------------------------------------------------------------------------------
 
 UAnimMontage* ABoxerCharacter::FindMontage(const TCHAR* Name) const
 {
 	const FString Asset = FString::Printf(TEXT("AM_%s"), Name);
-	const FString Package = MontageFolder / Asset;
-	if (!FPackageName::DoesPackageExist(Package))
+	for (const FString& Folder : MontageFolders)
 	{
-		return nullptr;
+		const FString Package = Folder / Asset;
+		if (!FPackageName::DoesPackageExist(Package))
+		{
+			continue;
+		}
+		if (UAnimMontage* M = LoadObject<UAnimMontage>(nullptr, *(Package + TEXT(".") + Asset), nullptr, LOAD_NoWarn | LOAD_Quiet))
+		{
+			return M;
+		}
 	}
-	return LoadObject<UAnimMontage>(nullptr, *(Package + TEXT(".") + Asset), nullptr, LOAD_NoWarn | LOAD_Quiet);
+	return nullptr;
 }
 
 void ABoxerCharacter::LoadDefaultMontages()
@@ -115,20 +124,54 @@ void ABoxerCharacter::LoadDefaultMontages()
 			++Found;
 		}
 	};
+	Fill(BodyHookMontage, TEXT("BodyHook"));
 	Fill(BlockMontage, TEXT("Block"));
+	Fill(BlockHitMontage, TEXT("BlockHit"));
 	Fill(SlipLeftMontage, TEXT("SlipL"));
 	Fill(SlipRightMontage, TEXT("SlipR"));
 	Fill(HitHeadMontage, TEXT("HitHead"));
 	Fill(HitBodyMontage, TEXT("HitBody"));
+	Fill(GuardMontage, TEXT("Guard"));
 	Fill(KnockdownMontage, TEXT("Knockdown"));
+	Fill(KnockoutMontage, TEXT("Knockout"));
 	Fill(GetUpMontage, TEXT("GetUp"));
-	UE_LOG(LogTemp, Log, TEXT("BOXER %s [%d]: монтажей найдено %d из 13 (%s)"), *GetName(), FighterIndex, Found, *MontageFolder);
+	Fill(VictoryMontage, TEXT("Victory"));
+	Fill(DefeatMontage, TEXT("Defeat"));
+	UE_LOG(LogTemp, Log, TEXT("BOXER %s [%d]: монтажей найдено %d из 19 (%s); контакт джеба %.3f с"), *GetName(), FighterIndex,
+		Found, *FString::Join(MontageFolders, TEXT(", ")), GetPunchContactTime(EBoxPunchType::Jab));
+}
+
+float ABoxerCharacter::GetMontageNotifyTime(const UAnimMontage* Montage, FName NotifyName)
+{
+	if (!Montage)
+	{
+		return -1.f;
+	}
+	const FString Wanted = NotifyName.ToString();
+	for (const FAnimNotifyEvent& N : Montage->Notifies)
+	{
+		// AnimNotify_PlayMontageNotify: имя — в самом нотифае (GetNotifyName), у «именных» — в событии.
+		const bool bMatch = N.NotifyName == NotifyName || (N.Notify && N.Notify->GetNotifyName() == Wanted);
+		if (bMatch)
+		{
+			return N.GetTriggerTime();
+		}
+	}
+	return -1.f;
+}
+
+UAnimMontage* ABoxerCharacter::GetPunchMontage(EBoxPunchType Punch, EBoxPunchTarget Target) const
+{
+	if (Target == EBoxPunchTarget::Body && BodyHookMontage && (Punch == EBoxPunchType::HookL || Punch == EBoxPunchType::HookR))
+	{
+		return BodyHookMontage;
+	}
+	const TObjectPtr<UAnimMontage>* MPtr = PunchMontages.Find(Punch);
+	return MPtr ? MPtr->Get() : nullptr;
 }
 
 float ABoxerCharacter::GetPunchContactTime(EBoxPunchType Punch) const
 {
-	const TObjectPtr<UAnimMontage>* MPtr = PunchMontages.Find(Punch);
-	const UAnimMontage* M = MPtr ? MPtr->Get() : nullptr;
 	if (const float* T = PunchContactTimes.Find(Punch))
 	{
 		if (*T > 0.f)
@@ -136,19 +179,23 @@ float ABoxerCharacter::GetPunchContactTime(EBoxPunchType Punch) const
 			return *T;
 		}
 	}
+	const UAnimMontage* M = GetPunchMontage(Punch, EBoxPunchTarget::Head);
 	if (!M)
 	{
 		return 0.f;
 	}
-	for (const FAnimNotifyEvent& N : M->Notifies)
+	const float T = GetMontageNotifyTime(M, NAME_Contact);
+	return T > 0.f ? T : M->GetPlayLength() * 0.5f; // как в вебе: контакт клипа = середина
+}
+
+float ABoxerCharacter::BlockGuardUpTime() const
+{
+	if (!BlockMontage)
 	{
-		const FString NName = N.NotifyName.ToString();
-		if (NName.Contains(TEXT("Contact")) || NName.Equals(TEXT("Hit"), ESearchCase::IgnoreCase))
-		{
-			return N.GetTime();
-		}
+		return 0.f;
 	}
-	return M->GetPlayLength() * 0.5f; // как в вебе: контакт клипа = середина (POSE_CONTACT 0.5)
+	const float T = GetMontageNotifyTime(BlockMontage, NAME_GuardUp);
+	return T > 0.f ? T : BlockMontage->GetPlayLength() * 0.6f;
 }
 
 UAnimInstance* ABoxerCharacter::GetAnimInst() const
@@ -156,6 +203,10 @@ UAnimInstance* ABoxerCharacter::GetAnimInst() const
 	const USkeletalMeshComponent* Sk = GetMesh();
 	return Sk ? Sk->GetAnimInstance() : nullptr;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Монтажи: проигрывание и синхронизация с ядром
+// ---------------------------------------------------------------------------------------------
 
 bool ABoxerCharacter::PlaySlotMontage(EBoxMontageSlot Slot, UAnimMontage* Montage, float Rate, float StartPos)
 {
@@ -188,37 +239,44 @@ void ABoxerCharacter::StopSlotMontage(float BlendOut)
 	ActiveMontageSlot = EBoxMontageSlot::None;
 }
 
-void ABoxerCharacter::HoldAtEnd()
+void ABoxerCharacter::HoldAt(float Time)
 {
 	UAnimInstance* Anim = GetAnimInst();
 	if (!Anim || !ActiveMontage)
 	{
 		return;
 	}
-	const float Len = ActiveMontage->GetPlayLength();
-	const float Hold = FMath::Max(0.f, Len - ActiveMontage->GetDefaultBlendOutTime() - HOLD_MARGIN);
-	if (Anim->Montage_IsPlaying(ActiveMontage) && Anim->Montage_GetPosition(ActiveMontage) >= Hold)
+	if (Anim->Montage_IsPlaying(ActiveMontage) && Anim->Montage_GetPosition(ActiveMontage) >= Time)
 	{
-		Anim->Montage_SetPosition(ActiveMontage, Hold);
+		Anim->Montage_SetPosition(ActiveMontage, Time);
 		Anim->Montage_Pause(ActiveMontage);
 	}
 }
 
-void ABoxerCharacter::SyncPunchMontage()
+void ABoxerCharacter::HoldAtEnd()
+{
+	if (ActiveMontage)
+	{
+		HoldAt(FMath::Max(0.f, ActiveMontage->GetPlayLength() - ActiveMontage->GetDefaultBlendOutTime() - HOLD_MARGIN));
+	}
+}
+
+void ABoxerCharacter::SyncPeakMontage(float Phase, float PeakFrac, float CycleSeconds, float PeakTime)
 {
 	UAnimInstance* Anim = GetAnimInst();
-	if (!Anim || !ActiveMontage || PunchDuration <= 0.f)
+	if (!Anim || !ActiveMontage || CycleSeconds <= 0.f)
 	{
 		return;
 	}
-	// Кусочно-линейное соответствие: [0, контакт ядра] → [0, ContactTime], [контакт, конец] → [ContactTime, длина].
+	// Кусочно-линейно: [0, пик ядра] → [0, PeakTime], [пик, конец цикла] → [PeakTime, PeakTime + отход].
 	const float Len = ActiveMontage->GetPlayLength();
-	const float C = FMath::Clamp(GetPunchContactTime(CurrentPunch), 0.02f, Len - 0.02f);
-	const float Cf = FMath::Clamp(PunchContactFraction, 0.05f, 0.95f);
-	const float U = FMath::Clamp(PunchPhase, 0.f, 1.f);
-	const bool bBefore = U < Cf;
-	const float Desired = bBefore ? (U / Cf) * C : C + ((U - Cf) / (1.f - Cf)) * (Len - C);
-	const float Rate = bBefore ? C / (Cf * PunchDuration) : (Len - C) / ((1.f - Cf) * PunchDuration);
+	const float P = FMath::Clamp(PeakTime, 0.02f, Len - 0.02f);
+	const float Recover = FMath::Min(Len - P, P * RecoverFactor);
+	const float Pf = FMath::Clamp(PeakFrac, 0.05f, 0.95f);
+	const float U = FMath::Clamp(Phase, 0.f, 1.f);
+	const bool bBefore = U < Pf;
+	const float Desired = bBefore ? (U / Pf) * P : P + ((U - Pf) / (1.f - Pf)) * Recover;
+	const float Rate = bBefore ? P / (Pf * CycleSeconds) : Recover / ((1.f - Pf) * CycleSeconds);
 	Anim->Montage_SetPlayRate(ActiveMontage, FMath::Clamp(Rate, 0.1f, 6.f));
 	if (FMath::Abs(Anim->Montage_GetPosition(ActiveMontage) - Desired) > MontageSnapTolerance)
 	{
@@ -226,23 +284,15 @@ void ABoxerCharacter::SyncPunchMontage()
 	}
 }
 
-void ABoxerCharacter::SyncSlipMontage()
+void ABoxerCharacter::StartBlockMontage(float Lead)
 {
-	UAnimInstance* Anim = GetAnimInst();
-	if (!Anim || !ActiveMontage)
+	if (BlockMontage)
 	{
-		return;
-	}
-	const float Len = ActiveMontage->GetPlayLength();
-	Anim->Montage_SetPlayRate(ActiveMontage, FMath::Clamp(Len / FMath::Max(0.05f, SlipWindowSeconds), 0.1f, 6.f));
-	const float Desired = SlipPhase * Len;
-	if (FMath::Abs(Anim->Montage_GetPosition(ActiveMontage) - Desired) > MontageSnapTolerance)
-	{
-		Anim->Montage_SetPosition(ActiveMontage, Desired);
+		PlaySlotMontage(EBoxMontageSlot::Block, BlockMontage, 1.f, FMath::Max(0.f, BlockGuardUpTime() - Lead));
 	}
 }
 
-void ABoxerCharacter::UpdateMontages()
+void ABoxerCharacter::UpdateMontages(float DeltaSeconds)
 {
 	UAnimInstance* Anim = GetAnimInst();
 	if (!Anim)
@@ -261,13 +311,24 @@ void ABoxerCharacter::UpdateMontages()
 	case EBoxMontageSlot::Punch:
 		if (bPunching)
 		{
-			SyncPunchMontage();
+			const float Contact = PunchContactTimes.Contains(CurrentPunch) && ActiveMontage != BodyHookMontage
+				? GetPunchContactTime(CurrentPunch) : GetMontageNotifyTime(ActiveMontage, NAME_Contact);
+			SyncPeakMontage(PunchPhase, PunchContactFraction, PunchDuration, Contact > 0.f ? Contact : ActiveMontage->GetPlayLength() * 0.5f);
+		}
+		else
+		{
+			StopSlotMontage(PUNCH_BLEND_OUT); // цикл ядра кончился — назад в стойку
 		}
 		break;
 	case EBoxMontageSlot::Slip:
 		if (SlipSide != 0)
 		{
-			SyncSlipMontage();
+			const float Peak = GetMontageNotifyTime(ActiveMontage, NAME_Peak);
+			SyncPeakMontage(SlipPhase, 0.5f, SlipWindowSeconds, Peak > 0.f ? Peak : ActiveMontage->GetPlayLength() * 0.25f);
+		}
+		else
+		{
+			StopSlotMontage(PUNCH_BLEND_OUT);
 		}
 		break;
 	case EBoxMontageSlot::Block:
@@ -277,7 +338,13 @@ void ABoxerCharacter::UpdateMontages()
 		}
 		else
 		{
-			HoldAtEnd();
+			HoldAt(BlockGuardUpTime()); // руки подняты — держим кадр «GuardUp», пока блок
+		}
+		break;
+	case EBoxMontageSlot::BlockHit:
+		if (!bBlocking)
+		{
+			StopSlotMontage(0.15f);
 		}
 		break;
 	case EBoxMontageSlot::Knockdown:
@@ -286,14 +353,31 @@ void ABoxerCharacter::UpdateMontages()
 			HoldAtEnd();
 		}
 		break;
+	case EBoxMontageSlot::Finale:
+		HoldAtEnd();
+		break;
+	case EBoxMontageSlot::Guard:
+		if (!bPlayGuardMontage || GetVelocity().Size2D() > GuardStopSpeed || bKnockedDown || bWasFinale)
+		{
+			StopSlotMontage(GuardBlendSeconds); // пошёл — ноги отдаём локомоции GASP
+		}
+		break;
 	default:
 		break;
 	}
 
-	// Блок держится, а слот освободился (после реакции/удара) — снова поднять руки.
-	if (bBlocking && ActiveMontageSlot == EBoxMontageSlot::None && BlockMontage)
+	// Блок держится, а слот освободился (после реакции/удара) — снова руки вверх (почти сразу у «GuardUp»).
+	if (bBlocking && (ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Guard))
 	{
-		PlaySlotMontage(EBoxMontageSlot::Block, BlockMontage, 1.f);
+		StartBlockMontage(0.05f);
+	}
+	// Боевая стойка: стоит (почти без скорости) дольше GuardSettleSeconds и слот свободен.
+	const bool bStill = GetVelocity().Size2D() < GuardStartSpeed && FightTargetVelocity.Size2D() < GuardStartSpeed;
+	GuardStill = bStill ? GuardStill + DeltaSeconds : 0.f;
+	if (bPlayGuardMontage && GuardMontage && ActiveMontageSlot == EBoxMontageSlot::None && !bKnockedDown && !bWasFinale &&
+		!bBlocking && GuardStill >= GuardSettleSeconds)
+	{
+		PlaySlotMontage(EBoxMontageSlot::Guard, GuardMontage, 1.f);
 	}
 }
 
@@ -388,6 +472,15 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 		OnGetUp();
 	}
 
+	// --- фронт: финал (победа / поражение на ногах) ---
+	const bool bFinale = Victory >= 1.f || bDefeated;
+	if (bFinale && !bWasFinale && !bKnockedDown)
+	{
+		UAnimMontage* M = Victory >= 1.f ? VictoryMontage.Get() : DefeatMontage.Get();
+		PlaySlotMontage(EBoxMontageSlot::Finale, M, 1.f);
+	}
+	bWasFinale = bFinale;
+
 	// --- фронт: новый удар (время старта цикла сменилось) ---
 	if (bPunching)
 	{
@@ -400,23 +493,27 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	}
 
 	// --- фронт: уклон ---
-	if (SlipSide != 0 && PrevSlipSide == 0 && !bKnockedDown)
+	if (SlipSide != 0 && PrevSlipSide == 0 && !bKnockedDown && ActiveMontageSlot != EBoxMontageSlot::Finale)
 	{
 		UAnimMontage* M = SlipSide < 0 ? SlipLeftMontage.Get() : SlipRightMontage.Get();
 		if (M && ActiveMontageSlot != EBoxMontageSlot::Knockdown)
 		{
-			PlaySlotMontage(EBoxMontageSlot::Slip, M, M->GetPlayLength() / FMath::Max(0.05f, SlipWindowSeconds), SlipPhase * M->GetPlayLength());
+			if (PlaySlotMontage(EBoxMontageSlot::Slip, M, 1.f))
+			{
+				const float Peak = GetMontageNotifyTime(M, NAME_Peak);
+				SyncPeakMontage(SlipPhase, 0.5f, SlipWindowSeconds, Peak > 0.f ? Peak : M->GetPlayLength() * 0.25f);
+			}
 		}
 	}
 
 	// --- фронт: блок ---
-	if (bBlocking && !bWasBlocking && BlockMontage &&
-		(ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Hit))
+	if (bBlocking && !bWasBlocking &&
+		(ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Hit || ActiveMontageSlot == EBoxMontageSlot::Guard))
 	{
-		PlaySlotMontage(EBoxMontageSlot::Block, BlockMontage, 1.f);
+		StartBlockMontage(BlockRaiseSeconds);
 	}
 
-	UpdateMontages();
+	UpdateMontages(DeltaSeconds);
 
 	bWasDown = bKnockedDown;
 	bWasPunching = bPunching;
@@ -454,50 +551,53 @@ void ABoxerCharacter::HandleFightEvent(const FFightEvent& Event, const FVector& 
 void ABoxerCharacter::OnPunchStarted_Implementation(EBoxPunchType Punch, EBoxPunchTarget Target)
 {
 	OnPunchStartedDelegate.Broadcast(Punch, Target);
-	const TObjectPtr<UAnimMontage>* MPtr = PunchMontages.Find(Punch);
-	UAnimMontage* M = MPtr ? MPtr->Get() : nullptr;
-	if (!M || bKnockedDown || PunchDuration <= 0.f)
+	UAnimMontage* M = GetPunchMontage(Punch, Target);
+	if (!M || bKnockedDown || PunchDuration <= 0.f || ActiveMontageSlot == EBoxMontageSlot::Finale)
 	{
 		return;
 	}
-	const float Len = M->GetPlayLength();
-	const float C = FMath::Clamp(GetPunchContactTime(Punch), 0.02f, Len - 0.02f);
-	const float Cf = FMath::Clamp(PunchContactFraction, 0.05f, 0.95f);
-	const float U = FMath::Clamp(PunchPhase, 0.f, Cf);
-	// Скорость так, чтобы кадр контакта монтажа совпал с резолюцией удара в ядре.
-	const float Rate = C / (Cf * PunchDuration);
-	if (PlaySlotMontage(EBoxMontageSlot::Punch, M, Rate, (U / Cf) * C))
+	ActivePunchTarget = Target;
+	if (PlaySlotMontage(EBoxMontageSlot::Punch, M, 1.f))
 	{
-		SyncPunchMontage();
+		// Скорость/позицию сразу ставит синхронизация: кадр «Contact» монтажа = резолюция удара в ядре.
+		const float Contact = (M != BodyHookMontage && PunchContactTimes.Contains(Punch)) ? GetPunchContactTime(Punch) : GetMontageNotifyTime(M, NAME_Contact);
+		SyncPeakMontage(PunchPhase, PunchContactFraction, PunchDuration, Contact > 0.f ? Contact : M->GetPlayLength() * 0.5f);
 	}
 }
 
 void ABoxerCharacter::OnHitReceived_Implementation(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction)
 {
 	OnHitReceivedDelegate.Broadcast(Punch, Target, Magnitude, Direction);
-	HitReaction(Punch, Target, Magnitude, Direction);
-	// Монтаж реакции не перебивает свой удар, уклон и нокдаун.
+	HitReaction(Punch, Target, Magnitude, Direction, false);
+	// Монтаж реакции не перебивает свой удар, уклон, нокдаун и финал.
 	if (Magnitude < HitMontageMinMagnitude || bKnockedDown ||
 		ActiveMontageSlot == EBoxMontageSlot::Punch || ActiveMontageSlot == EBoxMontageSlot::Slip ||
-		ActiveMontageSlot == EBoxMontageSlot::Knockdown || ActiveMontageSlot == EBoxMontageSlot::GetUp)
+		ActiveMontageSlot == EBoxMontageSlot::Knockdown || ActiveMontageSlot == EBoxMontageSlot::GetUp ||
+		ActiveMontageSlot == EBoxMontageSlot::Finale)
 	{
 		return;
 	}
 	UAnimMontage* M = Target == EBoxPunchTarget::Body ? HitBodyMontage.Get() : HitHeadMontage.Get();
-	PlaySlotMontage(EBoxMontageSlot::Hit, M, 1.f);
+	PlaySlotMontage(EBoxMontageSlot::Hit, M, HitMontageRate);
 }
 
 void ABoxerCharacter::OnBlockedPunch_Implementation(EBoxPunchType Punch, float Magnitude, FVector Direction)
 {
+	HitReaction(Punch, EBoxPunchTarget::Head, Magnitude, Direction, true);
+	if (BlockHitMontage && !bKnockedDown &&
+		(ActiveMontageSlot == EBoxMontageSlot::Block || ActiveMontageSlot == EBoxMontageSlot::BlockHit ||
+		 ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Guard))
+	{
+		PlaySlotMontage(EBoxMontageSlot::BlockHit, BlockHitMontage, 1.f);
+	}
 }
 
 void ABoxerCharacter::OnKnockdown_Implementation()
 {
 	OnKnockdownDelegate.Broadcast();
-	if (KnockdownMontage)
-	{
-		PlaySlotMontage(EBoxMontageSlot::Knockdown, KnockdownMontage, 1.f);
-	}
+	// Досрочка в этом же кадре (не встанет) — падение-нокаут, иначе — нокдаун.
+	UAnimMontage* M = (bKO && KnockoutMontage) ? KnockoutMontage.Get() : KnockdownMontage.Get();
+	PlaySlotMontage(EBoxMontageSlot::Knockdown, M, 1.f);
 }
 
 void ABoxerCharacter::OnGetUp_Implementation()
@@ -505,7 +605,7 @@ void ABoxerCharacter::OnGetUp_Implementation()
 	OnGetUpDelegate.Broadcast();
 	if (GetUpMontage)
 	{
-		PlaySlotMontage(EBoxMontageSlot::GetUp, GetUpMontage, 1.f);
+		PlaySlotMontage(EBoxMontageSlot::GetUp, GetUpMontage, GetUpMontageRate);
 	}
 	else if (ActiveMontageSlot == EBoxMontageSlot::Knockdown)
 	{
@@ -513,66 +613,165 @@ void ABoxerCharacter::OnGetUp_Implementation()
 	}
 }
 
-void ABoxerCharacter::HitReaction_Implementation(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction)
+// ---------------------------------------------------------------------------------------------
+// Физреакция (Docs/HIT_REACTION.md, подход 1) — на видимом меше подмены
+// ---------------------------------------------------------------------------------------------
+
+void ABoxerCharacter::InitPhysics()
 {
-	if (!bPhysicalHitReactions || !PhysicalAnimation || Magnitude <= 0.f)
+	if (bPhysReady || !bPhysicalHitReactions || !PhysicalAnimation || !VisualChild)
 	{
 		return;
 	}
-	USkeletalMeshComponent* Sk = GetMesh();
-	if (!Sk || !Sk->GetPhysicsAsset() || Sk->Bodies.Num() == 0)
+	++PhysInitTries;
+	const AActor* Vis = VisualChild->GetChildActor();
+	if (!Vis)
 	{
 		return;
 	}
-	const FName Bone = Target == EBoxPunchTarget::Body ? PhysBodyBone : PhysHeadBone;
-	if (Sk->GetBoneIndex(Bone) == INDEX_NONE)
+	// Видимое тело: компонент «Body» (MetaHuman) или первый скелетный меш с физассетом.
+	USkeletalMeshComponent* Best = nullptr;
+	TArray<USkeletalMeshComponent*> Meshes;
+	Vis->GetComponents(Meshes);
+	for (USkeletalMeshComponent* M : Meshes)
 	{
+		if (!M || !M->GetPhysicsAsset() || M->GetBoneIndex(PhysRootBone) == INDEX_NONE)
+		{
+			continue;
+		}
+		if (!Best || M->GetName().Equals(TEXT("Body"), ESearchCase::IgnoreCase))
+		{
+			Best = M;
+		}
+	}
+	if (!Best)
+	{
+		if (PhysInitTries >= PHYS_INIT_TRIES)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("BOXER %s: физреакция — у %s нет скелетного меша с физассетом, выключена"), *GetName(), *Vis->GetName());
+			bPhysicalHitReactions = false;
+		}
 		return;
 	}
-	if (PhysBone != NAME_None && PhysBone != Bone)
+	const UDataTable* Table = HitReactionTable.LoadSynchronous();
+
+	// Тела без контактов: только пружины к анимационной позе (капсулы, ринг, соперник не мешают).
+	Best->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+	Best->SetCollisionResponseToAllChannels(ECR_Ignore);
+	if (Best->Bodies.Num() == 0)
 	{
-		Sk->SetAllBodiesBelowSimulatePhysics(PhysBone, false, true);
+		UE_LOG(LogTemp, Warning, TEXT("BOXER %s: физреакция — у %s не созданы тела, выключена"), *GetName(), *Best->GetName());
+		bPhysicalHitReactions = false;
+		return;
 	}
-	// Пружины к анимационной позе: кость отлетает импульсом и возвращается к клипу.
-	FPhysicalAnimationData Data;
-	Data.bIsLocalSimulation = true;
-	Data.OrientationStrength = 1200.f;
-	Data.AngularVelocityStrength = 120.f;
-	Data.PositionStrength = 0.f;
-	Data.VelocityStrength = 0.f;
-	if (bUsePhysicalAnimationDrive)
+	PhysicalAnimation->SetSkeletalMeshComponent(Best);
+	int32 Rows = 0;
+	if (Table && Table->GetRowStruct() == FPhysicalAnimationData::StaticStruct())
 	{
-		PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Bone, Data, true);
+		for (const TPair<FName, uint8*>& Row : Table->GetRowMap())
+		{
+			if (Best->GetBoneIndex(Row.Key) == INDEX_NONE)
+			{
+				continue;
+			}
+			PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(Row.Key, *reinterpret_cast<const FPhysicalAnimationData*>(Row.Value), true);
+			++Rows;
+		}
 	}
-	Sk->SetAllBodiesBelowSimulatePhysics(Bone, true, true);
-	Sk->SetAllBodiesBelowPhysicsBlendWeight(Bone, PhysBlendPeak, false, true);
-	Sk->AddImpulse(Direction * FMath::Min(Magnitude, 3.f) * PhysImpulsePerMagnitude, Bone, true);
-	PhysBone = Bone;
-	PhysTimeLeft = PhysHitDuration;
+	if (Rows == 0)
+	{
+		// Таблицы нет — одна мягкая пружина на весь верх (значения «spine_03» из HIT_REACTION.md).
+		FPhysicalAnimationData D;
+		D.bIsLocalSimulation = true;
+		D.OrientationStrength = 1500.f;
+		D.AngularVelocityStrength = 150.f;
+		PhysicalAnimation->ApplyPhysicalAnimationSettingsBelow(PhysRootBone, D, true);
+	}
+	Best->SetAllBodiesBelowSimulatePhysics(PhysRootBone, true, true);
+	Best->SetAllBodiesBelowPhysicsBlendWeight(PhysRootBone, 0.f, false, true); // в покое — чистая анимация
+	PhysMesh = Best;
+	bPhysReady = true;
+	UE_LOG(LogTemp, Log, TEXT("BOXER %s: физреакция на %s.%s (тел %d, строк пружин %d)"), *GetName(), *Vis->GetName(),
+		*Best->GetName(), Best->Bodies.Num(), Rows);
 }
 
-void ABoxerCharacter::UpdatePhysicalReaction(float DeltaSeconds)
+void ABoxerCharacter::UpdatePhysics(float DeltaSeconds)
 {
-	if (PhysBone == NAME_None)
+	if (!bPhysReady && bPhysicalHitReactions && VisualChild && PhysInitTries < PHYS_INIT_TRIES)
+	{
+		InitPhysics();
+	}
+	if (!bPhysReady || !PhysMesh || PhysBlend <= 0.f)
 	{
 		return;
 	}
-	USkeletalMeshComponent* Sk = GetMesh();
-	PhysTimeLeft -= DeltaSeconds;
-	if (!Sk)
+	PhysBlend *= FMath::Exp(-DeltaSeconds / FMath::Max(0.01f, PhysBlendTau));
+	if (PhysBlend < 0.01f)
 	{
-		PhysBone = NAME_None;
+		PhysBlend = 0.f;
+	}
+	PhysMesh->SetAllBodiesBelowPhysicsBlendWeight(PhysRootBone, PhysBlend, false, true);
+}
+
+void ABoxerCharacter::HitReaction_Implementation(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, FVector Direction, bool bBlocked)
+{
+	if (!bPhysicalHitReactions || !bPhysReady || !PhysMesh || Magnitude <= 0.f || bKnockedDown)
+	{
 		return;
 	}
-	if (PhysTimeLeft <= 0.f)
+	// Таблица импульсов HIT_REACTION.md (см/с при mag 1, bVelChange). Side — поперёк линии удара:
+	// +Side — вправо от атакующего (туда уносит левый хук), Up — вверх.
+	const FVector Fwd = Direction.GetSafeNormal2D();
+	const FVector Side(-Fwd.Y, Fwd.X, 0.f);
+	const bool bLead = BoxingBP::ArmOf(Punch) == EBoxPunchArm::Lead;
+	const float SideSign = bLead ? 1.f : -1.f;
+	const bool bHook = Punch == EBoxPunchType::HookL || Punch == EBoxPunchType::HookR;
+	const bool bUpper = Punch == EBoxPunchType::UpperL || Punch == EBoxPunchType::UpperR;
+
+	FName Bone = PhysHeadBone;
+	FVector Dir = Fwd;
+	float Speed = 180.f;
+	float Mag = Magnitude;
+	if (bBlocked)
 	{
-		Sk->SetAllBodiesBelowSimulatePhysics(PhysBone, false, true);
-		Sk->SetAllBodiesBelowPhysicsBlendWeight(PhysBone, 0.f, false, true);
-		PhysBone = NAME_None;
-		return;
+		Bone = bLead ? TEXT("lowerarm_r") : TEXT("lowerarm_l"); // левый соперника приходит в правую руку
+		Speed = 120.f;
+		Mag *= 0.4f; // блок «съедает»
 	}
-	const float K = FMath::Clamp(PhysTimeLeft / FMath::Max(0.01f, PhysHitDuration), 0.f, 1.f);
-	Sk->SetAllBodiesBelowPhysicsBlendWeight(PhysBone, PhysBlendPeak * K, false, true);
+	else if (Target == EBoxPunchTarget::Body)
+	{
+		Bone = PhysBodyBone;
+		Speed = 220.f;
+		Dir = bHook ? (Fwd * 0.5f + Side * (0.5f * SideSign)) : Fwd;
+	}
+	else if (bHook)
+	{
+		Speed = 380.f;
+		Dir = Side * (0.7f * SideSign) + Fwd * 0.3f;
+	}
+	else if (bUpper)
+	{
+		Speed = 340.f;
+		Dir = FVector::UpVector * 0.7f + Fwd * 0.3f;
+	}
+	else if (Punch == EBoxPunchType::Cross)
+	{
+		Speed = 320.f;
+		Dir = Fwd + Side * (0.27f * SideSign); // ≈15° от бьющей руки
+	}
+	if (PhysMesh->GetBoneIndex(Bone) == INDEX_NONE)
+	{
+		Bone = PhysHeadBone;
+	}
+
+	const float Peak = FMath::Clamp(PhysBlendBase + PhysBlendPerMag * Mag, 0.f, Magnitude >= HEAVY_MAG && !bBlocked ? PhysBlendMax : 0.6f);
+	PhysBlend = FMath::Max(PhysBlend, Peak);
+	PhysMesh->SetAllBodiesBelowPhysicsBlendWeight(PhysRootBone, PhysBlend, false, true);
+	PhysMesh->AddImpulse(Dir.GetSafeNormal() * Speed * Mag * PhysImpulseScale, Bone, true);
+	if (Magnitude >= HEAVY_MAG && !bBlocked)
+	{
+		PhysMesh->AddImpulse(Fwd * Speed * Mag * 0.3f * PhysImpulseScale, PhysRootBone, true); // тяжёлый — «подсел»
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -582,7 +781,7 @@ void ABoxerCharacter::UpdatePhysicalReaction(float DeltaSeconds)
 void ABoxerCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
-	UpdatePhysicalReaction(DeltaSeconds);
+	UpdatePhysics(DeltaSeconds);
 
 	// GASP может перезаписать входное состояние (смена контроллера и т.п.) — подтверждаем раз в 0.5 с.
 	GaspStateTimer -= DeltaSeconds;
@@ -707,10 +906,16 @@ void ABoxerCharacter::ApplyVisualOverride()
 		Child->RegisterComponent();
 	}
 	Child->SetChildActorClass(VisualOverrideClass);
-	// Базовый манекен только ведёт позу (ретаргет берёт её с него) — сам не рисуется, иначе торчит сквозь
+	VisualChild = Child;
+	// Логический манекен только ведёт позу (ретаргет берёт её с него) — сам не рисуется, иначе торчит сквозь
 	// MetaHuman. Поза считается и скрытым (VisibilityBasedAnimTickOption = AlwaysTickPoseAndRefreshBones).
 	if (USkeletalMeshComponent* Sk = GetMesh())
 	{
 		Sk->SetVisibility(false, false);
 	}
+}
+
+USkeletalMeshComponent* ABoxerCharacter::GetVisibleMesh() const
+{
+	return PhysMesh.Get();
 }
