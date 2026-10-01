@@ -1634,13 +1634,17 @@ FFightSnapshot FBoxingFightCore::GetSnapshot() const
 			const double Anim = U < CONTACT_FRAC ? (U / CONTACT_FRAC) * POSE_CONTACT
 				: POSE_CONTACT + ((U - CONTACT_FRAC) / (1 - CONTACT_FRAC)) * (1 - POSE_CONTACT);
 			F.PunchPhaseAnim = static_cast<float>(Anim);
+			F.PunchDuration = static_cast<float>(Dur);
+			F.PunchTimeToContact = static_cast<float>(R.Punch.Contact - T);
 		}
+		F.bStaggered = T < R.StaggerUntil;
 		F.bBlocking = R.bBlocking;
 		F.GuardIntegrity = R.bBlocking ? static_cast<float>(GuardIntegrity(T - FMath::Max(0.0, R.BlockSince), R.GuardPressure)) : 1.f;
 		if (T < R.SlipUntil)
 		{
 			const double U = 1 - (R.SlipUntil - T) / SLIP_WINDOW;
 			F.Slip = static_cast<float>(FMath::Sin(ClampD(U, 0, 1) * PiD) * R.SlipDir);
+			F.SlipPhase = static_cast<float>(ClampD(U, 0, 1));
 		}
 		if (T < R.HurtUntil)
 		{

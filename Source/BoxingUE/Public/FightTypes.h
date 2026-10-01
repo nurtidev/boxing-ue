@@ -235,9 +235,13 @@ struct FFighterState
 	EPunchTarget PunchTarget = EPunchTarget::Head;
 	float PunchPhase = 0.f;           // 0..1 по времени цикла; контакт на CONTACT_FRAC = 0.45
 	float PunchPhaseAnim = 0.f;       // 0..1, переложено так, что контакт = 0.5 (как poseOf в hud.ts)
+	float PunchDuration = 0.f;        // с, длина всего цикла удара (End − Start) — для синхронизации монтажа
+	float PunchTimeToContact = 0.f;   // с до момента резолюции контакта (≤ 0 — контакт уже прошёл)
 	bool bBlocking = false;
 	float GuardIntegrity = 1.f;       // 1 — свежий блок, 0 — вот-вот пробьют / руки забиты
 	float Slip = 0.f;                 // −1..1: синус-кривая нырка со знаком стороны (0 — не в нырке)
+	float SlipPhase = 0.f;            // 0..1 линейная доля окна уклона (0 — не в нырке)
+	bool bStaggered = false;          // «оглушён»: после тяжёлого попадания/провала/пробития блока руки не слушаются
 	float Hurt = 0.f;                 // 0..1 «встряска» от попадания
 	EPunchTarget HurtTarget = EPunchTarget::Head;
 	bool bDown = false;               // лежит (нокдаун или проигрыш досрочкой)
