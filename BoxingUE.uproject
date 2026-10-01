@@ -1,0 +1,28 @@
+{
+	"FileVersion": 3,
+	"EngineAssociation": "5.7",
+	"Category": "",
+	"Description": "S-41: прототип бокса на UE5 — ринг, 2 MetaHuman, Motion Matching, физреакция на попадание",
+	"Modules": [
+		{
+			"Name": "BoxingUE",
+			"Type": "Runtime",
+			"LoadingPhase": "Default",
+			"AdditionalDependencies": [ "Engine" ]
+		}
+	],
+	"Plugins": [
+		{ "Name": "EnhancedInput", "Enabled": true },
+		{ "Name": "PoseSearch", "Enabled": true },
+		{ "Name": "Chooser", "Enabled": true },
+		{ "Name": "AnimationWarping", "Enabled": true },
+		{ "Name": "MotionWarping", "Enabled": true },
+		{ "Name": "PhysicsControl", "Enabled": true },
+		{ "Name": "ControlRig", "Enabled": true },
+		{ "Name": "IKRig", "Enabled": true },
+		{ "Name": "MetaHuman", "Enabled": true },
+		{ "Name": "RigLogic", "Enabled": true },
+		{ "Name": "PythonScriptPlugin", "Enabled": true },
+		{ "Name": "EditorScriptingUtilities", "Enabled": true }
+	]
+}
