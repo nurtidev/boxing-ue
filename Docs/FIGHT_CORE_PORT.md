@@ -200,10 +200,9 @@ C++ при `RoundSeconds = 55`, `BreakSeconds = 0`, обоих `bAiControlled` �
 
 ## Статус проверки
 
-- Компилятора C++ (MSVC/clang/gcc) и UE на машине пока нет — **ядро не собиралось и не запускалось**.
-- Синтаксис и семантика проверены фронтендом clang 19 (clang-tidy из Visual Studio 2022) с заглушкой
-  `CoreMinimal.h` (int32/uint32/uint8, `FMath`, мини-`TArray` без STL), таргеты `x86_64-pc-windows-msvc` и
-  `x86_64-pc-linux-gnu`, `-std=c++20 -Wall -Wextra -Wshadow-all -Wconversion` + clang static analyzer — 0 ошибок,
-  0 предупреждений (кроме оптимизационной подсказки о порядке полей/паддинге).
-- Тестовый драйвер ИИ-vs-ИИ (детерминизм по сиду, 200 сидов до конца, паритет с эталоном TS выше) написан, но
-  не запускался. Первым делом после установки компилятора: собрать его и сверить таблицу паритета.
+- Ядро собрано и запущено вне UE (заглушка `Tools/CoreHarness/CoreMinimal.h`): clang 18 и gcc 13 на Linux,
+  `-std=c++20 -Wall -Wextra -Wshadow -Werror` — 0 предупреждений.
+- Результат прогона (`Tools/CoreHarness/build.sh`): mulberry32(12345) совпадает с эталоном; детерминизм seed 42 — OK;
+  200 сидов доиграны до конца (red 134, blue 66, ничьих 0, досрочных 0); паритет с TS по всем трём сидам — OK.
+- CI: `.github/workflows/core-harness.yml` гоняет harness (clang + gcc) на каждое изменение ядра или harness.
+- Под MSVC (`build.cmd`) и внутри UE ещё не собиралось.
