@@ -14,6 +14,6 @@ Build/
 *.xcworkspace
 Plugins/*/Binaries/
 Plugins/*/Intermediate/
-# Marketplace/Fab content: лицензия Epic — не публикуем в git (ставится из Fab локально)
-Content/GameAnimationSample/
-Content/MetaHumans/
+# Контент Game Animation Sample (Fab, лицензия Epic, ~6 ГБ) — не в git; наш — только Content/Boxing
+Content/*
+!Content/Boxing/
