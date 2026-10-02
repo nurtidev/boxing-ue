@@ -86,11 +86,15 @@ def import_skm(fbx, dest_dir, name, skel):
     ui.import_animations = False
     ui.create_physics_asset = False
     d = ui.skeletal_mesh_import_data
-    d.set_editor_property("import_morph_targets", False)
+    d.set_editor_property("import_morph_targets", True)   # S-60: Heavy/Lean/Muscular (Tools/Blender/look_morphs.py)
     d.set_editor_property("use_t0_as_ref_pose", False)
     d.set_editor_property("update_skeleton_reference_pose", False)
     d.set_editor_property("import_meshes_in_bone_hierarchy", True)
     d.set_editor_property("normal_import_method", unreal.FBXNormalImportMethod.FBXNIM_IMPORT_NORMALS)
+    # S-60: повторный импорт берёт настройки из asset_import_data существующего меша (там морфы были выключены)
+    old = eal.load_asset("%s/%s" % (dest_dir, name)) if eal.does_asset_exist("%s/%s" % (dest_dir, name)) else None
+    if old is not None and old.get_editor_property("asset_import_data") is not None:
+        old.get_editor_property("asset_import_data").set_editor_property("import_morph_targets", True)
     t = unreal.AssetImportTask()
     t.filename = os.path.join(WORK, fbx)
     t.destination_path = dest_dir
@@ -115,7 +119,14 @@ def import_skm(fbx, dest_dir, name, skel):
 def kit_master():
     path = MAT_DIR + "/M_BoxerKit"
     if eal.does_asset_exist(path):
-        return eal.load_asset(path)
+        m = eal.load_asset(path)
+        # S-60: форма на морфах телосложения (Heavy/Lean/Muscular/Female) — без флага в игре серый материал по умолчанию
+        if not m.get_editor_property("used_with_morph_targets"):
+            m.set_editor_property("used_with_morph_targets", True)
+            mel.recompile_material(m)
+            eal.save_loaded_asset(m)
+            log("M_BoxerKit: used_with_morph_targets = True")
+        return m
     m = asset_tools.create_asset("M_BoxerKit", MAT_DIR, unreal.Material, unreal.MaterialFactoryNew())
 
     def vparam(name, val, x, y):
@@ -148,6 +159,7 @@ def kit_master():
     mel.connect_material_property(sparam("Specular", 0.5, -360, 160), "", unreal.MaterialProperty.MP_SPECULAR)
     mel.connect_material_property(sparam("Metallic", 0.0, -360, 260), "", unreal.MaterialProperty.MP_METALLIC)
     m.set_editor_property("used_with_skeletal_mesh", True)
+    m.set_editor_property("used_with_morph_targets", True)
     mel.recompile_material(m)
     eal.save_loaded_asset(m)
     log("создан " + path)
@@ -230,6 +242,9 @@ def make_look(corner, body, kit, gloves, mats, skin):
     feet = comps["Feet"]
     feet.set_editor_property("skeletal_mesh_asset", None)
     feet.set_editor_property("override_materials", [])
+    # S-60: пустой слот Feet в копии BP_Kellan в игре всё равно рисовал кроссовки GASP (шнурки и подошва торчали
+    # из боксёрок) — компонент скрыт; облики, кладущие в Feet майку/топ, включают его сами (set_mesh)
+    feet.set_editor_property("visible", False)
     # лицо: тон кожи
     face = comps["Face"]
     fm = face.get_editor_property("skeletal_mesh_asset") or eal.load_asset(KELLAN_FACE)

@@ -5,6 +5,7 @@
 #include "BoxingFightPlayerController.h"
 #include "BoxingGameInstanceSubsystem.h"
 #include "FightFx.h"
+#include "FightReferee.h"
 #include "Animation/AnimInstance.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -12,6 +13,7 @@
 #include "EngineUtils.h"
 #include "GameFramework/CharacterMovementComponent.h"
 #include "HAL/PlatformMisc.h"
+#include "HAL/PlatformTime.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
@@ -145,6 +147,29 @@ void ABoxingFightGameMode::ReadCommandLine()
 		bCorners = false;
 	}
 	bStageShots = FParse::Param(Cmd, TEXT("BoxStageShots"));
+	// S-57: бот «человека» за красный угол (ввод — тот же путь, что у клавиатуры) и серия боёв без UI.
+	FString BotName;
+	if (FParse::Value(Cmd, TEXT("BoxBot="), BotName))
+	{
+		bBot = true;
+		bAutopilot = false; // бот — «человек»: ИИ только синий
+		BotSkill = BotName.Equals(TEXT("novice"), ESearchCase::IgnoreCase) ? EFightBotSkill::Novice
+			: BotName.Equals(TEXT("strong"), ESearchCase::IgnoreCase) ? EFightBotSkill::Strong
+			: BotName.Equals(TEXT("masher"), ESearchCase::IgnoreCase) ? EFightBotSkill::Masher
+			: EFightBotSkill::Average;
+		if (BotSkill == EFightBotSkill::Average && !BotName.Equals(TEXT("average"), ESearchCase::IgnoreCase))
+		{
+			UE_LOG(LogTemp, Warning, TEXT("BOT: неизвестный -BoxBot=%s (novice|average|strong|masher) — играет average"), *BotName);
+		}
+	}
+	FParse::Value(Cmd, TEXT("BoxBotFights="), BotFights);
+	FParse::Value(Cmd, TEXT("BoxBotFrom="), BotFrom);
+	bGlassJaw = FParse::Param(Cmd, TEXT("BoxGlassJaw"));
+	if (BotFights > 0 && !bBot)
+	{
+		bBot = true;
+		bAutopilot = false;
+	}
 	FParse::Value(Cmd, TEXT("BoxPreGong="), PreGongHold);
 	FString Visual;
 	if (FParse::Value(Cmd, TEXT("BoxVisual="), Visual))
@@ -271,6 +296,13 @@ void ABoxingFightGameMode::StartPlay()
 		RedBoxer->Opponent = BlueBoxer;
 		BlueBoxer->Opponent = RedBoxer;
 	}
+	// S-58: рефери (место/жесты — сам по снимку ядра, ядро не трогает). -BoxNoRef — без него.
+	ABoxingReferee::SpawnFor(this);
+	if (bBot && BotFights > 0)
+	{
+		RunBotBatch(); // S-57: серия боёв бота без отрисовки → сводка в лог → выход
+		return;
+	}
 	UE_LOG(LogTemp, Log, TEXT("FIGHT: старт — класс %s, ринг (%.0f, %.0f, %.0f), сид %d, раундов %d × %.0f с, автопилот %d"),
 		*Cls->GetName(), RingFloor.X, RingFloor.Y, RingFloor.Z, Seed, Rounds, RoundSeconds, bAutopilot ? 1 : 0);
 }
@@ -319,6 +351,11 @@ void ABoxingFightGameMode::StartFight()
 	FFightConfig Cfg;
 	Cfg.Fighters[0] = RedPreset.ToSetup(bAutopilot);
 	Cfg.Fighters[1] = BluePreset.ToSetup(true);
+	if (bGlassJaw)
+	{
+		Cfg.bGlassJaw = true; // S-57: быстрый KO для проверки баннера/повтора (web ?ko=1)
+		Cfg.Fighters[1].Stats.Chin = 1.f;
+	}
 	Cfg.Rounds = Rounds;
 	Cfg.RoundSeconds = RoundSeconds;
 	Cfg.BreakSeconds = BreakSeconds;
@@ -327,6 +364,11 @@ void ABoxingFightGameMode::StartFight()
 	Cfg.bCorners = bCorners;
 	Cfg.Seed = static_cast<uint32>(Seed);
 	Core.Init(Cfg);
+	if (bBot)
+	{
+		Bot.Reset(BotSkill, Cfg.Seed, 0);
+		bBotHeld = false;
+	}
 	Snap = Core.GetSnapshot();
 	Accum = 0.0;
 	Pending.Reset();
@@ -355,8 +397,26 @@ void ABoxingFightGameMode::SetHeldStep(EFightAction Action, bool bHeld)
 	HeldStep = Action;
 }
 
+void ABoxingFightGameMode::Surrender()
+{
+	// S-59: «Сдаться» из меню паузы — между шагами ядра (мир только что снят с паузы), ГСЧ не трогается.
+	if (!bStarted || bAutopilot || Core.IsOver())
+	{
+		return;
+	}
+	Pending.Reset();
+	bHasHeldStep = false;
+	bSurrendered = Core.Concede(GetPlayerIndex());
+	Snap = Core.GetSnapshot();
+	DispatchEvents(Core.PollEvents());
+}
+
 void ABoxingFightGameMode::StepCore()
 {
+	if (bBot)
+	{
+		BotThink(); // бот «жмёт клавиши» до шага — его нажатия применятся на этой же границе
+	}
 	// Ввод — строго на границе шага: тот же сид + та же последовательность (шаг, действие) → тот же бой.
 	for (const FQueued& Q : Pending)
 	{
@@ -499,6 +559,16 @@ FSoftClassPath ABoxingFightGameMode::VisualPathFor(int32 Index) const
 			if (Am.TryLoadClass<AActor>())
 			{
 				return Am;
+			}
+		}
+		// Профи-женщина (S-60): топ в цвет угла, тело без кожи под ним. Нет класса — профи-облик угла.
+		if (Rounds > 3 && (Index == 0 ? RedPreset : BluePreset).bFemale)
+		{
+			const TCHAR* Corner = Index == 0 ? TEXT("Red") : TEXT("Blue");
+			const FSoftClassPath Fem(FString::Printf(TEXT("/Game/BoxingLocal/Characters/BP_BoxerLook_%s_Female.BP_BoxerLook_%s_Female_C"), Corner, Corner));
+			if (Fem.TryLoadClass<AActor>())
+			{
+				return Fem;
 			}
 		}
 		if (Own.TryLoadClass<AActor>())
@@ -772,4 +842,80 @@ void ABoxingFightGameMode::CheckFeelContacts()
 				Kind == 1 ? TEXT("Hit") : TEXT("Blocked"), I, Dbg.FistGapCm, Dbg.LungeCm, Dbg.AimW, Dbg.ReachW, Snap.Distance);
 		}
 	}
+}
+
+// ---------- S-57: бот «человека» ----------
+
+void ABoxingFightGameMode::BotThink()
+{
+	TArray<FFightBotCmd> Cmds;
+	bool bHeld = false;
+	EFightAction Held = EFightAction::StepBack;
+	Bot.Think(Core.GetSnapshot(), FixedStep, Cmds, bHeld, Held);
+	// Тот же путь, что у клавиатуры/геймпада (PlayerController): нажатия → QueueAction, удержание ног → SetHeldStep.
+	for (const FFightBotCmd& C : Cmds)
+	{
+		QueueAction(C.Action, C.Target);
+	}
+	if (bHeld || bBotHeld)
+	{
+		SetHeldStep(Held, bHeld); // отпускаем только своё удержание — клавиши живого игрока не трогаем
+		bBotHeld = bHeld;
+	}
+}
+
+void ABoxingFightGameMode::RunBotBatch()
+{
+	const int32 SavedSeed = Seed;
+	const double Wall0 = FPlatformTime::Seconds();
+	int32 Wins = 0, Losses = 0, Draws = 0;
+	int32 WinBy[5] = {0, 0, 0, 0, 0}, LossBy[5] = {0, 0, 0, 0, 0}; // по EFightMethod
+	int32 KdFor = 0, KdAgainst = 0, HitsFor = 0, HitsAgainst = 0, BlockedFor = 0, BlockedAgainst = 0, Slipped = 0, Gassed = 0;
+	int32 Pressed = 0;
+	const TCHAR* MethodShort[5] = {TEXT("—"), TEXT("решение"), TEXT("KO"), TEXT("RSC"), TEXT("ничья")};
+	UE_LOG(LogTemp, Log, TEXT("BOT: серия %d боёв, бот %s за красный «%s» против ИИ «%s», %d р. × %.0f с, сиды (k·2654435761 + 17) ^ 0xabc с k = %d"),
+		BotFights, UTF8_TO_TCHAR(FFightBot::SkillName(BotSkill)), *RedPreset.Name, *BluePreset.Name, Rounds, RoundSeconds, BotFrom);
+	for (int32 K = 0; K < BotFights; ++K)
+	{
+		const uint32 FightSeed = (static_cast<uint32>(BotFrom + K) * 2654435761u + 17u) ^ 0xabcu; // как harness / humanWinRate веба
+		Seed = static_cast<int32>(FightSeed);
+		StartFight();
+		int32 F[2] = {0, 0}, Kd[2] = {0, 0}, Gs = 0;
+		for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+		{
+			StepCore();
+			for (const FFightEvent& E : Core.PollEvents())
+			{
+				switch (E.Kind)
+				{
+				case EFightEventKind::Hit: ++F[E.Attacker == 0 ? 0 : 1]; break;
+				case EFightEventKind::Knockdown: ++Kd[E.Defender == 1 ? 0 : 1]; break;
+				case EFightEventKind::Blocked: ++(E.Attacker == 0 ? BlockedFor : BlockedAgainst); break;
+				case EFightEventKind::Slipped: Slipped += E.Defender == 0 ? 1 : 0; break;
+				case EFightEventKind::Gassed: ++Gs; break;
+				default: break;
+				}
+			}
+		}
+		const FFightResult& R = Core.GetResult();
+		const int32 M = FMath::Clamp(static_cast<int32>(R.Method), 0, 4);
+		const TCHAR* Verdict = R.WinnerIndex == 0 ? TEXT("ПОБЕДА") : (R.WinnerIndex < 0 ? TEXT("НИЧЬЯ") : TEXT("поражение"));
+		if (R.WinnerIndex == 0) { ++Wins; ++WinBy[M]; }
+		else if (R.WinnerIndex < 0) { ++Draws; }
+		else { ++Losses; ++LossBy[M]; }
+		HitsFor += F[0]; HitsAgainst += F[1]; KdFor += Kd[0]; KdAgainst += Kd[1]; Gassed += Gs; Pressed += Bot.PunchesPressed;
+		int32 Cards[3][2];
+		for (int32 J = 0; J < 3; ++J) { Cards[J][0] = R.JudgeTotals[J].Red; Cards[J][1] = R.JudgeTotals[J].Blue; }
+		UE_LOG(LogTemp, Log, TEXT("BOT бой %d (сид %u): %s %s%s, судьи %d-%d %d-%d %d-%d, нокдауны %d-%d, попадания %d-%d, нажато ударов %d, блоков %d, уклонов %d, «нет сил» %d"),
+			BotFrom + K, FightSeed, Verdict, MethodShort[M], R.StoppedRound > 0 ? *FString::Printf(TEXT(" в %d р."), R.StoppedRound) : TEXT(""),
+			Cards[0][0], Cards[0][1], Cards[1][0], Cards[1][1], Cards[2][0], Cards[2][1], Kd[0], Kd[1], F[0], F[1], Bot.PunchesPressed, Bot.Blocks, Bot.Slips, Gs);
+	}
+	const double N = FMath::Max(1, BotFights);
+	UE_LOG(LogTemp, Log, TEXT("BOT СВОДКА: %s, %d боёв: побед %d (%.0f%%), поражений %d, ничьих %d; победы: решением %d, KO %d, RSC %d; поражения: решением %d, KO %d, RSC %d"),
+		UTF8_TO_TCHAR(FFightBot::SkillName(BotSkill)), BotFights, Wins, 100.0 * Wins / N, Losses, Draws, WinBy[1], WinBy[2], WinBy[3], LossBy[1], LossBy[2], LossBy[3]);
+	UE_LOG(LogTemp, Log, TEXT("BOT СВОДКА: нокдаунов за бой %.2f / против %.2f; попаданий за бой %.1f / %.1f; в блок %.1f / %.1f; уклонов бота %.1f; ударов нажато %.1f; «нет сил» %.1f; %.1f с"),
+		KdFor / N, KdAgainst / N, HitsFor / N, HitsAgainst / N, BlockedFor / N, BlockedAgainst / N, Slipped / N, Pressed / N, Gassed / N,
+		FPlatformTime::Seconds() - Wall0);
+	Seed = SavedSeed;
+	FPlatformMisc::RequestExit(false, TEXT("BoxBotFights"));
 }

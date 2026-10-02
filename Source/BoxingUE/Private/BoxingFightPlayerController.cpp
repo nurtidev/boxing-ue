@@ -243,6 +243,11 @@ void ABoxingFightPlayerController::OnSlip(const FInputActionInstance& Instance, 
 
 void ABoxingFightPlayerController::OnProceed(const FInputActionInstance& Instance)
 {
+	// S-59: Start геймпада — меню паузы (ABoxingFightHUD), не «следующий раунд» (в IMC_Fight он ещё на Proceed).
+	if (WasInputKeyJustPressed(EKeys::Gamepad_Special_Right))
+	{
+		return;
+	}
 	if (ABoxingFightGameMode* GM = GetFightMode())
 	{
 		GM->QueueAction(EFightAction::Proceed);
@@ -344,6 +349,10 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	// Пара у канатов → камера за рингом: поднимаем, чтобы смотреть поверх канатов (на постановке и так высоко).
 	const double Out = FMath::Max3(0.0, FMath::Abs(Cam.X - Floor.X) - RopeHalf, FMath::Abs(Cam.Y - Floor.Y) - RopeHalf);
 	Cam.Z = Floor.Z + CamHeight + 130.f * Sm + FMath::Min(80.0, Out * 0.35) * (1.f - Sm);
+	// S-58: камера боя без постановки и эффектов (на выходе из углов камера за спиной игрока, вдоль оси пары — сторона
+	// по ней не определена): по ней рефери выбирает дальнюю сторону.
+	RefCamBase = CamMid - U * CamBack + R * CamSide;
+	bRefCamValid = true;
 	// Точка взгляда на постановке — к игроку (у своего угла он в кадре целиком).
 	const FVector Look = CamMid + U * (LookAhead * (1.f - Sm) - PairDistM * 50.f * 0.35f * Sm) + FVector(0.f, 0.f, LookHeight - 10.f * Sm);
 	if (bSideCam)
@@ -358,6 +367,7 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 		{
 			Fx->ModifyCamera(Cam, SideLook, FxFov); // S-54: тряска/наезд/толчок, камера повтора нокаута
 		}
+		RefCamFinal = Cam; // S-58
 		FightCamera->SetActorLocationAndRotation(Cam, (SideLook - Cam).Rotation());
 		UpdateRopeVisibility(Cam, Floor);
 	}
@@ -369,6 +379,7 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 		{
 			Fx->ModifyCamera(Cam, FxLook, FxFov); // S-54: тряска/наезд/толчок, камера повтора нокаута
 		}
+		RefCamFinal = Cam; // S-58
 		FightCamera->SetActorLocationAndRotation(Cam, (FxLook - Cam).Rotation());
 		UpdateRopeVisibility(Cam, Floor);
 	}

@@ -6,5 +6,5 @@ cd "$(dirname "$0")"
 CXX="${CXX:-$(command -v clang++ || command -v g++)}"
 OUT="${OUT:-${TMPDIR:-/tmp}/boxingue_sim}"
 "$CXX" -std=c++20 -O2 -Wall -Wextra -Wshadow -Werror -I. -I../../Source/BoxingUE/Public \
-	sim_main.cpp ../../Source/BoxingUE/Private/BoxingFightCore.cpp ../../Source/BoxingUE/Private/FightStaging.cpp -o "$OUT"
+	sim_main.cpp ../../Source/BoxingUE/Private/BoxingFightCore.cpp ../../Source/BoxingUE/Private/FightStaging.cpp ../../Source/BoxingUE/Private/FightBot.cpp -o "$OUT"
 "$OUT"

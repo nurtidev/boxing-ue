@@ -12,6 +12,7 @@
 #include "Components/TextBlock.h"
 #include "Components/VerticalBox.h"
 #include "Engine/World.h"
+#include "FightFx.h"
 
 namespace
 {
@@ -102,8 +103,10 @@ UWidget* UBoxingFightHudWidget::BuildUi()
 {
 	UCanvasPanel* Root = WidgetTree->ConstructWidget<UCanvasPanel>();
 
-	Place(Root, MakePanel(0), FAnchors(0.f, 0.f), FVector2D(0.f, 0.f), FMargin(32.f, 28.f, 0.f, 0.f));
-	Place(Root, MakePanel(1), FAnchors(1.f, 0.f), FVector2D(1.f, 0.f), FMargin(-32.f, 28.f, 0.f, 0.f));
+	PanelRoot0 = MakePanel(0);
+	PanelRoot1 = MakePanel(1);
+	Place(Root, PanelRoot0, FAnchors(0.f, 0.f), FVector2D(0.f, 0.f), FMargin(32.f, 28.f, 0.f, 0.f));
+	Place(Root, PanelRoot1, FAnchors(1.f, 0.f), FVector2D(1.f, 0.f), FMargin(-32.f, 28.f, 0.f, 0.f));
 
 	// Раунд и часы — по центру сверху.
 	UVerticalBox* Mid = WidgetTree->ConstructWidget<UVerticalBox>();
@@ -113,8 +116,8 @@ UWidget* UBoxingFightHudWidget::BuildUi()
 	AddV(Mid, RoundText, false, FMargin(0.f), HAlign_Center);
 	AddV(Mid, ClockText, false, FMargin(0.f, -4.f, 0.f, 0.f), HAlign_Center);
 	AddV(Mid, StatusText, false, FMargin(0.f), HAlign_Center);
-	Place(Root, Box(Mid, FLinearColor(0.f, 0.f, 0.f, 0.5f), 12.f, FMargin(26.f, 10.f, 26.f, 12.f)), FAnchors(0.5f, 0.f), FVector2D(0.5f, 0.f),
-		FMargin(0.f, 28.f, 0.f, 0.f));
+	MidBox = Box(Mid, FLinearColor(0.f, 0.f, 0.f, 0.5f), 12.f, FMargin(26.f, 10.f, 26.f, 12.f));
+	Place(Root, MidBox, FAnchors(0.5f, 0.f), FVector2D(0.5f, 0.f), FMargin(0.f, 28.f, 0.f, 0.f));
 
 	// Центральный баннер: нокдаун / перерыв / конец боя.
 	UVerticalBox* Ban = WidgetTree->ConstructWidget<UVerticalBox>();
@@ -148,13 +151,24 @@ UWidget* UBoxingFightHudWidget::BuildUi()
 	};
 	Line(TEXT("Клавиатура"), TEXT("J/K джеб/кросс · U/I хуки · N/M апперкоты · Shift+удар — в корпус · Пробел — блок · Q/E уклоны · WASD ноги · Shift+W/S пивот"));
 	Line(TEXT("Геймпад"), TEXT("X/Y джеб/кросс · LB/RB хуки · A/B апперкоты · RT+удар — в корпус · LT — блок · правый стик — уклоны · левый стик — ноги"));
-	AddV(Ctl, Txt(TEXT("F1 — скрыть подсказку · на нокдауне жми удары, чтобы встать"), 13, BoxUi::Muted), false, FMargin(0.f, 4.f, 0.f, 0.f));
+	AddV(Ctl, Txt(TEXT("F1 — скрыть подсказку · Esc / Start — пауза · на нокдауне жми удары, чтобы встать"), 13, BoxUi::Muted), false, FMargin(0.f, 4.f, 0.f, 0.f));
 	Controls = Box(Ctl, FLinearColor(0.f, 0.f, 0.f, 0.5f), 10.f, FMargin(18.f, 10.f));
 	Place(Root, Controls, FAnchors(0.5f, 1.f), FVector2D(0.5f, 1.f), FMargin(0.f, -24.f, 0.f, 0.f));
 
 	AutoBadge = Box(Txt(TEXT("АВТОПИЛОТ · оба бойца под ИИ"), 15, BoxUi::Bg, true), BoxUi::Gold, 8.f, FMargin(14.f, 6.f));
 	Place(Root, AutoBadge, FAnchors(0.5f, 1.f), FVector2D(0.5f, 1.f), FMargin(0.f, -28.f, 0.f, 0.f));
 	AutoBadge->SetVisibility(ESlateVisibility::Collapsed);
+
+	// Повтор нокаута: плашка сверху (как ТВ-врезка) и подсказка снизу.
+	UHorizontalBox* Rp = WidgetTree->ConstructWidget<UHorizontalBox>();
+	AddH(Rp, Sized(Box(nullptr, BoxUi::Red, 7.f, FMargin(0.f)), 14.f, 14.f), false, FMargin(0.f, 0.f, 14.f, 0.f));
+	AddH(Rp, Txt(TEXT("ПОВТОР"), 34, BoxUi::Text, true));
+	ReplayBadge = Box(Rp, FLinearColor(0.f, 0.f, 0.f, 0.6f), 10.f, FMargin(26.f, 8.f));
+	Place(Root, ReplayBadge, FAnchors(0.5f, 0.f), FVector2D(0.5f, 0.f), FMargin(0.f, 36.f, 0.f, 0.f));
+	ReplayBadge->SetVisibility(ESlateVisibility::Collapsed);
+	ReplayHint = Box(Txt(TEXT("любая кнопка — пропустить"), 18, BoxUi::Text, true), FLinearColor(0.f, 0.f, 0.f, 0.5f), 8.f, FMargin(18.f, 7.f));
+	Place(Root, ReplayHint, FAnchors(0.5f, 1.f), FVector2D(0.5f, 1.f), FMargin(0.f, -40.f, 0.f, 0.f));
+	ReplayHint->SetVisibility(ESlateVisibility::Collapsed);
 	return Root;
 }
 
@@ -198,6 +212,37 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		return;
 	}
 	Clock += InDeltaTime;
+
+	// Повтор нокаута (S-54/S-59): только плашка «ПОВТОР» и подсказка пропуска — счёт и панели не мешают картинке.
+	const UBoxingFightFx* Fx = UBoxingFightFx::Get(this);
+	const bool bReplay = Fx && Fx->IsReplaying();
+	if (bReplay != bReplayShown)
+	{
+		bReplayShown = bReplay;
+		const ESlateVisibility Normal = bReplay ? ESlateVisibility::Collapsed : ESlateVisibility::SelfHitTestInvisible;
+		PanelRoot0->SetVisibility(Normal);
+		PanelRoot1->SetVisibility(Normal);
+		MidBox->SetVisibility(Normal);
+		const ESlateVisibility Rp = bReplay ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed;
+		ReplayBadge->SetVisibility(Rp);
+		ReplayHint->SetVisibility(Rp);
+		ReplayTime = 0.f;
+	}
+	if (bReplay)
+	{
+		Banner->SetVisibility(ESlateVisibility::Collapsed);
+		CueBox->SetVisibility(ESlateVisibility::Collapsed);
+		Controls->SetVisibility(ESlateVisibility::Collapsed);
+		AutoBadge->SetVisibility(ESlateVisibility::Collapsed);
+		ReplayTime += InDeltaTime;
+		const UBoxingGameInstanceSubsystem* Sub = UBoxingGameInstanceSubsystem::Get(this);
+		if (Sub && Sub->bAuto && !bShotReplay && ReplayTime > 2.f)
+		{
+			bShotReplay = true;
+			Sub->TakeUiShot(TEXT("hud_replay"));
+		}
+		return;
+	}
 	const FFightSnapshot& S = GM->GetSnapshot();
 	const bool bHuman = !GM->IsAutopilot();
 	const int32 Me = GM->GetPlayerIndex();

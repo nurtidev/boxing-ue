@@ -434,6 +434,9 @@ public:
 	// Отладка: зазор «фронт кулака → поверхность цели» в последнем кадре наведения (см; −1 — нет наведения).
 	FBoxerFeelDebug GetFeelDebug() const;
 
+	// S-58: проигравший досрочкой остановлен на ногах (RSC по итогам раунда, отказ) — стоит, не падает.
+	bool IsStoppedStanding() const { return bStoppedStanding; }
+
 	// ---------- Локомоция ----------
 
 	// Шаг GASP «ходьба» (иначе бег) и стрейф (лицом к сопернику) — через Set_CharacterInputState.
@@ -510,6 +513,9 @@ private:
 	TObjectPtr<UChildActorComponent> VisualChild;
 
 	bool bWasDown = false;
+	bool bStoppedStanding = false; // S-58
+	double LastKdEventAt = -100.0; // S-58: время последнего нокдауна (мир)
+	bool bLookApplied = false;     // S-60
 	bool bWasPunching = false;
 	bool bWasBlocking = false;
 	bool bWasFinale = false;

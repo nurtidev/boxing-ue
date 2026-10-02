@@ -12,6 +12,7 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
+#include "UISettings.h"
 
 // =============================================================================================
 // Чистая логика (порт web/src/ui/fightFx.ts)
@@ -383,6 +384,10 @@ void UBoxingFightFx::SetFightersFrozen(bool bFrozen)
 
 void UBoxingFightFx::ApplyHaptic(BoxFx::EHaptic H)
 {
+	if (!BoxSettings::Vibration())
+	{
+		return; // выключена в настройках (S-59)
+	}
 	if (H == BoxFx::EHaptic::None || Clock - LastHapticAt < 0.07)
 	{
 		return; // антиспам 70 мс

@@ -42,6 +42,8 @@ public:
 
 	void ShowMain();
 	void ShowExhibition();
+	// Настройки поверх главного экрана (S-59); закрытие возвращает фокус на «Настройки».
+	void ShowSettings();
 
 	// Облёт: центр (см), радиус, высота, скорость (град/с).
 	UPROPERTY(EditAnywhere, Category = "Boxing|Menu")

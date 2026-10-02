@@ -47,3 +47,5 @@ Docs/screens/sprint1_*
 !Docs/screens/sprint1_m_hit_hit1_Jab_land.png
 Docs/screens/corners_check_*
 !Docs/screens/corners_check_hit2_Jab_land.png
+# Скриншоты по умолчанию вне git (сотни МБ); подборку добавляет продюсер: git add -f
+Docs/screens/*

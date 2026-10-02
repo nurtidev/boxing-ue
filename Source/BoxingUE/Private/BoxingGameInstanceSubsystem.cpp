@@ -11,6 +11,11 @@
 #include "Serialization/JsonReader.h"
 #include "Serialization/JsonSerializer.h"
 #include "UnrealClient.h"
+#include "Framework/Application/SlateApplication.h"
+#include "FightFx.h"
+#include "UIFightResult.h"
+#include "UIMainMenu.h"
+#include "UObject/UObjectIterator.h"
 
 const TCHAR* BoxStat::Label(int32 I)
 {
@@ -78,6 +83,7 @@ FBoxerPreset FRosterBoxer::ToPreset(bool bProFight) const
 	const TArray<float>& S = (bProFight && ProStats.Num() == BoxStat::Num) ? ProStats : Stats;
 	FBoxerPreset P;
 	P.Name = Name;
+	P.Id = Id; // облик (S-60, Appearance.json)
 	if (S.Num() == BoxStat::Num)
 	{
 		P.Power = S[BoxStat::Power];
@@ -132,6 +138,25 @@ void UBoxingGameInstanceSubsystem::Initialize(FSubsystemCollectionBase& Collecti
 		Pick.ParseIntoArray(AutoPick, TEXT(","));
 	}
 	ReadPickFromCommandLine();
+
+	FString Script;
+	if (FParse::Value(Cmd, TEXT("BoxUiScript="), Script, false) && !Script.IsEmpty())
+	{
+		Script.ParseIntoArray(ScriptSteps, TEXT(","));
+		bScript = ScriptSteps.Num() > 0;
+		ScriptTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UBoxingGameInstanceSubsystem::TickScript));
+		UE_LOG(LogTemp, Log, TEXT("UI-SCRIPT: %d шагов"), ScriptSteps.Num());
+	}
+}
+
+void UBoxingGameInstanceSubsystem::Deinitialize()
+{
+	if (ScriptTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(ScriptTicker);
+		ScriptTicker.Reset();
+	}
+	Super::Deinitialize();
 }
 
 void UBoxingGameInstanceSubsystem::LoadRoster()
@@ -318,4 +343,152 @@ void UBoxingGameInstanceSubsystem::TakeUiShot(const FString& Name) const
 	const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") / (ShotPrefix + TEXT("_") + Name + Suffix + TEXT(".png")));
 	FScreenshotRequest::RequestScreenshot(Path, true, false);
 	UE_LOG(LogTemp, Log, TEXT("UI: скриншот %s"), *Path);
+}
+
+// ======================================================================
+// Сценарий ввода (S-59): нажатия через Slate — та же навигация, что у игрока с клавиатурой/геймпадом.
+// ======================================================================
+void UBoxingGameInstanceSubsystem::SendKey(const FKey& Key, bool bDown) const
+{
+	if (!FSlateApplication::IsInitialized())
+	{
+		return;
+	}
+	const FKeyEvent E(Key, FModifierKeysState(), 0, false, 0, 0);
+	if (bDown)
+	{
+		FSlateApplication::Get().ProcessKeyDownEvent(E);
+	}
+	else
+	{
+		FSlateApplication::Get().ProcessKeyUpEvent(E);
+	}
+}
+
+bool UBoxingGameInstanceSubsystem::ScriptCondition(const FString& Step) const
+{
+	const UGameInstance* GI = GetGameInstance();
+	UWorld* W = GI ? GI->GetWorld() : nullptr;
+	const ABoxingFightGameMode* GM = W ? W->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
+	if (Step == TEXT("ring"))
+	{
+		return GM && GM->IsFightStarted();
+	}
+	if (Step.StartsWith(TEXT("ft")))
+	{
+		return GM && GM->IsFightStarted() && GM->GetCore().GetFightTime() >= FCString::Atod(*Step.Mid(2));
+	}
+	if (Step == TEXT("rp") || Step == TEXT("rpend"))
+	{
+		const UBoxingFightFx* Fx = W ? UBoxingFightFx::Get(W) : nullptr;
+		const bool bPlaying = Fx && Fx->IsReplaying();
+		return Step == TEXT("rp") ? bPlaying : !bPlaying;
+	}
+	if (Step == TEXT("res"))
+	{
+		for (TObjectIterator<UBoxingFightResultWidget> It; It; ++It)
+		{
+			if (It->GetWorld() == W && It->IsInViewport())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+	if (Step == TEXT("menu"))
+	{
+		for (TObjectIterator<UBoxingMainMenuWidget> It; It; ++It)
+		{
+			if (It->GetWorld() == W && It->IsInViewport())
+			{
+				return true;
+			}
+		}
+		return false;
+	}
+	UE_LOG(LogTemp, Warning, TEXT("UI-SCRIPT: неизвестный шаг «%s» — пропуск"), *Step);
+	return true;
+}
+
+bool UBoxingGameInstanceSubsystem::TickScript(float Dt)
+{
+	ScriptClock += Dt;
+	if (ScriptKeyUp.IsValid())
+	{
+		SendKey(ScriptKeyUp, false);
+		ScriptKeyUp = FKey();
+		ScriptWaitUntil = ScriptClock + 0.35; // дать экрану перестроиться (фокус, пересборка списка)
+		return true;
+	}
+	if (ScriptClock < ScriptWaitUntil)
+	{
+		return true;
+	}
+	if (ScriptIdx >= ScriptSteps.Num())
+	{
+		UE_LOG(LogTemp, Log, TEXT("UI-SCRIPT: сценарий выполнен"));
+		ScriptTicker.Reset();
+		return false;
+	}
+	const FString Step = ScriptSteps[ScriptIdx].TrimStartAndEnd();
+	if (ScriptStepAt <= 0.0)
+	{
+		ScriptStepAt = ScriptClock;
+	}
+	auto Next = [this, &Step]()
+	{
+		UE_LOG(LogTemp, Log, TEXT("UI-SCRIPT: [%d] %s (%.2f с)"), ScriptIdx, *Step, ScriptClock);
+		++ScriptIdx;
+		ScriptStepAt = 0.0;
+	};
+	if (Step.Len() > 1 && Step[0] == TEXT('w') && (FChar::IsDigit(Step[1]) || Step[1] == TEXT('.')))
+	{
+		ScriptWaitUntil = ScriptClock + FCString::Atod(*Step.Mid(1));
+		Next();
+	}
+	else if (Step.StartsWith(TEXT("k:")))
+	{
+		const FKey Key(FName(*Step.Mid(2)));
+		if (!Key.IsValid())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("UI-SCRIPT: нет клавиши %s"), *Step.Mid(2));
+		}
+		else
+		{
+			SendKey(Key, true);
+			ScriptKeyUp = Key;
+		}
+		Next();
+	}
+	else if (Step.StartsWith(TEXT("s:")))
+	{
+		TakeUiShot(Step.Mid(2));
+		ScriptWaitUntil = ScriptClock + 0.4;
+		Next();
+	}
+	else if (Step == TEXT("f"))
+	{
+		UE_LOG(LogTemp, Log, TEXT("UI-SCRIPT: фокус → %s"), *UBoxingUiWidget::DescribeFocus());
+		Next();
+	}
+	else if (Step == TEXT("quit"))
+	{
+		Next();
+		UE_LOG(LogTemp, Log, TEXT("UI-SCRIPT: выход"));
+		FPlatformMisc::RequestExit(false, TEXT("BoxUiScript"));
+		ScriptTicker.Reset();
+		return false;
+	}
+	else if (ScriptCondition(Step))
+	{
+		Next();
+	}
+	else if (ScriptClock - ScriptStepAt > 240.0)
+	{
+		UE_LOG(LogTemp, Error, TEXT("UI-SCRIPT: шаг «%s» не дождался 240 с — выход"), *Step);
+		FPlatformMisc::RequestExit(false, TEXT("BoxUiScript"));
+		ScriptTicker.Reset();
+		return false;
+	}
+	return true;
 }

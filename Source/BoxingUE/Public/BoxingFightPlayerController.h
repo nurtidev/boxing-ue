@@ -102,6 +102,15 @@ public:
 	// Курс камеры с мёртвой зоной (порт followYaw из web/src/ui/fightFx.ts), радианы.
 	static float FollowYaw(float CamYaw, float WantYaw, float Dt, float DeadZone, float FollowRate, float RecenterRate);
 
+	// S-58 (рефери): камера на кадре — Base — камера боя/постановки без эффектов (тряска, кадры нокдауна/перерыва,
+	// повтор), Final — итоговая. false — камеры ещё нет.
+	bool GetRefereeCamera(FVector& OutBase, FVector& OutFinal) const
+	{
+		OutBase = RefCamBase;
+		OutFinal = RefCamFinal;
+		return bRefCamValid;
+	}
+
 protected:
 	virtual void BeginPlay() override;
 	virtual void SetupInputComponent() override;
@@ -141,4 +150,8 @@ private:
 	// Постановка раунда (S-53): доля вида «из-за спины игрока» (stageCamMix веба), пара шире боевой дистанции.
 	float CamStageMix = 0.f;
 	int32 PrevSlipAxis = 0;
+	// S-58: камера для рефери (GetRefereeCamera).
+	FVector RefCamBase = FVector::ZeroVector;
+	FVector RefCamFinal = FVector::ZeroVector;
+	bool bRefCamValid = false;
 };

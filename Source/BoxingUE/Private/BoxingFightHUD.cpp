@@ -1,4 +1,5 @@
 #include "BoxingFightHUD.h"
+#include "FightReferee.h"
 
 #include "BoxerCharacter.h"
 #include "BoxingFightGameMode.h"
@@ -11,6 +12,11 @@
 #include "Misc/CommandLine.h"
 #include "UIFightHud.h"
 #include "UIFightResult.h"
+#include "BoxingGameInstanceSubsystem.h"
+#include "FightFx.h"
+#include "Kismet/GameplayStatics.h"
+#include "UIPause.h"
+#include "UISettings.h"
 
 namespace
 {
@@ -92,6 +98,7 @@ void ABoxingFightHUD::BeginPlay()
 		if (HudWidget)
 		{
 			HudWidget->AddToViewport(0);
+			HudWidget->SetControlsVisible(BoxSettings::Get().bControlsHints); // S-59: настройка «подсказки управления»
 		}
 	}
 }
@@ -105,14 +112,130 @@ void ABoxingFightHUD::Tick(float DeltaSeconds)
 		HudWidget->SetControlsVisible(!HudWidget->AreControlsVisible());
 	}
 	const ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
+	UBoxingFightFx* Fx = UBoxingFightFx::Get(this);
+	const bool bReplay = Fx && Fx->IsReplaying();
+	if (bReplay)
+	{
+		UpdateReplayInput();
+	}
+	// Пауза: Esc / Start, пока идёт бой (на повторе — пропуск повтора, после итога — свой экран).
+	else if (PC && HudWidget && !PauseWidget && !ResultWidget && GM && GM->IsFightStarted() && !GM->GetCore().IsOver()
+		&& (PC->WasInputKeyJustPressed(EKeys::Escape) || PC->WasInputKeyJustPressed(EKeys::Gamepad_Special_Right)))
+	{
+		OpenPause();
+	}
 	if (!HudWidget || ResultWidget || !GM || !GM->IsFightStarted() || !GM->GetCore().IsOver())
 	{
 		return;
 	}
 	OverTime += DeltaSeconds;
-	if (OverTime >= ResultDelay)
+	if (bReplay)
+	{
+		OverTime = FMath::Min(OverTime, ResultDelay - 0.8f); // итог — после повтора нокаута, не поверх него
+	}
+	// S-58: панель итога — когда рефери показал итог на ринге (рука победителю / развёл руками над лежащим), но не позже
+	// ResultDelay + 5 с; без рефери — как было.
+	const ABoxingReferee* Ref = ABoxingReferee::Find(GetWorld());
+	if (OverTime >= ResultDelay && (!Ref || Ref->IsResultShown() || OverTime >= ResultDelay + 5.f))
 	{
 		ShowResult();
+	}
+}
+
+void ABoxingFightHUD::UpdateReplayInput()
+{
+	// «Любая кнопка — пропустить»: клавиатура, кнопки геймпада, клик (оси стиков/мыши не в счёт).
+	APlayerController* PC = GetOwningPlayerController();
+	UBoxingFightFx* Fx = UBoxingFightFx::Get(this);
+	if (!PC || !Fx)
+	{
+		return;
+	}
+	if (AllKeys.Num() == 0)
+	{
+		EKeys::GetAllKeys(AllKeys);
+		AllKeys.RemoveAll([](const FKey& K) { return K.IsAnalog() || K.IsTouch() || K == EKeys::F1; });
+	}
+	for (const FKey& K : AllKeys)
+	{
+		if (PC->WasInputKeyJustPressed(K))
+		{
+			Fx->SkipReplay();
+			UE_LOG(LogTemp, Log, TEXT("UI: повтор пропущен (%s)"), *K.ToString());
+			return;
+		}
+	}
+}
+
+void ABoxingFightHUD::OpenPause()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	if (!PC || PauseWidget)
+	{
+		return;
+	}
+	PauseWidget = CreateWidget<UBoxingPauseWidget>(PC, UBoxingPauseWidget::StaticClass());
+	if (!PauseWidget)
+	{
+		return;
+	}
+	// Отпустить удерживаемое (шаг/блок) — на паузе ввод в ядро не идёт.
+	PC->FlushPressedKeys();
+	UGameplayStatics::SetGamePaused(this, true);
+	PauseWidget->AddToViewport(20);
+	FInputModeUIOnly Mode;
+	Mode.SetWidgetToFocus(PauseWidget->TakeWidget());
+	Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+	PC->SetInputMode(Mode);
+	PC->SetShowMouseCursor(true);
+	PauseWidget->FocusFirst();
+	const ABoxingFightGameMode* GM = GetWorld()->GetAuthGameMode<ABoxingFightGameMode>();
+	UE_LOG(LogTemp, Log, TEXT("UI: пауза (время ядра %.3f с)"), GM ? GM->GetCore().GetFightTime() : -1.0);
+}
+
+void ABoxingFightHUD::ClosePause()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	if (!PauseWidget)
+	{
+		return;
+	}
+	PauseWidget->RemoveFromParent();
+	PauseWidget = nullptr;
+	UGameplayStatics::SetGamePaused(this, false);
+	if (PC)
+	{
+		PC->FlushPressedKeys();
+		PC->SetInputMode(FInputModeGameOnly());
+		PC->SetShowMouseCursor(false);
+	}
+	if (HudWidget)
+	{
+		HudWidget->SetControlsVisible(BoxSettings::Get().bControlsHints); // могли переключить в настройках
+	}
+	if (ABoxingFightGameMode* GM = GetWorld()->GetAuthGameMode<ABoxingFightGameMode>())
+	{
+		GM->QueueAction(EFightAction::BlockEnd); // кнопку блока могли отпустить на паузе (в автопилоте — игнор)
+		UE_LOG(LogTemp, Log, TEXT("UI: продолжить (время ядра %.3f с)"), GM->GetCore().GetFightTime());
+	}
+}
+
+void ABoxingFightHUD::SurrenderFromPause()
+{
+	ClosePause();
+	if (ABoxingFightGameMode* GM = GetWorld()->GetAuthGameMode<ABoxingFightGameMode>())
+	{
+		GM->Surrender();
+		OverTime = FMath::Max(0.f, ResultDelay - 1.2f); // нокаута нет — итог почти сразу
+	}
+}
+
+void ABoxingFightHUD::ExitToMenu()
+{
+	UGameplayStatics::SetGamePaused(this, false);
+	if (UBoxingGameInstanceSubsystem* S = UBoxingGameInstanceSubsystem::Get(this))
+	{
+		S->OpenMenu(this);
 	}
 }
 

@@ -26,6 +26,7 @@ public:
 protected:
 	virtual UWidget* BuildUi() override;
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+	virtual bool HandleBack() override { Back(); return true; }
 
 	UFUNCTION()
 	void OnSearchChanged(const FText& Text);

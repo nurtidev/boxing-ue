@@ -1,4 +1,5 @@
 #include "BoxerCharacter.h"
+#include "BoxerLook.h"
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
@@ -514,7 +515,10 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	{
 		SlipSide = PrevSlipSide; // края синуса (sin 0 = 0) — сторона прежняя
 	}
-	bKnockedDown = F.bDown;
+	// S-58: остановлен на ногах (RSC по итогам раунда, отказ/сдался — досрочка без нокдауна в этом кадре) не падает
+	// (web S-32 stoppageView): ядро помечает лежащим любого проигравшего досрочкой, а рефери разводит руками и объявляет.
+	bStoppedStanding = F.bKO && !bWasDown && (bStoppedStanding || GetWorld()->GetTimeSeconds() - LastKdEventAt > 0.5);
+	bKnockedDown = F.bDown && !bStoppedStanding;
 	bKO = F.bKO;
 	bStunned = F.bStaggered;
 	Hurt = F.Hurt;
@@ -596,6 +600,10 @@ void ABoxerCharacter::HandleFightEvent(const FFightEvent& Event, const FVector& 
 	if (Event.Defender != FighterIndex)
 	{
 		return;
+	}
+	if (Event.Kind == EFightEventKind::Knockdown)
+	{
+		LastKdEventAt = GetWorld()->GetTimeSeconds(); // S-58: досрочка нокдауном (3-й / нокаут) — падает
 	}
 	FVector Dir = GetActorLocation() - AttackerLocation;
 	Dir.Z = 0.f;
@@ -870,6 +878,21 @@ void ABoxerCharacter::Tick(float DeltaSeconds)
 		SetupFeel();
 	}
 	UpdateFeel(DeltaSeconds);
+	// S-60: облик бойца (рост, телосложение, кожа, волосы) — как только появился видимый child actor.
+	if (!bLookApplied && VisualChild && VisualChild->GetChildActor())
+	{
+		bLookApplied = true;
+		FBoxerLook Look;
+		if (UBoxerLookLibrary::FindLook(Preset.Id, Preset.Name, Look))
+		{
+			const bool bHeadgear = VisualOverrideClass && VisualOverrideClass->GetName().EndsWith(TEXT("_Amateur_C"));
+			UBoxerLookLibrary::ApplyBoxerLook(VisualChild->GetChildActor(), VisualChild, Look, bHeadgear);
+		}
+		else
+		{
+			UE_LOG(LogTemp, Log, TEXT("LOOK: нет записи облика для %s (%s) — по умолчанию"), *Preset.Name, *Preset.Id);
+		}
+	}
 
 	// GASP может перезаписать входное состояние (смена контроллера и т.п.) — подтверждаем раз в 0.5 с.
 	GaspStateTimer -= DeltaSeconds;

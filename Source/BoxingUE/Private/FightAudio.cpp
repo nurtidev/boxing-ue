@@ -5,6 +5,7 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/ConfigCacheIni.h"
 #include "Sound/SoundWave.h"
+#include "UISettings.h"
 
 namespace
 {
@@ -15,6 +16,13 @@ namespace
 
 	float Clamp01(float X) { return FMath::Clamp(X, 0.f, 1.f); }
 	float Jitter(float A) { return 1.f + (FMath::FRand() * 2.f - 1.f) * A; }
+	// Громкость из настроек (S-59, ux): реакции зала — «Зал», остальное (удары, блок, гонг, падение) — «Эффекты»; обе × «Общая».
+	float SettingsGain(const USoundWave* W)
+	{
+		const FString N = W ? W->GetName() : FString();
+		const bool bCrowd = N.StartsWith(TEXT("ooh")) || N.StartsWith(TEXT("gasp")) || N.StartsWith(TEXT("cheer")) || N.StartsWith(TEXT("crowd"));
+		return bCrowd ? BoxSettings::CrowdGain() : BoxSettings::SfxGain();
+	}
 
 	const FName SET_HEAD(TEXT("head"));
 	const FName SET_BODY(TEXT("body"));
@@ -96,7 +104,7 @@ void UBoxingFightAudio::SetMuted(bool bMute)
 	}
 	if (Crowd)
 	{
-		Crowd->SetVolumeMultiplier(bMute ? 0.f : FMath::Max(0.001f, CrowdLevel * MASTER));
+		Crowd->SetVolumeMultiplier(bMute ? 0.f : FMath::Max(0.001f, CrowdLevel * MASTER * BoxSettings::CrowdGain()));
 	}
 	if (bMute)
 	{
@@ -128,6 +136,11 @@ void UBoxingFightAudio::PlayNow(USoundWave* W, float Vol, float Pitch, float Low
 {
 	UWorld* Wd = World.Get();
 	if (!Wd || !W || bMuted)
+	{
+		return;
+	}
+	Vol *= SettingsGain(W);
+	if (Vol <= 0.001f)
 	{
 		return;
 	}
@@ -306,7 +319,7 @@ void UBoxingFightAudio::StartCrowd()
 	if (Crowd)
 	{
 		CrowdLevel = 0.001f;
-		Crowd->SetVolumeMultiplier(bMuted ? 0.f : CrowdLevel);
+		Crowd->SetVolumeMultiplier(bMuted ? 0.f : FMath::Max(0.001f, CrowdLevel * BoxSettings::CrowdGain()));
 		Crowd->Play(FMath::FRand() * W->Duration);
 		if (bLog)
 		{
@@ -357,5 +370,5 @@ void UBoxingFightAudio::Update(float RealDt)
 	const float Wave = 0.5f + 0.3f * FMath::Sin(Swell * 0.23f) + 0.2f * FMath::Sin(Swell * 0.61f + 1.3f);
 	const float Level = CROWD_BASE * (0.8f + 0.35f * Wave) + 0.3f * Excite;
 	CrowdLevel += (Level - CrowdLevel) * (1.f - FMath::Exp(-Dt / 0.25f));
-	Crowd->SetVolumeMultiplier(bMuted ? 0.f : FMath::Max(0.001f, CrowdLevel * MASTER));
+	Crowd->SetVolumeMultiplier(bMuted ? 0.f : FMath::Max(0.001f, CrowdLevel * MASTER * BoxSettings::CrowdGain()));
 }

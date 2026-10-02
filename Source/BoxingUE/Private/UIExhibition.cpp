@@ -97,7 +97,7 @@ UWidget* UBoxingExhibitionWidget::BuildUi()
 	AddH(Head, Btn(TEXT("← Меню"), [this]() { Back(); }, EBoxBtn::Ghost, 16), false, FMargin(0.f, 0.f, 20.f, 0.f));
 	AddH(Head, Txt(TEXT("Выставка"), 34, BoxUi::Text, true));
 	AddH(Head, Spacer(1.f, 1.f), true);
-	AddH(Head, Txt(TEXT("Клик — в красный угол, второй — в синий · повторный клик снимает"), 15, BoxUi::Muted));
+	AddH(Head, Txt(TEXT("Клик / Enter / A — в красный угол, второй — в синий, повторно — снять · Esc / B — в меню"), 15, BoxUi::Muted));
 	AddV(Page, Head, false, FMargin(0.f, 0.f, 0.f, 20.f));
 
 	UHorizontalBox* Body = WidgetTree->ConstructWidget<UHorizontalBox>();
@@ -134,6 +134,7 @@ UWidget* UBoxingExhibitionWidget::BuildUi()
 	List = WidgetTree->ConstructWidget<UScrollBox>();
 	List->SetScrollbarThickness(FVector2D(8.f, 8.f));
 	List->SetAlwaysShowScrollbar(true);
+	List->SetScrollWhenFocusChanges(EScrollWhenFocusChanges::AnimatedScroll); // геймпад: строка в фокусе всегда видна
 	AddV(Left, List, true);
 	AddH(Body, Left, true, FMargin(0.f, 0.f, 28.f, 0.f), VAlign_Fill);
 
@@ -149,10 +150,7 @@ UWidget* UBoxingExhibitionWidget::BuildUi()
 
 void UBoxingExhibitionWidget::FocusFirst()
 {
-	if (FirstTab)
-	{
-		FirstTab->SetKeyboardFocus();
-	}
+	FocusKey(TabLabel(Tab));
 }
 
 void UBoxingExhibitionWidget::RebuildFilters()
@@ -241,7 +239,7 @@ UWidget* UBoxingExhibitionWidget::MakeRow(const FRosterBoxer& B)
 	const FLinearColor Fill = bRed ? FMath::Lerp(BoxUi::Panel, BoxUi::Red, 0.28f)
 		: (bBlue ? FMath::Lerp(BoxUi::Panel, BoxUi::Blue, 0.28f) : BoxUi::Panel);
 	const FString Id = B.Id;
-	return BtnWith(Row, [this, Id]() { Pick(Id); }, Fill, BoxUi::PanelHi);
+	return BtnWith(Row, [this, Id]() { Pick(Id); }, Fill, BoxUi::PanelHi, 8.f, TEXT("row:") + Id);
 }
 
 void UBoxingExhibitionWidget::RebuildList()

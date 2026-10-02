@@ -94,11 +94,15 @@ def import_skm(fbx, dest_dir, name, skel):
     ui.import_animations = False
     ui.create_physics_asset = False
     d = ui.skeletal_mesh_import_data
-    d.set_editor_property("import_morph_targets", False)
+    d.set_editor_property("import_morph_targets", True)   # S-60: Heavy/Lean/Muscular (Tools/Blender/look_morphs.py)
     d.set_editor_property("use_t0_as_ref_pose", False)
     d.set_editor_property("update_skeleton_reference_pose", False)
     d.set_editor_property("import_meshes_in_bone_hierarchy", True)
     d.set_editor_property("normal_import_method", unreal.FBXNormalImportMethod.FBXNIM_IMPORT_NORMALS)
+    # S-60: повторный импорт берёт настройки из asset_import_data существующего меша (там морфы были выключены)
+    old = eal.load_asset("%s/%s" % (dest_dir, name)) if eal.does_asset_exist("%s/%s" % (dest_dir, name)) else None
+    if old is not None and old.get_editor_property("asset_import_data") is not None:
+        old.get_editor_property("asset_import_data").set_editor_property("import_morph_targets", True)
     t = unreal.AssetImportTask()
     t.filename = os.path.join(WORK, fbx)
     t.destination_path = dest_dir
@@ -223,6 +227,20 @@ def make_amateur(corner, variant, feet_mesh, gloves, mats, body=None):
     finish(bp, path)
 
 
+def make_female_pro(corner, top, mats, body):
+    """S-60: профи-женщина — копия BP_BoxerLook_<угол> (перчатки/трусы профи) + спортивный топ в цвет угла (слот Feet)
+    и тело без кожи под топом. Морф Female (и телосложение) выставляет рантайм — ApplyBoxerLook."""
+    path = "%s/BP_BoxerLook_%s_Female" % (LOCAL_DIR, corner)
+    bp = fresh_copy(BOXER_LOOK % corner, path)
+    comps = bp_components(bp)
+    skin = comps["Body"].get_editor_property("override_materials")
+    skin_mi = skin[0] if skin else None
+    comps["Body"].set_editor_property("skeletal_mesh_asset", body)
+    comps["Body"].set_editor_property("override_materials", [skin_mi] if skin_mi else [])
+    set_mesh(comps, "Feet", top, {"Top": mats["vest_" + corner]})
+    finish(bp, path)
+
+
 # ------------------------------------------------------------------ рефери
 def make_referee(kind, meshes, mats, skin):
     path = "%s/BP_RefereeLook_%s" % (LOCAL_DIR, kind)
@@ -288,11 +306,16 @@ def main():
         vest_hg = import_skm("boxer_vest_headgear.fbx", LOCAL_DIR, "SKM_BoxerVestHeadgear", skel)
         body_am = import_skm("boxer_body_am.fbx", LOCAL_DIR, "SKM_BoxerBody_Amateur", skel)
         copy_body_setup(body_am, kb)
-        for m in (hg, gloves, vest, vest_hg, body_am):
+        # S-60: профи-женщины — спортивный топ + тело без кожи под ним
+        top = import_skm("boxer_top.fbx", LOCAL_DIR, "SKM_BoxerTop", skel)
+        body_top = import_skm("boxer_body_top.fbx", LOCAL_DIR, "SKM_BoxerBody_Top", skel)
+        copy_body_setup(body_top, kb)
+        for m in (hg, gloves, vest, vest_hg, body_am, top, body_top):
             eal.save_loaded_asset(m)
         for corner in CORNERS:
             make_amateur(corner, "Amateur", vest_hg, gloves, mats, body_am)
             make_amateur(corner, "AmateurElite", vest, gloves, mats, body_am)
+            make_female_pro(corner, top, mats, body_top)
 
     if not only or "ref" in only:
         meshes = {

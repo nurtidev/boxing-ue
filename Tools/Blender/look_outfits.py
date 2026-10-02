@@ -37,6 +37,10 @@ from mathutils import Matrix, Vector
 from mathutils.bvhtree import BVHTree
 from mathutils.kdtree import KDTree
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(globals().get("__file__") or "C:/Users/user/Desktop/boxing-ue/Tools/Blender/x.py")))
+import look_morphs  # noqa: E402  S-60: ключи телосложения Heavy/Lean/Muscular
+
 ROOT = "C:/Users/user/Desktop/boxing-ue/"
 W = ROOT + "Saved/LookWork/"
 WEB = "C:/Users/user/Desktop/boxing/web/public/models/"
@@ -82,6 +86,7 @@ VEST_OFF = 0.006
 VEST_OFF_TUCK = 0.003
 VEST_THICK = 0.004
 VEST_SKIN_MARGIN = 0.03    # кожа под майкой удаляется не ближе 3 см к её краям
+TOP_BOT = 1.135            # S-60: низ спортивного топа (под грудью ключа Female, look_morphs.FEM_BREAST_*)
 GLOVE_SCALE = 1.0
 
 # ---- шлем ----
@@ -803,7 +808,10 @@ def make_ref_body(full, rig, kind):
 
 
 # ------------------------------------------------------------------ любительская форма
-def make_vest(full, rig):
+def make_vest(full, rig, bot=None, name="vest", mat="Vest"):
+    """Майка любителя (bot=None → VEST_BOT, заправлена в трусы) или спортивный топ профи-женщины (bot — под грудью,
+    S-60). Возвращает меш и функцию «кожа целиком под ней»."""
+    VEST_BOT = bot if bot is not None else globals()["VEST_BOT"]
     sh = rig.side["l"]["shoulder"]
     shoulder_x = abs(sh.x)
     armpit_z = sh.z - 0.07
@@ -841,14 +849,14 @@ def make_vest(full, rig):
     cuts = [Plane((0, 0, VEST_BOT), (0, 0, 1))]
 
     def off(co):
-        if co.z < 1.09:
+        if co.z < VEST_BOT + 0.09:
             t = max(0.0, min(1.0, (co.z - VEST_BOT) / 0.09))
             return VEST_OFF_TUCK + (VEST_OFF - VEST_OFF_TUCK) * t
         return VEST_OFF
 
-    o = region_shell(full, "vest", lambda c: c.z > VEST_BOT - 0.03 and c.z < neck + 0.08, cuts, keep, off,
+    o = region_shell(full, name, lambda c: c.z > VEST_BOT - 0.03 and c.z < neck + 0.08, cuts, keep, off,
                      VEST_THICK, smooth_iters=6, drop_w=limb, rim_iters=30)
-    set_mats(o, ["Vest"], lambda p: 0)
+    set_mats(o, [mat], lambda p: 0)
 
     def under(c, w):
         """Кожа целиком под майкой (с запасом VEST_SKIN_MARGIN от краёв) — её можно не рисовать."""
@@ -1208,6 +1216,7 @@ def main():
     face.data.materials.clear()
     face.data.materials.append(fm)
     rig = Rig(arm)
+    field = look_morphs.Field(full)        # S-60: ключи телосложения для формы любителя
     log("rig neck", tuple(round(x, 3) for x in rig.neck), "front_y", round(rig.front_y, 3))
     exports = []          # (obj, fname)
     sets = {}
@@ -1243,6 +1252,15 @@ def main():
         hg = make_headgear(face)
         gloves = make_gloves_am(arm)
         vest_hg = join([dup(vest, "vest_hg_v"), dup(hg, "vest_hg_h")], "vest_headgear")
+        # S-60: профи-женщины — спортивный топ (низ под грудью) и тело без кожи под ним
+        top, under_top = make_vest(full, rig, bot=TOP_BOT, name="top", mat="Top")
+        body_top = make_boxer_body_am(full, under_top)
+        body_top.name = body_top.data.name = "boxer_body_top"
+        transfer_weights(top, full)
+        push_out(top, [full, face], 0.004)
+        exports += [(top, "boxer_top.fbx"), (body_top, "boxer_body_top.fbx")]
+        for o in (vest, body_am, vest_hg, top, body_top):  # шлем у шва лица — поле там 0, отдельный шлем — без ключей
+            look_morphs.add_keys(o, field)
         exports += [(vest, "boxer_vest.fbx"), (hg, "boxer_headgear.fbx"), (vest_hg, "boxer_vest_headgear.fbx"),
                     (gloves, "boxer_gloves_am.fbx"), (body_am, "boxer_body_am.fbx")]
         torso = dup(full, "preview_body")           # превью: тело без головы (голова — лицо Kellan)

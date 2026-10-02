@@ -83,7 +83,8 @@ UWidget* UBoxingFightResultWidget::BuildUi()
 		{
 			AddV(Col, Txt(FString::Printf(TEXT("%s — %s"), *Names[0], *Names[1]), 34, BoxUi::Text, true), false, FMargin(0.f, 4.f, 0.f, 0.f), HAlign_Center);
 		}
-		AddV(Col, Txt(MethodLine(R), 22, BoxUi::Accent, true), false, FMargin(0.f, 6.f, 0.f, 22.f), HAlign_Center);
+		const FString Method = GM->WasSurrendered() ? FString::Printf(TEXT("Сдача — остановка боя (RSC) · раунд %d"), R.StoppedRound) : MethodLine(R);
+		AddV(Col, Txt(Method, 22, BoxUi::Accent, true), false, FMargin(0.f, 6.f, 0.f, 22.f), HAlign_Center);
 
 		// Карты судей по раундам.
 		UGridPanel* Grid = WidgetTree->ConstructWidget<UGridPanel>();
@@ -154,10 +155,7 @@ UWidget* UBoxingFightResultWidget::BuildUi()
 
 void UBoxingFightResultWidget::FocusFirst()
 {
-	if (RematchButton)
-	{
-		RematchButton->SetKeyboardFocus();
-	}
+	FocusKey(TEXT("Реванш"));
 }
 
 void UBoxingFightResultWidget::Rematch()

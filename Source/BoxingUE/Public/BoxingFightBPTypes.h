@@ -114,6 +114,10 @@ struct FBoxerPreset
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing", meta = (ClampMin = "0", ClampMax = "1"))
 	float Seasoning = 1.f;
 
+	// Id ростера («amateur:Имя») — облик из Appearance.json (S-60); пусто — поиск по имени, нет записи — облик по умолчанию.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing")
+	FString Id;
+
 	FFighterSetup ToSetup(bool bAi) const
 	{
 		FFighterSetup S;

@@ -22,6 +22,7 @@ protected:
 private:
 	void OpenExhibition();
 	void QuickFight();
+	void OpenSettings();
 
 	UPROPERTY(Transient)
 	TObjectPtr<UButton> FirstButton;

@@ -9,6 +9,7 @@
 #include "Misc/CommandLine.h"
 #include "UIExhibition.h"
 #include "UIMainMenu.h"
+#include "UISettings.h"
 
 ABoxingMenuGameMode::ABoxingMenuGameMode()
 {
@@ -133,4 +134,33 @@ void ABoxingMenuPlayerController::ShowExhibition()
 	{
 		ExhibitionWidget->FocusFirst();
 	}
+}
+
+void ABoxingMenuPlayerController::ShowSettings()
+{
+	UBoxingSettingsWidget* S = CreateWidget<UBoxingSettingsWidget>(this, UBoxingSettingsWidget::StaticClass());
+	if (!S)
+	{
+		return;
+	}
+	TWeakObjectPtr<ABoxingMenuPlayerController> Self(this);
+	S->OnClose = [Self]()
+	{
+		ABoxingMenuPlayerController* PC = Self.Get();
+		if (PC && PC->MainWidget && PC->MainWidget->IsInViewport())
+		{
+			PC->MainWidget->SetIsEnabled(true);
+			PC->FocusWidget(PC->MainWidget);
+			PC->MainWidget->FocusKey(TEXT("Настройки"));
+		}
+	};
+	// Главный экран под настройками — неактивен: иначе навигация Slate (она не знает про «верхний» экран) уходит
+	// стрелкой на его кнопки и A нажимает их за спиной у настроек.
+	if (MainWidget)
+	{
+		MainWidget->SetIsEnabled(false);
+	}
+	S->AddToViewport(5);
+	FocusWidget(S);
+	S->FocusFirst();
 }

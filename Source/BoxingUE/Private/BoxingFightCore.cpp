@@ -267,9 +267,11 @@ namespace
 	}
 	double DamagePerHit(const FFighterSetup& Att, const FFighterSetup& Dfn)
 	{
-		// massForPower = durabilityMass = WeightKg (проекции веса в ядре нет).
-		const double PowerAbs = Att.Stats.Power * FMath::Sqrt(static_cast<double>(Att.WeightKg) / 70.0);
-		const double DurabAbs = Dfn.Stats.Chin * FMath::Sqrt(static_cast<double>(Dfn.WeightKg) / 70.0);
+		// Массы проекции веса (S-57); не заданы — вес бойца.
+		const double MassAtt = Att.MassForPower > 0 ? Att.MassForPower : Att.WeightKg;
+		const double MassDef = Dfn.DurabilityMass > 0 ? Dfn.DurabilityMass : Dfn.WeightKg;
+		const double PowerAbs = Att.Stats.Power * FMath::Sqrt(MassAtt / 70.0);
+		const double DurabAbs = Dfn.Stats.Chin * FMath::Sqrt(MassDef / 70.0);
 		const double Ratio = PowerAbs / FMath::Max(20.0, DurabAbs);
 		return FMath::Pow(Ratio, 1.4);
 	}
@@ -392,6 +394,7 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 		RDmgTaken[I] = 0;
 		RKd[I] = 0;
 		RPress[I] = 0;
+		RPressRep[I] = 0;
 		RKdSpent[I] = 0;
 		RPressKd[I] = false;
 		TotLanded[I] = 0;
@@ -401,6 +404,7 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	Result = FFightResult();
 	bHasResult = false;
 	bCorners = Config.bCorners;
+	bGlassJaw = Config.bGlassJaw;
 	Stage = FStageState();
 	ResumeGap = DIST_START;
 	bHasLying = false;
@@ -422,6 +426,10 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	if (bAi[0]) Rt[0].NextAiAt = 0.8 + Rng.Range(0, AiInterval(StyleIdx(Rt[0].Prof.Style)));
 	Form[0] = 0.9 + 0.2 * Rng.Next();
 	Form[1] = 0.9 + 0.2 * Rng.Next();
+	if (bGlassJaw)
+	{
+		Form[0] = Form[1] = 1; // как веб: проверка нокаута, а не боя — без «формы дня»
+	}
 }
 
 // ======================================================================
@@ -710,6 +718,8 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 		// Раундовые счётчики — в масштабе раунда веба (RoundK = 55 / RoundSeconds).
 		Def.Accumulated += HpDmg * SIM_ROUND_SCALE * RoundK;
 		RPress[DefIdx] += HpDmg;
+		// Длинный раунд: попадание — «представитель» раунда веба с вероятностью RoundK (S-57, см. RPressRep).
+		if (RoundK < 1 && Rng.Next() < RoundK) RPressRep[DefIdx] += HpDmg;
 		Def.Stamina = FMath::Max(0.0, Def.Stamina - STAM_HIT - (bBody ? BODY_STAM_BASE + BaseDmg * BODY_STAM_PER_DMG : 0));
 		Def.HurtUntil = T + HURT_BASE + FMath::Min(0.5, HpDmg * 0.15);
 		Def.HurtMag = ClampD(HpDmg / 2, 0.35, 1);
@@ -729,6 +739,8 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 		if (HpDmg > 2.2) Def.StaggerUntil = T + 0.28;
 		TryKnockdown(AttIdx, DefIdx, Punch.Kind, FormAtt,
 			(bBody ? BODY_KD : 1) * ArmPow * (0.6 + 0.4 * Rf) * (Punch.bEmpty ? EMPTY_POW : 1));
+		// Dev glassJaw: здоровье в ноль — падение неизбежно (и уже без подъёма).
+		if (bGlassJaw && DefIdx == 1 && Phase == EFightPhase::Fighting && Def.Health() <= 0) Knockdown(AttIdx, DefIdx);
 	}
 	else
 	{
@@ -821,10 +833,11 @@ void FBoxingFightCore::TryKnockdown(int32 AttIdx, int32 DefIdx, EPunchKind Kind,
 {
 	const FRuntime& Att = Rt[AttIdx];
 	const FRuntime& Def = Rt[DefIdx];
+	if (bGlassJaw && DefIdx == 1) return; // dev glassJaw: падает только по здоровью в ноль (см. ResolveContact)
 	// (1) от давления раунда: шанс simulate «за раунд» выдаётся по ходу раунда.
 	if (!RPressKd[DefIdx])
 	{
-		const double Pressure = RPress[DefIdx] * SIM_KD_SCALE * RoundK * (1 + Def.Accumulated / 110);
+		const double Pressure = PressOf(DefIdx) * (1 + Def.Accumulated / 110);
 		const double F = KnockdownChanceF(Pressure, Def.Prof.Stats.Chin);
 		const double Spent = RKdSpent[DefIdx];
 		if (F > Spent)
@@ -847,6 +860,13 @@ void FBoxingFightCore::TryKnockdown(int32 AttIdx, int32 DefIdx, EPunchKind Kind,
 	if (Rng.Next() < (Flash * ChinResist) / (FLASH_SPREAD / RoundK)) Knockdown(AttIdx, DefIdx);
 }
 
+// Урон раунда для нокдауна/KO/RSC-H в масштабе simulate (с SIM_KD_SCALE). Раунд ≤ 55 с — RPress·RoundK (как веб);
+// длиннее — сумма «представителей» (S-57): то же число попаданий, что за 55 с веба, — и тот же разброс.
+double FBoxingFightCore::PressOf(int32 I) const
+{
+	return RoundK < 1 ? RPressRep[I] * SIM_KD_SCALE : RPress[I] * SIM_KD_SCALE * RoundK;
+}
+
 void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 {
 	FRuntime& Def = Rt[DefIdx];
@@ -867,9 +887,10 @@ void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 		return;
 	}
 	// Шанс «не встать» — KO-проверка simulate.
-	const double Severity = (RPress[DefIdx] * SIM_KD_SCALE * RoundK + Def.Accumulated * 0.12) /
+	const double Severity = (PressOf(DefIdx) + Def.Accumulated * 0.12) /
 		FMath::Max(20.0, static_cast<double>(Def.Prof.Stats.Chin));
-	const double KoChance = FMath::Min(0.6, FMath::Max(0.0, Severity - 0.9) * 0.5 + (RKd[DefIdx] >= 2 ? 0.2 : 0));
+	const double KoChance = (bGlassJaw && DefIdx == 1) ? 1.0
+		: FMath::Min(0.6, FMath::Max(0.0, Severity - 0.9) * 0.5 + (RKd[DefIdx] >= 2 ? 0.2 : 0));
 	Phase = EFightPhase::Down;
 	bHasDown = true;
 	Down = FDownState();
@@ -954,6 +975,7 @@ bool FBoxingFightCore::Proceed()
 		RDmgTaken[I] = 0;
 		RKd[I] = 0;
 		RPress[I] = 0;
+		RPressRep[I] = 0;
 		RKdSpent[I] = 0;
 		RPressKd[I] = false;
 	}
@@ -1006,7 +1028,7 @@ void FBoxingFightCore::EndRound()
 		{
 			const int32 J = 1 - I;
 			const double OneSided = (RLanded[J] - RLanded[I]) * SIM_ROUND_SCALE * RoundK;
-			const double Beating = (RPress[I] * SIM_KD_SCALE * RoundK) / FMath::Max(20.0, static_cast<double>(Rt[I].Prof.Stats.Chin));
+			const double Beating = PressOf(I) / FMath::Max(20.0, static_cast<double>(Rt[I].Prof.Stats.Chin));
 			if (OneSided > 10 && Beating > 0.4)
 			{
 				const double StopChance = FMath::Min(0.5, (OneSided - 10) * 0.02 + (Beating - 0.4) * 0.55);

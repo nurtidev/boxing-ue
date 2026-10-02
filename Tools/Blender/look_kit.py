@@ -27,6 +27,10 @@ import bmesh
 import bpy
 from mathutils import Matrix, Vector
 
+import sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(globals().get("__file__") or "C:/Users/user/Desktop/boxing-ue/Tools/Blender/x.py")))
+import look_morphs  # noqa: E402  S-60: ключи телосложения Heavy/Lean/Muscular
+
 ROOT = "C:/Users/user/Desktop/boxing-ue/"
 W = ROOT + "Saved/LookWork/"
 GLOVE_GLB = "C:/Users/user/Desktop/boxing/web/public/models/glove.glb"
@@ -42,6 +46,7 @@ TRUNKS_THICK = 0.012       # толщина оболочки внутрь (дл�
 BOOTS_TOP = 0.300          # верх боксёрок — середина голени
 BOOTS_OFF = 0.010
 BOOTS_THICK = 0.016        # сплавляет пальцы ног в гладкий носок
+BOOTS_TOE_OFF = 0.009      # S-60: носок свободнее (пальцы не читаются)
 BOOTS_TRIM_H = 0.035
 BODY_FEET_CUT = 0.215      # кожа ниже — под боксёрками, удаляется
 NECK_BAND_W = 0.05          # полоса кожи под краем меша лица (закрывает щель шва), м
@@ -367,7 +372,12 @@ def make_boots(body):
     cut_keep(bm, BOOTS_TOP, keep_below=True)
     bm.to_mesh(o.data)
     bm.free()
-    offset_shell(o, lambda co: BOOTS_OFF)
+    # S-60: носок шире кожи пальцев (зазоры между пальцами сплавляются ремешем) — иначе «таби» с пальцами
+    def boot_off(co):
+        toe = min(1.0, max(0.0, (0.07 - co.z) / 0.04)) * min(1.0, max(0.0, (0.02 - co.y) / 0.06))
+        return BOOTS_OFF + BOOTS_TOE_OFF * toe
+    offset_shell(o, boot_off)
+    hull_feet(o, 0.075, 0.11)
     m = o.modifiers.new("sol", "SOLIDIFY")
     m.thickness = BOOTS_THICK          # толщина внутрь (до кожи): сплавляет пальцы ног в носок
     m.offset = -1.0
@@ -376,6 +386,19 @@ def make_boots(body):
     remesh(o, VOXEL, BOOTS_FACES)
     bm = bmesh.new()
     bm.from_mesh(o.data)
+    # S-60: носок — сгладить рельеф пальцев (только перед стопы, наружная форма; вмятина заполняется)
+    toe = [v for v in bm.verts if v.co.z < 0.075 and v.co.y < 0.0]
+    for _ in range(30):
+        new = {}
+        for v in toe:
+            nb = [e.other_vert(v).co for e in v.link_edges]
+            if nb:
+                avg = sum(nb, Vector()) / len(nb)
+                d = avg - v.co
+                new[v] = v.co + d * 0.6 if d.dot(v.normal) > 0 else v.co + d * 0.15   # вмятины — сильнее
+        for v, c in new.items():
+            v.co = c
+        bm.normal_update()
     cut_keep(bm, BOOTS_TOP, keep_below=True)
     close_rims(bm)
     split_at(bm, BOOTS_TOP - BOOTS_TRIM_H)
@@ -392,6 +415,43 @@ def make_boots(body):
         else:
             p.material_index = 0
     return o
+
+
+def hull_feet(o, z_full, z_fade):
+    """S-60: стопа боксёрки — выпуклая оболочка (носок без пальцев): каждая вершина ниже z_fade тянется к ближайшей
+    точке выпуклой оболочки своей стопы (вмятины между пальцами заполняются), выше — плавно гаснет."""
+    from mathutils.bvhtree import BVHTree
+    me = o.data
+    for side in (1, -1):
+        ids = [v.index for v in me.vertices if v.co.z < z_fade + 0.02 and v.co.x * side > 0]
+        if len(ids) < 8:
+            continue
+        bm = bmesh.new()
+        for i in ids:
+            bm.verts.new(me.vertices[i].co)
+        res = bmesh.ops.convex_hull(bm, input=bm.verts[:])
+        kill = {g for g in res.get("geom_interior", []) + res.get("geom_unused", []) if isinstance(g, bmesh.types.BMVert)}
+        bmesh.ops.delete(bm, geom=list(kill), context="VERTS")
+        bm.normal_update()
+        bvh = BVHTree.FromBMesh(bm)
+        cx = sum(me.vertices[i].co.x for i in ids) / len(ids)
+        cy = sum(me.vertices[i].co.y for i in ids) / len(ids)
+        for i in ids:
+            v = me.vertices[i]
+            if v.co.z > z_fade:
+                continue
+            # луч от оси стопы наружу (по горизонтали) до оболочки: вмятина между пальцами выталкивается
+            d = Vector((v.co.x - cx, v.co.y - cy, 0.0))
+            if d.length < 1e-5:
+                continue
+            d.normalize()
+            o0 = Vector((cx, cy, v.co.z))
+            hit = bvh.ray_cast(o0, d)[0]
+            if hit is None or (hit - o0).length <= (v.co - o0).length:
+                continue
+            t = 1.0 - min(1.0, max(0.0, (v.co.z - z_full) / (z_fade - z_full)))
+            v.co = v.co.lerp(hit, t)
+        bm.free()
 
 
 def drop_islands(o, min_verts):
@@ -618,6 +678,7 @@ def main():
     os.makedirs(W, exist_ok=True)
     reset()
     arm, body = import_body()
+    field = look_morphs.Field(body)        # S-60: поле телосложения — по полному телу, до обрезки
     strip_head(body)
     drop_islands(body, 60)
     skin = dup(body, "skin_src")           # полная кожа — источник весов и «кожа» для выталкивания
@@ -630,6 +691,8 @@ def main():
     trim_body(body)
     bpy.data.objects.remove(skin, do_unlink=True)
     gloves = make_gloves(arm)
+    for o in (body, kit):                  # перчатки жёсткие — без ключей
+        look_morphs.add_keys(o, field)
     for o in (body, kit, gloves):
         bind(o, arm)
         print("KIT", o.name, "tris", tris(o))

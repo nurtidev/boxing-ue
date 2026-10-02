@@ -53,6 +53,15 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> CueText;
 	UPROPERTY(Transient) TObjectPtr<UWidget> Controls;
 	UPROPERTY(Transient) TObjectPtr<UWidget> AutoBadge;
+	// Повтор нокаута (S-59): плашка «ПОВТОР» и подсказка пропуска; панели/часы/баннер на это время скрыты.
+	UPROPERTY(Transient) TObjectPtr<UWidget> PanelRoot0;
+	UPROPERTY(Transient) TObjectPtr<UWidget> PanelRoot1;
+	UPROPERTY(Transient) TObjectPtr<UWidget> MidBox;
+	UPROPERTY(Transient) TObjectPtr<UWidget> ReplayBadge;
+	UPROPERTY(Transient) TObjectPtr<UWidget> ReplayHint;
+	bool bReplayShown = false;
+	bool bShotReplay = false;
+	float ReplayTime = 0.f;
 
 	bool bNamesSet = false;
 	bool bControls = true;

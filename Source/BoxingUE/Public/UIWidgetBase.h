@@ -9,6 +9,7 @@
 #include "CoreMinimal.h"
 #include "Blueprint/UserWidget.h"
 #include "Fonts/SlateFontInfo.h"
+#include "Styling/SlateTypes.h"
 #include "UIWidgetBase.generated.h"
 
 class UBorder;
@@ -78,10 +79,22 @@ class BOXINGUE_API UBoxingUiWidget : public UUserWidget
 {
 	GENERATED_BODY()
 
+public:
+	// Подпись кнопки в фокусе клавиатуры/геймпада среди всех экранов (лог сценариев проверки навигации).
+	static FString DescribeFocus();
+	// Перевести фокус на кнопку с ключом (подпись или свой ключ). false — такой нет или она неактивна.
+	bool FocusKey(const FString& Key);
+
 protected:
 	virtual void NativeOnInitialized() override;
+	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
+	virtual FReply NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent) override;
 	// Собрать дерево (WidgetTree уже есть). Вернуть корень.
 	virtual UWidget* BuildUi() { return nullptr; }
+	// «Назад» (Esc / B геймпада). true — обработано.
+	virtual bool HandleBack() { return false; }
+	// Возвращать ли фокус на последнюю кнопку, если он потерян (пересборка списка, закрыт верхний экран).
+	virtual bool WantsFocusRestore() const { return true; }
 
 	// ---------- Строители ----------
 	UTextBlock* Txt(const FString& S, int32 Size, const FLinearColor& Color = FLinearColor::White, bool bBold = false);
@@ -89,7 +102,8 @@ protected:
 	UButton* Btn(const FString& Label, TFunction<void()> OnClick, EBoxBtn Kind = EBoxBtn::Secondary, int32 FontSize = 16,
 		bool bSelected = false, UTextBlock** OutLabel = nullptr);
 	// Кнопка с произвольным содержимым (строка ростера).
-	UButton* BtnWith(UWidget* Content, TFunction<void()> OnClick, const FLinearColor& Fill, const FLinearColor& Hover, float Radius = 8.f);
+	UButton* BtnWith(UWidget* Content, TFunction<void()> OnClick, const FLinearColor& Fill, const FLinearColor& Hover, float Radius = 8.f,
+		const FString& Key = FString());
 	void StyleBtn(UButton* B, EBoxBtn Kind, bool bSelected);
 	UProgressBar* Bar(const FLinearColor& Fill, float Percent = 1.f);
 	UWidget* Sized(UWidget* W, float Width, float Height = 0.f);
@@ -99,6 +113,24 @@ protected:
 	static void AddH(UHorizontalBox* Row, UWidget* W, bool bFill = false, FMargin Pad = FMargin(0.f), EVerticalAlignment VA = VAlign_Center);
 	static void AddV(UVerticalBox* Col, UWidget* W, bool bFill = false, FMargin Pad = FMargin(0.f), EHorizontalAlignment HA = HAlign_Fill);
 
+	// Навигация (S-59): кнопки экрана с ключом; кнопка в фокусе получает золотую рамку (у SButton нет своей
+	// кисти фокуса — только наведение мышью), потерянный фокус возвращается на ту же кнопку.
+	void Track(UButton* B, const FString& Key, const FString& Label);
+	UButton* FindKeyed(const FString& Key) const;
+
 	UPROPERTY(Transient)
 	TArray<TObjectPtr<UBoxingUiClick>> Clicks;
+
+private:
+	struct FTracked
+	{
+		TWeakObjectPtr<UButton> Button;
+		FString Key;
+		FString Label;
+		FButtonStyle Base;
+		bool bFocused = false;
+	};
+	TArray<FTracked> Tracked;
+	FString LastFocusedKey;
+	void UpdateFocus();
 };

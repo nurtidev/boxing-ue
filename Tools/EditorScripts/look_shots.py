@@ -305,6 +305,19 @@ def main():
                             c.set_child_actor_class(cls)
                         log("визуал бойца %d → %s" % (idx, path))
                 st["swapped"] = True
+            # S-60: облик по данным бойца (Appearance.json) на визуал боя — LOOK_RED_ID / LOOK_BLUE_ID (id или часть имени)
+            for idx, key in ((0, os.environ.get("LOOK_RED_ID", "")), (1, os.environ.get("LOOK_BLUE_ID", ""))):
+                if not key:
+                    continue
+                import sys as _sys
+                _sys.path.insert(0, os.path.join(PROJECT, "Tools", "EditorScripts"))
+                import look_apply
+                rec = look_apply.find(key)
+                for c in boxers[idx].get_components_by_class(unreal.ChildActorComponent):
+                    ch = c.get_editor_property("child_actor")
+                    if rec and ch:
+                        look_apply.apply(ch, rec["look"], c)
+                        log("облик бойца %d → %s" % (idx, rec["id"]))
             if os.environ.get("LOOK_FIGHTCAM") == "1":
                 # только перекраска: снимки делает сам GameMode (-BoxHitShots/-BoxShots) камерой боя
                 unreal.unregister_slate_post_tick_callback(st["h"])

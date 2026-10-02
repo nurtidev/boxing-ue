@@ -73,6 +73,15 @@ public:
 	// 1 — идеальная дистанция (punches.ts rangeFactor). Публично — для подсказок UI.
 	static double RangeFactor(EPunchKind Kind, double Dist, double ReachCm = 183.0);
 
+	// Сдача (меню паузы UI, S-59): Loser проигрывает остановкой боя (RSC) в текущем раунде — как брошенный после
+	// гонга бой веба. Раунд досчитывается судьями (ScoreRound), событие FightEnd. Бой уже окончен — false.
+	bool Concede(int32 Loser)
+	{
+		if (bHasResult || Loser < 0 || Loser > 1) return false;
+		Finish(1 - Loser, EFightMethod::RSC);
+		return true;
+	}
+
 private:
 	struct FPunchAct
 	{
@@ -271,9 +280,17 @@ private:
 	double RPress[2] = {0, 0};
 	double RKdSpent[2] = {0, 0};
 	bool RPressKd[2] = {false, false};
+	// Давление «раунда веба» на длинном раунде (S-57). Шанс нокдауна/KO/RSC-H simulate выпуклый по урону раунда, а урон
+	// 180-с раунда, сжатый RoundK, — сумма втрое большего числа попаданий: разброс втрое меньше, и нокдаунов выходило
+	// вдвое меньше, чем в вебе. Поэтому при RoundK < 1 давление набирают «представители»: каждое чистое попадание идёт
+	// в RPressRep с вероятностью RoundK и с полным весом — сумма того же числа попаданий, что за 55 с веба (среднее
+	// и разброс как в вебе). При RoundK ≥ 1 (раунд ≤ 55 с) — прежняя формула RPress·RoundK, без лишних бросков ГСЧ.
+	double RPressRep[2] = {0, 0};
+	double PressOf(int32 I) const; // урон раунда в масштабе simulate (с SIM_KD_SCALE)
 	double TotLanded[2] = {0, 0};
 	// постановка (state.ts corners/stage/resumeGap/lyingAt/restT)
 	bool bCorners = true;
+	bool bGlassJaw = false; // dev: синий падает только на здоровье 0 и не встаёт (FFightConfig::bGlassJaw)
 	FStageState Stage;
 	double ResumeGap = 1.15;
 	bool bHasLying = false;

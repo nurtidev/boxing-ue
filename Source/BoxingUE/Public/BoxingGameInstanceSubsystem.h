@@ -15,6 +15,8 @@
 #include "CoreMinimal.h"
 #include "Subsystems/GameInstanceSubsystem.h"
 #include "BoxingFightBPTypes.h"
+#include "Containers/Ticker.h"
+#include "InputCoreTypes.h"
 #include "BoxingGameInstanceSubsystem.generated.h"
 
 class ABoxingFightGameMode;
@@ -102,6 +104,7 @@ public:
 	static UBoxingGameInstanceSubsystem* Get(const UObject* WorldContext);
 
 	virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+	virtual void Deinitialize() override;
 
 	// Карты оболочки.
 	static constexpr const TCHAR* MenuMap = TEXT("/Game/Boxing/Maps/L_Menu");
@@ -142,9 +145,27 @@ public:
 	bool bAutoRematch = false;
 	void TakeUiShot(const FString& Name) const;
 
+	// ---------- Сценарий ввода (S-59) ----------
+	// -BoxUiScript=<шаги через запятую>: нажатия идут через FSlateApplication (как от клавиатуры/геймпада), поэтому
+	// проверяется настоящая навигация. Шаги: w<с> — ждать; k:<FKey> — нажать и отпустить (Escape, Enter, Down,
+	// Gamepad_DPad_Down, Gamepad_FaceButton_Bottom, Gamepad_Special_Right…); s:<имя> — скриншот <prefix>_<имя>.png;
+	// f — в лог, какая кнопка в фокусе; ring — ждать начала боя; ft<с> — ждать время ядра; res — ждать экран итога;
+	// menu — ждать главный экран; rp / rpend — ждать начала / конца повтора нокаута; quit — выход.
+	bool bScript = false;
+
 private:
 	void LoadRoster();
 	void ReadPickFromCommandLine();
+	bool TickScript(float Dt);
+	bool ScriptCondition(const FString& Step) const;
+	void SendKey(const FKey& Key, bool bDown) const;
+	TArray<FString> ScriptSteps;
+	int32 ScriptIdx = 0;
+	double ScriptClock = 0.0;
+	double ScriptWaitUntil = 0.0;
+	double ScriptStepAt = 0.0;
+	FKey ScriptKeyUp;
+	FTSTicker::FDelegateHandle ScriptTicker;
 
 	TArray<FRosterBoxer> Roster;
 	TMap<FString, int32> ById;

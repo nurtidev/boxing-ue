@@ -1,5 +1,6 @@
-// Харнесс ядра боя вне UE: детерминизм, 200 сидов, паритет с TS, постановка раунда (S-53).
+// Харнесс ядра боя вне UE: детерминизм, 200 сидов, паритет с TS, постановка раунда (S-53), доли исходов vs веб и бот «человека» (S-57).
 #include "BoxingFightCore.h"
+#include "FightBot.h"
 extern "C" int printf(const char*, ...);
 
 namespace
@@ -317,8 +318,229 @@ static int FindKd(float RoundSec)
 	return 0;
 }
 
+// --- S-57: доля побед / досрочек / нокдаунов против эталона веба (WebRef.inc, генератор — webref.ts) ---
+namespace
+{
+	struct FRefProf
+	{
+		double S[7];
+		double Reach, Weight, Mass, Dur, Seasoning;
+		EBoxStyle Style;
+	};
+	struct FRefTally
+	{
+		double W, Stop, Kd;
+	};
+	struct FRefPair
+	{
+		const char* Name;
+		int32 Rounds;
+		bool bPro;
+		FRefProf A, B;
+		FRefTally Sim, Web;
+	};
+	const FRefPair GWebRef[] = {
+#include "WebRef.inc"
+	};
+	constexpr int32 GWebRefNum = int32(sizeof(GWebRef) / sizeof(GWebRef[0]));
+
+	FFighterSetup SetupOf(const FRefProf& P)
+	{
+		FFighterSetup S;
+		S.Stats = {float(P.S[0]), float(P.S[1]), float(P.S[2]), float(P.S[3]), float(P.S[4]), float(P.S[5]), float(P.S[6])};
+		S.ReachCm = float(P.Reach);
+		S.WeightKg = float(P.Weight);
+		S.MassForPower = float(P.Mass);
+		S.DurabilityMass = float(P.Dur);
+		S.Seasoning = float(P.Seasoning);
+		S.Style = P.Style;
+		S.bAiControlled = true;
+		return S;
+	}
+
+	uint32 RefSeed(int32 I) { return uint32(I) * 2654435761u + 17u; } // seedOf веба: (i·2654435761 + 17) >>> 0
+
+	// Как autoFight веба: нечётные сиды — фаворит в синем углу. Тик 1/60 (как GameMode), перерыв — сразу.
+	FRefTally RunRefPair(const FRefPair& P, int32 N, float RoundSec)
+	{
+		FRefTally T = {0, 0, 0};
+		for (int32 I = 0; I < N; ++I)
+		{
+			const bool bSwap = I % 2 == 1;
+			FFightConfig C;
+			C.Seed = RefSeed(I);
+			C.Rounds = P.Rounds;
+			C.RoundSeconds = RoundSec;
+			C.BreakSeconds = 0.f;
+			C.bAllowDraw = P.bPro;
+			C.Fighters[bSwap ? 1 : 0] = SetupOf(P.A);
+			C.Fighters[bSwap ? 0 : 1] = SetupOf(P.B);
+			FBoxingFightCore Core;
+			Core.Init(C);
+			for (int32 K = 0; K < 60 * 60 * 60 && !Core.IsOver(); ++K)
+			{
+				Core.Tick(1.f / 60.f);
+				Core.PollEvents();
+			}
+			const FFightResult& R = Core.GetResult();
+			int32 W = R.WinnerIndex;
+			if (bSwap && W >= 0) W = 1 - W;
+			T.W += W == 0 ? 1 : 0;
+			T.Stop += (R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC) ? 1 : 0;
+			T.Kd += R.Knockdowns[0] + R.Knockdowns[1];
+		}
+		T.W /= N;
+		T.Stop /= N;
+		T.Kd /= N;
+		return T;
+	}
+
+	// Допуски — как interactive-parity.test.ts (интерактив веба vs simulate): победы ±0.12, досрочки ±0.12,
+	// нокдауны ±max(0.25, 30%). Эталон — интерактив веба на 55 с; UE проверяется и на 55, и на 180 с. Доля побед —
+	// к вебу ИЛИ к simulate (сам веб отходит от simulate до ~0.09 на паре 4 р.: чужой допуск не съедаем).
+	int32 CheckWebRef(int32 N, float RoundSec, bool bVerbose)
+	{
+		int32 Fails = 0;
+		double SumKdUe = 0, SumKdWeb = 0, SumStUe = 0, SumStWeb = 0;
+		printf("доля побед/досрочек/нокдаунов vs эталон веба (раунд UE %.0f с, %d боёв на пару; веб — 55 с, автопилот):\n", RoundSec, N);
+		for (int32 K = 0; K < GWebRefNum; ++K)
+		{
+			const FRefPair& P = GWebRef[K];
+			const FRefTally U = RunRefPair(P, N, RoundSec);
+			const bool bW = AbsD(U.W - P.Web.W) <= 0.12 || AbsD(U.W - P.Sim.W) <= 0.12;
+			const bool bS = AbsD(U.Stop - P.Web.Stop) <= 0.12;
+			const bool bK = AbsD(U.Kd - P.Web.Kd) <= FMath::Max(0.25, P.Web.Kd * 0.3);
+			const bool bOk = bW && bS && bK;
+			Fails += bOk ? 0 : 1;
+			SumKdUe += U.Kd; SumKdWeb += P.Web.Kd; SumStUe += U.Stop; SumStWeb += P.Web.Stop;
+			if (bVerbose || !bOk)
+				printf("  %s %-34s побед A UE %.3f / веб %.3f / sim %.3f; досрочек %.3f / %.3f / %.3f; нокдаунов %.3f / %.3f / %.3f\n", bOk ? "  " : "!!", P.Name,
+					U.W, P.Web.W, P.Sim.W, U.Stop, P.Web.Stop, P.Sim.Stop, U.Kd, P.Web.Kd, P.Sim.Kd);
+		}
+		printf("  сумма по парам: досрочек UE %.2f / веб %.2f, нокдаунов за бой UE %.2f / веб %.2f — %s\n", SumStUe, SumStWeb, SumKdUe, SumKdWeb,
+			Fails ? "MISMATCH" : "OK");
+		return Fails ? 1 : 0;
+	}
+}
+
+// --- S-57: бот «человека» (FightBot) против ИИ — как бот веба (interactive-parity «человек против ИИ») ---
+namespace
+{
+	struct FBotTally
+	{
+		int32 N = 0, Wins = 0, Ko = 0, Rsc = 0, Dec = 0, KdFor = 0, KdAgainst = 0, HitsFor = 0, HitsAgainst = 0, Gassed = 0;
+		double Rate() const { return N ? double(Wins) / N : 0; }
+	};
+
+	// Сид k-го боя серии — как humanWinRate веба (seedOf(i) ^ 0xabc); тот же у GameMode -BoxBotFights.
+	uint32 BotSeed(int32 K) { return RefSeed(K) ^ 0xabcu; }
+
+	// Ввод — как GameMode: нажатия бота копятся и применяются на границе шага, удержание ног повторяется каждый шаг.
+	FBotTally RunBot(EFightBotSkill Skill, const FRefProf& Me, const FRefProf& Ai, int32 N, float RoundSec)
+	{
+		FBotTally T;
+		for (int32 K = 0; K < N; ++K)
+		{
+			FFightConfig C;
+			C.Seed = BotSeed(K);
+			C.Rounds = 3;
+			C.RoundSeconds = RoundSec;
+			C.BreakSeconds = 0.f;
+			C.Fighters[0] = SetupOf(Me);
+			C.Fighters[0].bAiControlled = false;
+			C.Fighters[1] = SetupOf(Ai);
+			FBoxingFightCore Core;
+			Core.Init(C);
+			FFightBot Bot;
+			Bot.Reset(Skill, C.Seed, 0);
+			TArray<FFightBotCmd> Cmds;
+			const float Dt = 1.f / 60.f;
+			for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+			{
+				Cmds.Reset();
+				bool bHeld = false;
+				EFightAction Held = EFightAction::StepBack;
+				Bot.Think(Core.GetSnapshot(), Dt, Cmds, bHeld, Held);
+				for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+				if (bHeld) Core.ApplyAction(0, Held);
+				Core.Tick(Dt);
+				TArray<FFightEvent> Ev = Core.PollEvents();
+				for (int32 E = 0; E < Ev.Num(); ++E)
+				{
+					if (Ev[E].Kind == EFightEventKind::Hit) (Ev[E].Attacker == 0 ? T.HitsFor : T.HitsAgainst) += 1;
+					if (Ev[E].Kind == EFightEventKind::Knockdown) (Ev[E].Defender == 1 ? T.KdFor : T.KdAgainst) += 1;
+					if (Ev[E].Kind == EFightEventKind::Gassed) ++T.Gassed;
+				}
+			}
+			const FFightResult& R = Core.GetResult();
+			++T.N;
+			T.Wins += R.WinnerIndex == 0;
+			T.Ko += R.Method == EFightMethod::KO;
+			T.Rsc += R.Method == EFightMethod::RSC;
+			T.Dec += R.Method == EFightMethod::Decision || R.Method == EFightMethod::Draw;
+		}
+		return T;
+	}
+
+	void PrintBot(const char* Label, EFightBotSkill Skill, const FBotTally& T)
+	{
+		printf("  %-8s %-22s побед %3d/%d (%.0f%%)  KO %d RSC %d реш. %d  нокдаунов %d/%d  попаданий за бой %.1f/%.1f  «нет сил» за бой %.1f\n",
+			FFightBot::SkillName(Skill), Label, T.Wins, T.N, T.Rate() * 100, T.Ko, T.Rsc, T.Dec, T.KdFor, T.KdAgainst,
+			double(T.HitsFor) / T.N, double(T.HitsAgainst) / T.N, double(T.Gassed) / T.N);
+	}
+
+	// Ориентиры interactive-parity веба: средний vs равного 35..72%, сильный > средний > новичок, спам < среднего и < 5%,
+	// статы решают: средний бьёт слабого (76 vs 70) > 70%, сильному (70 vs 76) проигрывает чаще (< 40%).
+	int32 CheckBots(int32 N, float RoundSec, bool bVerbose)
+	{
+		const FRefProf& Even = GWebRef[0].A;   // равные 70/70
+		const FRefProf& Strong76 = GWebRef[1].A; // 76
+		printf("бот «человека» против ИИ (3 р. × %.0f с, %d боёв, ввод — как GameMode):\n", RoundSec, N);
+		FBotTally Tl[4];
+		const EFightBotSkill Skills[4] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong, EFightBotSkill::Masher};
+		for (int32 K = 0; K < 4; ++K)
+		{
+			Tl[K] = RunBot(Skills[K], Even, Even, N, RoundSec);
+			if (bVerbose) PrintBot("против равного 70/70", Skills[K], Tl[K]);
+		}
+		const FBotTally Up = RunBot(EFightBotSkill::Average, Strong76, Even, N / 2, RoundSec);
+		const FBotTally Down = RunBot(EFightBotSkill::Average, Even, Strong76, N / 2, RoundSec);
+		if (bVerbose)
+		{
+			PrintBot("76 против 70", EFightBotSkill::Average, Up);
+			PrintBot("70 против 76", EFightBotSkill::Average, Down);
+			// Пресеты GameMode по умолчанию (L_Ring без меню): сверка с UE «-BoxBot=average -BoxBotFights=100» — те же сиды и ввод,
+			// итог должен совпасть бой-в-бой.
+			const FRefProf Red = {{78, 80, 76, 74, 75, 82, 79}, 185, 71, 71, 71, 1, EBoxStyle::Technical};
+			const FRefProf Blue = {{84, 74, 70, 78, 77, 74, 72}, 180, 71, 71, 71, 1, EBoxStyle::Pressure};
+			PrintBot("пресеты GameMode", EFightBotSkill::Average, RunBot(EFightBotSkill::Average, Red, Blue, 100, RoundSec));
+		}
+		const double Nov = Tl[0].Rate(), Avg = Tl[1].Rate(), Str = Tl[2].Rate(), Mash = Tl[3].Rate();
+		const bool bOk = Avg >= 0.35 && Avg <= 0.72 && Str > Avg && Nov < Avg && Mash < Avg && Mash < 0.05 && Up.Rate() > 0.7 && Down.Rate() < 0.4;
+		printf("  новичок %.2f < средний %.2f < сильный %.2f; спам %.2f; средний 76/70 %.2f, 70/76 %.2f — %s\n", Nov, Avg, Str, Mash, Up.Rate(),
+			Down.Rate(), bOk ? "OK" : "MISMATCH");
+		return bOk ? 0 : 1;
+	}
+}
+
 int main(int Argc, char** Argv)
 {
+	// sim.exe bot <N> <раунд, с> — таблица бота «человека» (подробно).
+	if (Argc >= 2 && Argv[1][0] == 'b')
+	{
+		int32 N = 0, Sec = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
+		return CheckBots(N > 0 ? N : 200, Sec > 0 ? float(Sec) : 55.f, true);
+	}
+	// sim.exe webref <N> <раунд, с> — только сверка с эталоном веба (подробно).
+	if (Argc >= 2 && Argv[1][0] == 'w')
+	{
+		int32 N = 0, Sec = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
+		return CheckWebRef(N > 0 ? N : 400, Sec > 0 ? float(Sec) : 55.f, true);
+	}
 	if (Argc >= 3 && Argv[1][0] == 'f')
 	{
 		int32 Sec = 0; // целые секунды (без atof: заглушка CoreMinimal без std-заголовков)
@@ -446,6 +668,12 @@ int main(int Argc, char** Argv)
 	const bool bWalk = T1.FirstFightTick == 126;
 	printf("выход из углов = web (бой с тика 126): %s\n", bWalk ? "OK" : "MISMATCH");
 	Fails += bWalk ? 0 : 1;
+
+	// --- 6. Доля побед/досрочек/нокдаунов vs эталон веба (S-57): 14 пар interactive-parity (+2 профи), раунд 55 и 180 с ---
+	Fails += CheckWebRef(400, 55.f, false);
+	Fails += CheckWebRef(400, 180.f, false);
+	// --- 7. Бот «человека» против ИИ (S-57) ---
+	Fails += CheckBots(200, 55.f, true);
 
 	Fails += CheckGeometry();
 	Fails += G_Fail ? 1 : 0;

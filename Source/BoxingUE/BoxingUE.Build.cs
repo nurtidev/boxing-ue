@@ -14,5 +14,7 @@ public class BoxingUE : ModuleRules
 		// Оболочка игры (S-55): UMG-экраны и ростер из JSON.
 		PublicDependencyModuleNames.AddRange(new string[] { "UMG", "Slate", "SlateCore" });
 		PrivateDependencyModuleNames.AddRange(new string[] { "Json" });
+		// Облик бойцов (S-60/S-58): грумы волос/бороды.
+		PrivateDependencyModuleNames.AddRange(new string[] { "HairStrandsCore" });
 	}
 }

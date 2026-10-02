@@ -14,6 +14,8 @@
 #include "Components/VerticalBox.h"
 #include "Components/VerticalBoxSlot.h"
 #include "Styling/CoreStyle.h"
+#include "Framework/Application/SlateApplication.h"
+#include "UObject/UObjectIterator.h"
 
 namespace BoxUi
 {
@@ -152,6 +154,7 @@ UButton* UBoxingUiWidget::Btn(const FString& Label, TFunction<void()> OnClick, E
 	C->Fn = MoveTemp(OnClick);
 	B->OnClicked.AddDynamic(C, &UBoxingUiClick::Fire);
 	Clicks.Add(C);
+	Track(B, Label, Label);
 	if (OutLabel)
 	{
 		*OutLabel = T;
@@ -159,7 +162,8 @@ UButton* UBoxingUiWidget::Btn(const FString& Label, TFunction<void()> OnClick, E
 	return B;
 }
 
-UButton* UBoxingUiWidget::BtnWith(UWidget* Content, TFunction<void()> OnClick, const FLinearColor& Fill, const FLinearColor& Hover, float Radius)
+UButton* UBoxingUiWidget::BtnWith(UWidget* Content, TFunction<void()> OnClick, const FLinearColor& Fill, const FLinearColor& Hover, float Radius,
+	const FString& Key)
 {
 	UButton* B = WidgetTree->ConstructWidget<UButton>();
 	FButtonStyle St;
@@ -181,6 +185,7 @@ UButton* UBoxingUiWidget::BtnWith(UWidget* Content, TFunction<void()> OnClick, c
 	C->Fn = MoveTemp(OnClick);
 	B->OnClicked.AddDynamic(C, &UBoxingUiClick::Fire);
 	Clicks.Add(C);
+	Track(B, Key, Key);
 	return B;
 }
 
@@ -234,4 +239,155 @@ void UBoxingUiWidget::AddV(UVerticalBox* Col, UWidget* W, bool bFill, FMargin Pa
 	S->SetSize(bFill ? FSlateChildSize(ESlateSizeRule::Fill) : FSlateChildSize(ESlateSizeRule::Automatic));
 	S->SetPadding(Pad);
 	S->SetHorizontalAlignment(HA);
+}
+
+// ---------- Навигация клавиатурой/геймпадом (S-59) ----------
+
+void UBoxingUiWidget::Track(UButton* B, const FString& Key, const FString& Label)
+{
+	if (!B)
+	{
+		return;
+	}
+	FTracked T;
+	T.Button = B;
+	T.Key = Key;
+	T.Label = Label;
+	T.Base = B->GetStyle();
+	Tracked.Add(MoveTemp(T));
+}
+
+UButton* UBoxingUiWidget::FindKeyed(const FString& Key) const
+{
+	if (Key.IsEmpty())
+	{
+		return nullptr;
+	}
+	// С конца: после пересборки списка живая кнопка — последняя с этим ключом.
+	for (int32 I = Tracked.Num() - 1; I >= 0; --I)
+	{
+		UButton* B = Tracked[I].Button.Get();
+		if (B && Tracked[I].Key == Key && B->GetCachedWidget().IsValid() && B->GetIsEnabled() && B->IsVisible())
+		{
+			return B;
+		}
+	}
+	return nullptr;
+}
+
+bool UBoxingUiWidget::FocusKey(const FString& Key)
+{
+	// Ключ запоминается и при неудаче: только что добавленный экран ещё не разложен Slate — фокус встанет
+	// на него следующим тиком (UpdateFocus), а не на первую попавшуюся кнопку.
+	if (!Key.IsEmpty())
+	{
+		LastFocusedKey = Key;
+	}
+	if (UButton* B = FindKeyed(Key))
+	{
+		B->SetKeyboardFocus();
+		return true;
+	}
+	return false;
+}
+
+void UBoxingUiWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
+{
+	Super::NativeTick(MyGeometry, InDeltaTime);
+	UpdateFocus();
+}
+
+void UBoxingUiWidget::UpdateFocus()
+{
+	Tracked.RemoveAll([](const FTracked& T) { return !T.Button.IsValid(); });
+	bool bAny = false;
+	for (FTracked& T : Tracked)
+	{
+		UButton* B = T.Button.Get();
+		const bool bFocus = B->GetCachedWidget().IsValid() && B->HasKeyboardFocus();
+		if (bFocus != T.bFocused)
+		{
+			T.bFocused = bFocus;
+			if (bFocus)
+			{
+				// Фокус — золотая рамка 3 px поверх «наведения»: видно с дивана, отличается от курсора мыши.
+				FButtonStyle St = T.Base;
+				FSlateBrush N = T.Base.Hovered;
+				N.OutlineSettings.Color = FSlateColor(BoxUi::Gold);
+				N.OutlineSettings.Width = 3.f;
+				St.SetNormal(N);
+				St.SetHovered(N);
+				B->SetStyle(St);
+			}
+			else
+			{
+				B->SetStyle(T.Base);
+			}
+		}
+		if (bFocus)
+		{
+			bAny = true;
+			if (!T.Key.IsEmpty())
+			{
+				LastFocusedKey = T.Key;
+			}
+		}
+	}
+	if (bAny || Tracked.Num() == 0 || !GetIsEnabled() || !WantsFocusRestore() || !IsInViewport() || !FSlateApplication::IsInitialized())
+	{
+		return;
+	}
+	// Фокус потерян (кнопку пересобрали, закрылся верхний экран): вернуть, если он ни у кого другого.
+	const TSharedPtr<SWidget> F = FSlateApplication::Get().GetUserFocusedWidget(0);
+	const TSharedPtr<SWidget> Mine = GetCachedWidget();
+	const bool bFree = !F.IsValid() || F == Mine || F->GetType() == FName(TEXT("SViewport"));
+	// HasFocusedDescendants() тут не годится: путь фокуса Slate хранит и мёртвую кнопку, и наш экран — «потомок в фокусе» остаётся.
+	if (!bFree)
+	{
+		return;
+	}
+	if (FocusKey(LastFocusedKey))
+	{
+		return;
+	}
+	for (const FTracked& T : Tracked)
+	{
+		UButton* B = T.Button.Get();
+		if (B->GetCachedWidget().IsValid() && B->GetIsEnabled() && B->IsVisible())
+		{
+			B->SetKeyboardFocus();
+			return;
+		}
+	}
+}
+
+FReply UBoxingUiWidget::NativeOnKeyDown(const FGeometry& InGeometry, const FKeyEvent& InKeyEvent)
+{
+	if (FSlateApplication::IsInitialized() && FSlateApplication::Get().GetNavigationActionFromKey(InKeyEvent) == EUINavigationAction::Back
+		&& HandleBack())
+	{
+		return FReply::Handled();
+	}
+	return Super::NativeOnKeyDown(InGeometry, InKeyEvent);
+}
+
+FString UBoxingUiWidget::DescribeFocus()
+{
+	for (TObjectIterator<UBoxingUiWidget> It; It; ++It)
+	{
+		if (!It->IsInViewport())
+		{
+			continue;
+		}
+		for (const FTracked& T : It->Tracked)
+		{
+			const UButton* B = T.Button.Get();
+			if (B && B->GetCachedWidget().IsValid() && B->HasKeyboardFocus())
+			{
+				return FString::Printf(TEXT("%s: %s"), *It->GetClass()->GetName(), T.Label.IsEmpty() ? *T.Key : *T.Label);
+			}
+		}
+	}
+	TSharedPtr<SWidget> F = FSlateApplication::IsInitialized() ? FSlateApplication::Get().GetUserFocusedWidget(0) : nullptr;
+	return F.IsValid() ? FString::Printf(TEXT("(не кнопка: %s)"), *F->GetTypeAsString()) : TEXT("(нет фокуса)");
 }

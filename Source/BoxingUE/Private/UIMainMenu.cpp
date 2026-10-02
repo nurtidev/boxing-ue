@@ -40,7 +40,9 @@ UWidget* UBoxingMainMenuWidget::BuildUi()
 
 	UButton* Career = Btn(TEXT("Карьера — скоро"), []() {}, EBoxBtn::Secondary, 22);
 	Career->SetIsEnabled(false);
-	AddV(Col, Career, false, FMargin(0.f, 0.f, 0.f, 26.f));
+	AddV(Col, Career, false, FMargin(0.f, 0.f, 0.f, 18.f));
+
+	AddV(Col, Btn(TEXT("Настройки"), [this]() { OpenSettings(); }, EBoxBtn::Secondary, 22), false, FMargin(0.f, 0.f, 0.f, 18.f));
 
 	AddV(Col, Btn(TEXT("Выход"), [this]() { UKismetSystemLibrary::QuitGame(this, GetOwningPlayer(), EQuitPreference::Quit, false); },
 		EBoxBtn::Ghost, 20), false, FMargin(0.f));
@@ -58,7 +60,7 @@ UWidget* UBoxingMainMenuWidget::BuildUi()
 	UTextBlock* St = Txt(Status, 14, S && S->IsRosterLoaded() ? BoxUi::Muted : BoxUi::Bad);
 	St->SetAutoWrapText(true);
 	AddV(Col, St, false, FMargin(4.f, 0.f, 0.f, 8.f));
-	UTextBlock* Nav = Txt(TEXT("Мышь · Клавиатура: стрелки + Enter · Геймпад: крестовина + A"), 14, BoxUi::Muted);
+	UTextBlock* Nav = Txt(TEXT("Мышь · Клавиатура: стрелки + Enter, Esc — назад · Геймпад: крестовина + A, B — назад"), 14, BoxUi::Muted);
 	Nav->SetAutoWrapText(true);
 	AddV(Col, Nav, false, FMargin(4.f, 0.f));
 	return Root;
@@ -66,9 +68,14 @@ UWidget* UBoxingMainMenuWidget::BuildUi()
 
 void UBoxingMainMenuWidget::FocusFirst()
 {
-	if (FirstButton)
+	FocusKey(TEXT("Выставка"));
+}
+
+void UBoxingMainMenuWidget::OpenSettings()
+{
+	if (ABoxingMenuPlayerController* PC = Cast<ABoxingMenuPlayerController>(GetOwningPlayer()))
 	{
-		FirstButton->SetKeyboardFocus();
+		PC->ShowSettings();
 	}
 }
 

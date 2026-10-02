@@ -168,15 +168,17 @@ struct FBoxerStats
 	float Defense = 70.f;
 };
 
-// Входные данные бойца — упрощённый FightProfile (boxer.ts). Проекцию веса (fightProfile)
-// ядро не делает: MassForPower = DurabilityMass = WeightKg. Нужна физика сгонки/перехода —
-// посчитать снаружи и подать уже спроецированные статы/вес.
+// Входные данные бойца — упрощённый FightProfile (boxer.ts). Проекцию веса (fightProfile) ядро не делает:
+// её считает экспорт ростера (Roster.json) или вызывающий. Массы для урона — MassForPower/DurabilityMass
+// (кг; 0 — взять WeightKg): сгонка вниз бьёт «как более крупный», переход вверх — легче своей категории (S-57).
 struct FFighterSetup
 {
 	FBoxerStats Stats;
 	float HeightCm = 178.f; // ядру не нужен (для масштаба модели в UE)
 	float ReachCm = 183.f;
 	float WeightKg = 70.f;
+	float MassForPower = 0.f;   // FightProfile.massForPower (0 — WeightKg)
+	float DurabilityMass = 0.f; // FightProfile.durabilityMass (0 — WeightKg)
 	EBoxStyle Style = EBoxStyle::Balanced;
 	float Seasoning = 1.f;  // 1 — обстрелян; <1 — «зелёный» на дистанции (налог в судействе/баке)
 	bool bAiControlled = false;
@@ -196,6 +198,9 @@ struct FFightConfig
 	// Постановка раунда (corners.ts): старт и перерыв в своих углах, выход по гонгу, нейтральный угол на
 	// нокдауне. false — прежний режим «раунд с центра» (corners:false веба; проверки механики).
 	bool bCorners = true;
+	// Dev (web `?ko=1`, S-57): «стеклянный» синий — формульных нокдаунов у него нет, падает ровно на здоровье 0 и не
+	// встаёт (KO), «форма дня» обоих = 1. Для скриншотов нокаута/повтора; на обычный бой не влияет.
+	bool bGlassJaw = false;
 	uint32 Seed = 1;
 };
 

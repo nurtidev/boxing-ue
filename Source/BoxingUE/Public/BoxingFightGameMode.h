@@ -15,13 +15,16 @@
 // контакта первых N попаданий/блоков, с интервалом ≥ 1.5 с), -BoxShotPrefix=ring_fight (имя файлов),
 // -BoxVisual=<класс>|none (визуальная подмена), -BoxVisualRed=/-BoxVisualBlue= (своя подмена угла),
 // -BoxPhysHits=0|1 (физреакция), -BoxFeel=0 (без слоя «ощущения удара»), -BoxMinSep=СМ (мин. дистанция визуала),
-// -BoxNoCorners (бой без постановки углов, S-53), -BoxStageShots (скриншоты стадий постановки: <префикс>_stage_*.png).
+// -BoxNoCorners (бой без постановки углов, S-53), -BoxStageShots (скриншоты стадий постановки: <префикс>_stage_*.png),
+// -BoxBot=novice|average|strong|masher (бот «человека» за красный), -BoxBotFights=N [-BoxBotFrom=K] (серия боёв бота
+// без отрисовки → сводка «BOT СВОДКА» в лог → выход), -BoxGlassJaw (синий падает на здоровье 0 и не встаёт) — S-57.
 #pragma once
 
 #include "CoreMinimal.h"
 #include "GameFramework/GameModeBase.h"
 #include "BoxingFightCore.h"
 #include "BoxingFightBPTypes.h"
+#include "FightBot.h"
 #include "BoxingFightGameMode.generated.h"
 
 class ABoxerCharacter;
@@ -160,6 +163,9 @@ public:
 	void QueueAction(EFightAction Action, EPunchTarget Target = EPunchTarget::Head);
 	// Удерживаемый шаг ног (повторяется каждый шаг ядра; ядро само держит кулдаун). None — отпущено.
 	void SetHeldStep(EFightAction Action, bool bHeld);
+	// Сдача игрока (меню паузы, S-59): поражение RSC в текущем раунде, события раздаются сразу.
+	void Surrender();
+	bool WasSurrendered() const { return bSurrendered; }
 
 protected:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
@@ -172,6 +178,17 @@ private:
 	void LocateRing();
 	void StartFight();
 	void StepCore();
+	// S-57: бот «человека» за красный угол (-BoxBot=novice|average|strong|masher) — жмёт через QueueAction/SetHeldStep,
+	// как клавиатура; -BoxBotFights=N — N боёв подряд без отрисовки, сводка в лог (LogTemp «BOT …»), затем выход.
+	void BotThink();
+	void RunBotBatch();
+	bool bBot = false;
+	EFightBotSkill BotSkill = EFightBotSkill::Average;
+	FFightBot Bot;
+	bool bBotHeld = false;
+	int32 BotFights = 0;
+	int32 BotFrom = 0;
+	bool bGlassJaw = false; // -BoxGlassJaw: синий — «груша» с подбородком 1, падает на здоровье 0 и не встаёт (web ?ko=1)
 	void DispatchEvents(TArray<FFightEvent>&& Events);
 	void PushStateToBoxers(float DeltaSeconds);
 	void CheckFeelContacts();
@@ -198,6 +215,7 @@ private:
 	};
 	TArray<FQueued> Pending;
 	bool bHasHeldStep = false;
+	bool bSurrendered = false;
 	EFightAction HeldStep = EFightAction::StepFwd;
 
 	// Отладка / headless.
