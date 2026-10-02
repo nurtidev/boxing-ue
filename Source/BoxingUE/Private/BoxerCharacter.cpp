@@ -558,6 +558,7 @@ void ABoxerCharacter::HandleFightEvent(const FFightEvent& Event, const FVector& 
 void ABoxerCharacter::OnPunchStarted_Implementation(EBoxPunchType Punch, EBoxPunchTarget Target)
 {
 	OnPunchStartedDelegate.Broadcast(Punch, Target);
+	UE_LOG(LogTemp, Log, TEXT("PUNCHSTART %s [%d] t=%.2f удар=%d"), *GetName(), FighterIndex, GetWorld()->GetTimeSeconds(), (int32)Punch);
 	UAnimMontage* M = GetPunchMontage(Punch, Target);
 	if (!M || bKnockedDown || PunchDuration <= 0.f || ActiveMontageSlot == EBoxMontageSlot::Finale)
 	{

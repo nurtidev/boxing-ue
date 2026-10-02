@@ -2,7 +2,7 @@
     "FileVersion":  3,
     "EngineAssociation":  "5.7",
     "Category":  "",
-    "Description":  "S-41: РїСЂРѕС‚РѕС‚РёРї Р±РѕРєСЃР° РЅР° UE5 вЂ” СЂРёРЅРі, 2 MetaHuman, Motion Matching, С„РёР·СЂРµР°РєС†РёСЏ РЅР° РїРѕРїР°РґР°РЅРёРµ",
+    "Description":  "S-41: прототип бокса на UE5 — ринг, 2 MetaHuman, Motion Matching, физреакция на попадание",
     "Modules":  [
                     {
                         "Name":  "BoxingUE",
