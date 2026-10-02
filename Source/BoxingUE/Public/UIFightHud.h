@@ -68,6 +68,8 @@ private:
 	float Clock = 0.f;
 	// Сценарий проверки (-BoxUiAuto): снимки боя.
 	float FightTime = 0.f;
+	// S-63: время в фазе нокдауна — баннер «на настиле» ждёт, пока соперник ляжет (BoxerCharacter::IsFloored).
+	float DownPhaseTime = 0.f;
 	bool bShotHud = false;
 	bool bShotKd = false;
 	bool bShotBreak = false;

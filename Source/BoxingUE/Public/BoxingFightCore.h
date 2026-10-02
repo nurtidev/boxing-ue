@@ -193,6 +193,10 @@ private:
 
 	// --- нокдауны (knockdown.ts) ---
 	void TryKnockdown(int32 Att, int32 Def, EPunchKind Kind, double FormAtt, double ShotMul);
+	// Профи (S-61): чистый силовой роняет сам по себе, поплывшего под градом останавливает рефери. bWasHurt — попадание
+	// пришлось в окно встряски от предыдущего. Только при bPro; у любителей не зовётся (поток ГСЧ как в вебе).
+	void TryProShot(int32 Att, int32 Def, double HpDmg, bool bBody, bool bWasHurt);
+	double ProVulnerability(int32 Def, bool bWasHurt) const;
 	void Knockdown(int32 Att, int32 Def);
 	void UpdateCount(double Dt);
 	void RiseUp();
@@ -291,6 +295,10 @@ private:
 	// постановка (state.ts corners/stage/resumeGap/lyingAt/restT)
 	bool bCorners = true;
 	bool bGlassJaw = false; // dev: синий падает только на здоровье 0 и не встаёт (FFightConfig::bGlassJaw)
+	// Профи-правила (S-61, FFightConfig::bProRules): досрочки от чистого удара, рефери, судьи профи.
+	bool bPro = false;
+	double ProShotSev = 0;      // тяжесть удара, уронившего «от удара» (для шанса KO), 0 — нокдаун от давления/flash
+	double JudgeLean[3] = {0, 0, 0}; // вкус судьи профи: −… объём, +… мощь
 	FStageState Stage;
 	double ResumeGap = 1.15;
 	bool bHasLying = false;

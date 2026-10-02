@@ -33,6 +33,8 @@ public:
 	void OpenPause();
 	void ClosePause();
 	bool IsPauseOpen() const { return PauseWidget != nullptr; }
+	// S-62 (game-feel): панель итога открыта — камера ставит кадр итога (победитель слева от панели).
+	bool IsResultOpen() const { return ResultWidget != nullptr; }
 	// Сдача: поражение RSC (ABoxingFightGameMode::Surrender), итог — сразу после короткой паузы.
 	void SurrenderFromPause();
 	void ExitToMenu();

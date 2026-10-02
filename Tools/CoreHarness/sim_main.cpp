@@ -1,6 +1,7 @@
 // Харнесс ядра боя вне UE: детерминизм, 200 сидов, паритет с TS, постановка раунда (S-53), доли исходов vs веб и бот «человека» (S-57).
 #include "BoxingFightCore.h"
 #include "FightBot.h"
+#include "FightProfile.h"
 extern "C" int printf(const char*, ...);
 
 namespace
@@ -429,6 +430,7 @@ namespace
 	struct FBotTally
 	{
 		int32 N = 0, Wins = 0, Ko = 0, Rsc = 0, Dec = 0, KdFor = 0, KdAgainst = 0, HitsFor = 0, HitsAgainst = 0, Gassed = 0;
+		int32 Draws = 0, Decisions = 0, SameCards = 0, LossStop = 0; // S-61: ничьи, решения, решения с тремя одинаковыми картами, проигрыши досрочно
 		double Rate() const { return N ? double(Wins) / N : 0; }
 	};
 
@@ -436,19 +438,23 @@ namespace
 	uint32 BotSeed(int32 K) { return RefSeed(K) ^ 0xabcu; }
 
 	// Ввод — как GameMode: нажатия бота копятся и применяются на границе шага, удержание ног повторяется каждый шаг.
-	FBotTally RunBot(EFightBotSkill Skill, const FRefProf& Me, const FRefProf& Ai, int32 N, float RoundSec)
+	FBotTally RunBotSetups(EFightBotSkill Skill, const FFighterSetup& Me, const FFighterSetup& Ai, int32 N, float RoundSec, int32 Rounds = 3,
+		bool bPro = false)
 	{
 		FBotTally T;
 		for (int32 K = 0; K < N; ++K)
 		{
 			FFightConfig C;
 			C.Seed = BotSeed(K);
-			C.Rounds = 3;
+			C.Rounds = Rounds;
 			C.RoundSeconds = RoundSec;
 			C.BreakSeconds = 0.f;
-			C.Fighters[0] = SetupOf(Me);
+			C.bAllowDraw = bPro;
+			C.bProRules = bPro;
+			C.Fighters[0] = Me;
 			C.Fighters[0].bAiControlled = false;
-			C.Fighters[1] = SetupOf(Ai);
+			C.Fighters[1] = Ai;
+			C.Fighters[1].bAiControlled = true;
 			FBoxingFightCore Core;
 			Core.Init(C);
 			FFightBot Bot;
@@ -478,8 +484,20 @@ namespace
 			T.Ko += R.Method == EFightMethod::KO;
 			T.Rsc += R.Method == EFightMethod::RSC;
 			T.Dec += R.Method == EFightMethod::Decision || R.Method == EFightMethod::Draw;
+			T.Draws += R.WinnerIndex < 0;
+			T.LossStop += R.WinnerIndex == 1 && (R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC);
+			if (R.Method == EFightMethod::Decision || R.Method == EFightMethod::Draw)
+			{
+				++T.Decisions;
+				T.SameCards += R.JudgeTotals[0].Red == R.JudgeTotals[1].Red && R.JudgeTotals[0].Blue == R.JudgeTotals[1].Blue &&
+					R.JudgeTotals[0].Red == R.JudgeTotals[2].Red && R.JudgeTotals[0].Blue == R.JudgeTotals[2].Blue;
+			}
 		}
 		return T;
+	}
+	FBotTally RunBot(EFightBotSkill Skill, const FRefProf& Me, const FRefProf& Ai, int32 N, float RoundSec)
+	{
+		return RunBotSetups(Skill, SetupOf(Me), SetupOf(Ai), N, RoundSec);
 	}
 
 	void PrintBot(const char* Label, EFightBotSkill Skill, const FBotTally& T)
@@ -523,6 +541,249 @@ namespace
 	}
 }
 
+// --- S-61: ростер UE (RosterRef.inc, генератор — rosterref.mjs): пары плейтеста QA и досрочки профи по весу ---
+#include "RosterRef.inc"
+namespace
+{
+	struct FRosterRef
+	{
+		const char* Name;
+		bool bFemale;
+		int32 Kind; // 0 любитель, 1 профи, 2 легенда
+		double W, Reach;
+		double S[7], PS[7];
+		double PSeason, ProOverall;
+		EBoxStyle Style;
+	};
+	const FRosterRef GRoster[] = {ROSTER_REF_BOXERS};
+	struct FQaRef
+	{
+		const char* Name;
+		int32 R, B;
+	};
+	const FQaRef GQa[] = {ROSTER_REF_QA};
+	struct FProPairRef
+	{
+		const char* Div;
+		int32 A, B, Rounds;
+	};
+	const FProPairRef GProPairs[] = {ROSTER_REF_PRO_PAIRS};
+	constexpr int32 GProPairNum = int32(sizeof(GProPairs) / sizeof(GProPairs[0]));
+	const double GProClassesM[] = {ROSTER_REF_PRO_CLASSES_M};
+	const double GProClassesF[] = {ROSTER_REF_PRO_CLASSES_F};
+
+	// Как FRosterBoxer::ToPreset → FBoxerPreset::ToSetup: в профи-бою — ProStats + обстрелянность, иначе Stats.
+	FFighterSetup RosterSetup(const FRosterRef& B, bool bProFight)
+	{
+		const double* X = bProFight ? B.PS : B.S;
+		FFighterSetup S;
+		S.Stats = {float(X[0]), float(X[1]), float(X[2]), float(X[3]), float(X[4]), float(X[5]), float(X[6])};
+		S.ReachCm = float(B.Reach);
+		S.WeightKg = float(B.W);
+		S.Style = B.Style;
+		S.Seasoning = bProFight ? float(B.PSeason) : 1.f;
+		S.bFemale = B.bFemale;
+		S.bAiControlled = true;
+		return S;
+	}
+
+	// Пара Выставки, как UBoxingGameInstanceSubsystem::ApplyToFightMode: профи-правила, если хоть один не любитель; вес
+	// боя — кэтчвейт по категориям (любители — WEIGHT_CLASSES веба, иначе — веса дивизионов профи/легенд ростера).
+	struct FPairSetup
+	{
+		FFighterSetup R, B;
+		bool bPro = false;
+		double Ring = 0;
+	};
+	FPairSetup PairOf(const FRosterRef& R, const FRosterRef& B, bool bProject)
+	{
+		FPairSetup P;
+		P.bPro = R.Kind != 0 || B.Kind != 0;
+		P.R = RosterSetup(R, P.bPro);
+		P.B = RosterSetup(B, P.bPro);
+		const double* Cls = GProClassesM;
+		int32 Num = int32(sizeof(GProClassesM) / sizeof(double));
+		if (!P.bPro)
+		{
+			Cls = R.bFemale ? BoxingFightProfile::AMATEUR_CLASSES_F : BoxingFightProfile::AMATEUR_CLASSES_M;
+			Num = R.bFemale ? int32(sizeof(BoxingFightProfile::AMATEUR_CLASSES_F) / sizeof(double))
+							: int32(sizeof(BoxingFightProfile::AMATEUR_CLASSES_M) / sizeof(double));
+		}
+		else if (R.bFemale)
+		{
+			Cls = GProClassesF;
+			Num = int32(sizeof(GProClassesF) / sizeof(double));
+		}
+		P.Ring = BoxingFightProfile::Catchweight(R.W, B.W, Cls, Num);
+		if (bProject)
+		{
+			P.R = BoxingFightProfile::ProjectToWeight(P.R, P.Ring);
+			P.B = BoxingFightProfile::ProjectToWeight(P.B, P.Ring);
+		}
+		return P;
+	}
+
+	// sim.exe qa <N> — таблица плейтеста QA (bal.sh): бот за красного, 4 уровня, без и с проекцией веса; судьи.
+	int32 QaTable(int32 N, float RoundSec)
+	{
+		const EFightBotSkill Skills[4] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong, EFightBotSkill::Masher};
+		printf("пары плейтеста QA: бот за красного против ИИ, %d боёв, раунд %.0f с, сиды bal.sh (k·2654435761 + 17) ^ 0xabc\n", N, RoundSec);
+		for (const FQaRef& Q : GQa)
+		{
+			const FRosterRef& R = GRoster[Q.R];
+			const FRosterRef& B = GRoster[Q.B];
+			for (int32 Proj = 0; Proj < 2; ++Proj)
+			{
+				const FPairSetup P = PairOf(R, B, Proj == 1);
+				const int32 Rounds = P.bPro ? 10 : 3;
+				printf("  %-30s %s %2d р., вес %s %3.0f:", Q.Name, P.bPro ? "профи " : "любит.", Rounds, Proj ? "боя " : "свой", Proj ? P.Ring : 0.0);
+				int32 Dec = 0, Same = 0, Draw = 0, Fights = 0, Stops = 0;
+				double Kd = 0;
+				for (int32 K = 0; K < 4; ++K)
+				{
+					const FBotTally T = RunBotSetups(Skills[K], P.R, P.B, N, RoundSec, Rounds, P.bPro);
+					printf(" %s %3.0f%%", FFightBot::SkillName(Skills[K]), T.Rate() * 100);
+					Dec += T.Decisions;
+					Same += T.SameCards;
+					Draw += T.Draws;
+					Fights += T.N;
+					Stops += T.Ko + T.Rsc;
+					Kd += T.KdFor + T.KdAgainst;
+				}
+				printf(" | досрочек %.0f%%, нокдаунов/бой %.2f, ничьих %.0f%%, три одинаковые карты %.0f%% решений\n", 100.0 * Stops / Fights,
+					Kd / Fights, 100.0 * Draw / Fights, Dec ? 100.0 * Same / Dec : 0.0);
+				if (Proj)
+				{
+					// Прогноз карточки Выставки (ForecastPair → PredictOutcome): ИИ против ИИ, 60 боёв.
+					const BoxingFightProfile::FOutcomeOdds O = BoxingFightProfile::PredictOutcome(P.R, P.B, Rounds, P.bPro);
+					printf("  %-30s прогноз карточки: красный %.0f%% (досрочно %.0f%%), синий %.0f%% (досрочно %.0f%%), ничья %.0f%%\n", "", O.RedWin * 100,
+						O.RedStoppage * 100, O.BlueWin * 100, O.BlueStoppage * 100, O.Draw * 100);
+				}
+			}
+		}
+		return 0;
+	}
+
+	// Досрочки профи по весу: топ-10 каждого дивизиона ростера (близкие соседи и перевес через одного/двух), ИИ против ИИ.
+	struct FBand
+	{
+		const char* Name;
+		bool bFemale;
+		double Lo, Hi;
+		double MinStop, MaxStop; // ориентир доли досрочек (реальная статистика титульных боёв профи)
+		int32 Fights, Stops, Kd, Draws, Dec, Same, Rounds, SplitRounds, Kos;
+		int32 CloseF, CloseS, GapF, GapS; // близкие (разница уровней < 3) и перевес (≥ 5)
+	};
+	int32 ProStoppageTable(int32 N, float RoundSec)
+	{
+		FBand Bands[] = {
+			{"М тяж/крузер 90–100", false, 89, 101, 0.50, 0.78, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			{"М полутяж–1-й ср. 70–79", false, 69, 80, 0.38, 0.62, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			{"М полусредние 63–67", false, 62, 68, 0.32, 0.55, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			{"М лёгкие 55–61", false, 55, 62, 0.25, 0.48, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			{"М мухи 48–53", false, 47, 54, 0.15, 0.42, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+			{"Ж все веса", true, 40, 101, 0.08, 0.35, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+		};
+		for (int32 K = 0; K < GProPairNum; ++K)
+		{
+			const FProPairRef& Pp = GProPairs[K];
+			const FRosterRef& A = GRoster[Pp.A];
+			const FRosterRef& B = GRoster[Pp.B];
+			FBand* Band = nullptr;
+			for (FBand& Bd : Bands)
+				if (Bd.bFemale == A.bFemale && A.W >= Bd.Lo && A.W < Bd.Hi) Band = &Bd;
+			if (!Band) continue;
+			const FPairSetup P = PairOf(A, B, true);
+			const double Gap = AbsD(A.ProOverall - B.ProOverall);
+			for (int32 I = 0; I < N; ++I)
+			{
+				const bool bSwap = I % 2 == 1;
+				FFightConfig C;
+				C.Seed = RefSeed(K * 1000 + I);
+				C.Rounds = Pp.Rounds;
+				C.RoundSeconds = RoundSec;
+				C.BreakSeconds = 0.f;
+				C.bAllowDraw = true;
+				C.bProRules = true;
+				C.Fighters[bSwap ? 1 : 0] = P.R;
+				C.Fighters[bSwap ? 0 : 1] = P.B;
+				FBoxingFightCore Core;
+				Core.Init(C);
+				for (int32 S = 0; S < 60 * 60 * 60 && !Core.IsOver(); ++S)
+				{
+					Core.Tick(1.f / 60.f);
+					Core.PollEvents();
+				}
+				const FFightResult& R = Core.GetResult();
+				const bool bStop = R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC;
+				++Band->Fights;
+				Band->Stops += bStop;
+				Band->Kos += R.Method == EFightMethod::KO;
+				Band->Kd += R.Knockdowns[0] + R.Knockdowns[1];
+				Band->Draws += R.WinnerIndex < 0;
+				for (int32 Rr = 0; Rr < R.Rounds.Num(); ++Rr)
+				{
+					const FJudgeCard* Jc = R.Rounds[Rr].JudgeCards;
+					++Band->Rounds;
+					Band->SplitRounds += !(Jc[0].Red == Jc[1].Red && Jc[0].Blue == Jc[1].Blue && Jc[0].Red == Jc[2].Red && Jc[0].Blue == Jc[2].Blue);
+				}
+				if (!bStop)
+				{
+					++Band->Dec;
+					Band->Same += R.JudgeTotals[0].Red == R.JudgeTotals[1].Red && R.JudgeTotals[0].Blue == R.JudgeTotals[1].Blue &&
+						R.JudgeTotals[0].Red == R.JudgeTotals[2].Red && R.JudgeTotals[0].Blue == R.JudgeTotals[2].Blue;
+				}
+				if (Gap < 3) { ++Band->CloseF; Band->CloseS += bStop; }
+				if (Gap >= 5) { ++Band->GapF; Band->GapS += bStop; }
+			}
+		}
+		int32 Fails = 0;
+		printf("досрочки профи по весу (топ-10 дивизионов ростера, ИИ против ИИ, %d боёв на пару, раунд %.0f с; ориентир — реальные титульные бои):\n", N,
+			RoundSec);
+		double PrevStop = 2;
+		for (const FBand& Bd : Bands)
+		{
+			const double St = Bd.Fights ? double(Bd.Stops) / Bd.Fights : 0;
+			const double Close = Bd.CloseF ? double(Bd.CloseS) / Bd.CloseF : 0;
+			const double GapSt = Bd.GapF ? double(Bd.GapS) / Bd.GapF : 0;
+			// Ориентир + у мужчин тяжелее — не реже (допуск шума 0.03) + перевес досрочит не реже близких (допуск шума 0.05).
+			const bool bOk = St >= Bd.MinStop && St <= Bd.MaxStop && (Bd.bFemale || St <= PrevStop + 0.03) && (Bd.GapF < 20 || GapSt >= Close - 0.05);
+			if (!Bd.bFemale) PrevStop = St;
+			Fails += bOk ? 0 : 1;
+			printf("  %s %-26s досрочек %3.0f%% (из них KO %.0f%%; ориентир %.0f–%.0f%%; близкие %.0f%% / перевес ≥5: %.0f%%), нокдаунов/бой %.2f, ничьих %.1f%%, три "
+				   "одинаковые карты %.0f%% решений, раундов с разными картами %.0f%%, боёв %d\n",
+				bOk ? "  " : "!!", Bd.Name, St * 100, Bd.Stops ? 100.0 * Bd.Kos / Bd.Stops : 0.0, Bd.MinStop * 100, Bd.MaxStop * 100, Close * 100, GapSt * 100,
+				double(Bd.Kd) / FMath::Max(1, Bd.Fights), 100.0 * Bd.Draws / FMath::Max(1, Bd.Fights), Bd.Dec ? 100.0 * Bd.Same / Bd.Dec : 0.0,
+				100.0 * Bd.SplitRounds / FMath::Max(1, Bd.Rounds), Bd.Fights);
+		}
+		printf("досрочки профи по весу: %s\n", Fails ? "MISMATCH" : "OK");
+
+		// Бот «человека» против равного в профи (10 р., 75 кг): не безнадёжно и не тривиально, досрочки есть, спам не побеждает.
+		const FRefProf& Even = GWebRef[8].A; // равные 75/75 (профиль эталона веба)
+		FFighterSetup Me = SetupOf(Even), Ai = SetupOf(Even);
+		const EFightBotSkill Skills[4] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong, EFightBotSkill::Masher};
+		FBotTally Tl[4];
+		printf("бот «человека» против равного 75/75 в профи (10 р. × %.0f с, %d боёв):\n", RoundSec, N * 5);
+		for (int32 K = 0; K < 4; ++K)
+		{
+			Tl[K] = RunBotSetups(Skills[K], Me, Ai, N * 5, RoundSec, 10, true);
+			printf("  %-8s побед %3.0f%%  KO %d RSC %d решений %d (ничьих %d), проиграл досрочно %d, нокдаунов %d/%d, три одинаковые карты %.0f%% решений\n",
+				FFightBot::SkillName(Skills[K]), Tl[K].Rate() * 100, Tl[K].Ko, Tl[K].Rsc, Tl[K].Decisions, Tl[K].Draws, Tl[K].LossStop, Tl[K].KdFor,
+				Tl[K].KdAgainst, Tl[K].Decisions ? 100.0 * Tl[K].SameCards / Tl[K].Decisions : 0.0);
+		}
+		const FBotTally& Avg = Tl[1];
+		const double AvgStop = double(Avg.Ko + Avg.Rsc) / FMath::Max(1, Avg.N);
+		// Очки: победа 1, ничья 0.5 (в 10-раундовом профи-бою равных ничьих ~10–15% — у судьи 95-95 при 5 раундах на 5).
+		const auto Pts = [](const FBotTally& X) { return (X.Wins + 0.5 * X.Draws) / FMath::Max(1, X.N); };
+		const bool bBotOk = Pts(Avg) >= 0.35 && Pts(Avg) <= 0.72 && Pts(Tl[2]) > Pts(Avg) && Pts(Tl[0]) < Pts(Avg) && Tl[3].Rate() < 0.05 &&
+			AvgStop >= 0.15 && AvgStop <= 0.65;
+		printf("  средний: очков %.2f (побед %.2f, досрочек %.2f — ориентир 0.15–0.65); очков: новичок %.2f < средний < сильный %.2f; спам побед %.2f < 0.05 — %s\n",
+			Pts(Avg), Avg.Rate(), AvgStop, Pts(Tl[0]), Pts(Tl[2]), Tl[3].Rate(), bBotOk ? "OK" : "MISMATCH");
+		Fails += bBotOk ? 0 : 1;
+		return Fails ? 1 : 0;
+	}
+}
+
 int main(int Argc, char** Argv)
 {
 	// sim.exe bot <N> <раунд, с> — таблица бота «человека» (подробно).
@@ -532,6 +793,15 @@ int main(int Argc, char** Argv)
 		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
 		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
 		return CheckBots(N > 0 ? N : 200, Sec > 0 ? float(Sec) : 55.f, true);
+	}
+	// S-61: sim.exe qa <N> <раунд, с> — пары плейтеста QA; sim.exe pro <N> <раунд, с> — досрочки профи по весу.
+	if (Argc >= 2 && (Argv[1][0] == 'q' || Argv[1][0] == 'p'))
+	{
+		int32 N = 0, Sec = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
+		const float Rs = Sec > 0 ? float(Sec) : 55.f;
+		return Argv[1][0] == 'q' ? QaTable(N > 0 ? N : 50, Rs) : ProStoppageTable(N > 0 ? N : 20, Rs);
 	}
 	// sim.exe webref <N> <раунд, с> — только сверка с эталоном веба (подробно).
 	if (Argc >= 2 && Argv[1][0] == 'w')
@@ -670,10 +940,48 @@ int main(int Argc, char** Argv)
 	Fails += bWalk ? 0 : 1;
 
 	// --- 6. Доля побед/досрочек/нокдаунов vs эталон веба (S-57): 14 пар interactive-parity (+2 профи), раунд 55 и 180 с ---
+	// Профи-пары здесь — без bProRules: это сверка ЗЕРКАЛА веба (у веба профи-правил нет); профи-правила — проверка 9.
 	Fails += CheckWebRef(400, 55.f, false);
 	Fails += CheckWebRef(400, 180.f, false);
 	// --- 7. Бот «человека» против ИИ (S-57) ---
 	Fails += CheckBots(200, 55.f, true);
+
+	// --- 8. Проекция веса (S-61): BoxingFightProfile::ProjectToWeight == fightProfile веба; кэтчвейт как App.tsx ---
+	{
+		struct FProjCase { const char* Name; double Target; double St[7]; double Mass, Dur; };
+		// vite-node: Boxer.fightProfile(90, true) Головкина (легенда, 72 кг) и Тайсона Фьюри (100 кг); сгонка 81→75 — WebRef.inc.
+		const FProjCase Cases[] = {
+			{"Геннадий Головкин", 90, {95.5, 85.5, 86.5, 78.416, 82.355, 85, 86}, 66.6, 65.7},
+			{"Тайсон Фьюри", 90, {86.7, 81.8, 90.7, 67.76, 73.744, 92, 90}, 95.5, 95},
+		};
+		const auto Same = [](const char* X, const char* Y) { while (*X && *X == *Y) { ++X; ++Y; } return *X == *Y; };
+		int32 Bad = 0;
+		for (const FProjCase& Pc : Cases)
+		{
+			const FRosterRef* Who = nullptr;
+			for (const FRosterRef& R : GRoster)
+				if (Same(R.Name, Pc.Name)) Who = &R;
+			if (!Who) { ++Bad; continue; }
+			const FFighterSetup S = BoxingFightProfile::ProjectToWeight(RosterSetup(*Who, true), Pc.Target);
+			const float X[7] = {S.Stats.Power, S.Stats.HandSpeed, S.Stats.Footwork, S.Stats.Stamina, S.Stats.Chin, S.Stats.Technique, S.Stats.Defense};
+			for (int32 K = 0; K < 7; ++K) Bad += AbsD(X[K] - Pc.St[K]) > 1e-3;
+			Bad += AbsD(S.MassForPower - Pc.Mass) > 1e-3 || AbsD(S.DurabilityMass - Pc.Dur) > 1e-3;
+		}
+		FFighterSetup Cut;
+		Cut.Stats = {74.4f, 74, 74.2f, 74, 74, 74, 74};
+		Cut.WeightKg = 81;
+		const FFighterSetup C2 = BoxingFightProfile::ProjectToWeight(Cut, 75);
+		Bad += AbsD(C2.Stats.Stamina - 65.12) > 1e-3 || AbsD(C2.Stats.Chin - 68.672) > 1e-3 || AbsD(C2.MassForPower - 78.3) > 1e-3 || AbsD(C2.DurabilityMass - 78) > 1e-3;
+		const int32 NumM = int32(sizeof(GProClassesM) / sizeof(double));
+		const int32 NumAm = int32(sizeof(BoxingFightProfile::AMATEUR_CLASSES_M) / sizeof(double));
+		Bad += BoxingFightProfile::Catchweight(72, 100, GProClassesM, NumM) != 90;                         // Головкин–Фьюри
+		Bad += BoxingFightProfile::Catchweight(92, 54, BoxingFightProfile::AMATEUR_CLASSES_M, NumAm) != 75; // Гадфа–Вейтия
+		Bad += BoxingFightProfile::Catchweight(50, 54, BoxingFightProfile::AMATEUR_CLASSES_M, NumAm) != 50; // равенство — меньшая
+		printf("проекция веса vs fightProfile веба (Головкин/Фьюри → 90 кг, сгонка 81→75, кэтчвейт): %s\n", Bad ? "MISMATCH" : "OK");
+		Fails += Bad ? 1 : 0;
+	}
+	// --- 9. Профи-правила (S-61): доля досрочек по весу на парах ростера + бот против равного в профи ---
+	Fails += ProStoppageTable(16, 55.f);
 
 	Fails += CheckGeometry();
 	Fails += G_Fail ? 1 : 0;

@@ -3,6 +3,7 @@
 #include "BoxerCharacter.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Retargeter/IKRetargeter.h"
+#include "AnimationRuntime.h"
 
 // Доступ к FAnimInstanceProxy::DefaultLinkedInstanceInputNode (private, сеттера нет). Меш кладёт входную позу
 // пост-процесса только в этот узел (USkeletalMeshComponent::EvaluatePostProcessMeshInstance), а у нативного
@@ -140,10 +141,63 @@ void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
 		}
 	}
 
+	// S-62: левша — вся поза (локомоция, стойка, удары) зеркалится: передняя рука и нога правые. Процедурный слой
+	// (наведение, реакция) — после зеркала: он знает, что передняя рука у левши правая.
+	if (Params.bMirror)
+	{
+		ResolveMirror(Out.GetBoneContainer());
+		if (MirrorBones.Num() == Out.GetNumBones())
+		{
+			FAnimationRuntime::MirrorPose(Out, Params.MirrorAxis == 2 ? EAxis::Y : EAxis::X, MirrorBones, MirrorRefRots);
+		}
+	}
+
 	if (Params.bFx)
 	{
 		Debug = FBoxerFeelDebug();
 		Fx.Apply(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug);
+	}
+}
+
+void FBoxerLayerRootNode::ResolveMirror(const FBoneContainer& Bones)
+{
+	if (MirrorSerial == Bones.GetSerialNumber() && MirrorContainer == &Bones)
+	{
+		return;
+	}
+	MirrorSerial = Bones.GetSerialNumber();
+	MirrorContainer = &Bones;
+	const int32 Num = Bones.GetCompactPoseNumBones();
+	MirrorBones.Reset(Num);
+	MirrorRefRots.SetNum(Num);
+	const FReferenceSkeleton& Ref = Bones.GetReferenceSkeleton();
+	for (int32 I = 0; I < Num; ++I)
+	{
+		const FCompactPoseBoneIndex C(I);
+		const int32 Mesh = Bones.MakeMeshPoseIndex(C).GetInt();
+		// Компонентный поворот позы привязки (родитель в компактной позе всегда раньше ребёнка).
+		const FQuat Local = Bones.GetRefPoseTransform(C).GetRotation();
+		const FCompactPoseBoneIndex P = Bones.GetParentBoneIndex(C);
+		MirrorRefRots[C] = P.GetInt() != INDEX_NONE ? (MirrorRefRots[P] * Local).GetNormalized() : Local;
+		// Пара по имени: …_l ↔ …_r; центральная кость зеркалится сама в себя.
+		const FString Name = Ref.GetBoneName(Mesh).ToString();
+		FString Pair;
+		if (Name.EndsWith(TEXT("_l")))
+		{
+			Pair = Name.LeftChop(2) + TEXT("_r");
+		}
+		else if (Name.EndsWith(TEXT("_r")))
+		{
+			Pair = Name.LeftChop(2) + TEXT("_l");
+		}
+		int32 PairCompact = I;
+		if (!Pair.IsEmpty())
+		{
+			const int32 PairMesh = Bones.GetPoseBoneIndexForBoneName(FName(*Pair));
+			const int32 Pc = PairMesh != INDEX_NONE ? Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(PairMesh)).GetInt() : INDEX_NONE;
+			PairCompact = Pc >= 0 ? Pc : I;
+		}
+		MirrorBones.Add(FCompactPoseBoneIndex(PairCompact));
 	}
 }
 

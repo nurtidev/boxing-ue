@@ -93,12 +93,23 @@ HAIR_STYLE = {
     "medium":   (_g("Medium"), WAVES, 1.0),
     "long":     (_g("Ponytail"), WAVES, 1.0),
     "afro":     (_g("Short"), WAVES, 1.0),
-    "braids":   (_g("Ponytail"), WAVES, 0.8),
-    "dreads":   (_g("Medium"), WAVES, 1.0),
+    "braids":   (_g("Cornrows"), _g("Cornrows"), 1.0),   # S-64: колоски (у женщин — GR_Braids, см. FEMALE_HAIR)
+    "dreads":   (_g("Medium"), _g("Cornrows"), 1.0),
     "mohawk":   (_g("Short"), WAVES, 0.6),
     "ponytail": (_g("Ponytail"), _g("Ponytail"), 1.0),
     "bun":      (_g("Bun"), _g("Bun"), 1.0),
 }
+# S-64: женщинам — без «лысых» вариантов. Волны Kellan (Hair_S_360Waves) под HairLengthScale < 1 и пустой грум
+# на женской фигуре читаются лысиной (Шилдс). Стиль → грум для прямых / курчавых волос (None — как в HAIR_STYLE).
+FEMALE_HAIR = {
+    "braids": (_g("Braids"), _g("Braids")),          # колоски в узел + коса (Шилдс, Маршалл)
+    "dreads": (_g("Braids"), _g("Braids")),          # локи в боксе собраны назад — ближе всего коса
+    "afro":   (None, _g("Bun")),                     # курчавые собраны в пучок («афро-пуф»)
+    "short":  (None, _g("Cornrows")),                # короткие курчавые — колоски
+    "bald":   (_g("Cornrows"), _g("Cornrows")),      # лысых женщин в ростере нет — на всякий случай
+    "mohawk": (_g("Short"), _g("Cornrows")),
+}
+
 # Растительность на лице: грум бороды (компонент Beard) + щетина Kellan (компонент Mustache) под ней.
 FACIAL_HAIR = {
     "none":       (NONE, False),
@@ -254,9 +265,13 @@ def look_for(boxer, app):
     style = app.get("hairStyle", "short")
     straight, curly, length = HAIR_STYLE.get(style, HAIR_STYLE["short"])
     is_curly = int(app["skin"]) >= 5 and style in ("short", "afro", "braids", "dreads", "buzz", "medium", "mohawk")
+    if female and style in FEMALE_HAIR:
+        fs, fc = FEMALE_HAIR[style]
+        straight, curly = fs or straight, fc or curly
     g = curly if is_curly else straight
     if g is WAVES:
-        length = 0.38 if style == "buzz" else (round(len_j, 3) if length >= 1.0 else length)
+        # волны «под машинку» — только у мужчин; у женщин полная длина (короткие волосы, не лысина)
+        length = 0.38 if (style == "buzz" and not female) else (round(len_j, 3) if length >= 1.0 else length)
     elif g["groom"]:
         length = round(0.85 + 0.15 * (len_j - HAIR_LEN_JITTER[0]) / (HAIR_LEN_JITTER[1] - HAIR_LEN_JITTER[0]), 3)             if style in ("short", "medium") else 1.0
     hair = {"groom": g["groom"], "binding": g["binding"], "attach": g.get("attach"), "length": length, "melanin": hc["melanin"],

@@ -167,6 +167,10 @@ public:
 	void Surrender();
 	bool WasSurrendered() const { return bSurrendered; }
 
+	// Оформление арены по типу боя (S-64): акторы L_Ring с тегом ArenaAmateur / ArenaPro.
+	UFUNCTION(BlueprintCallable, Category = "Boxing")
+	void ApplyArenaDress(bool bPro);
+
 protected:
 	virtual void InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage) override;
 	virtual void StartPlay() override;
@@ -242,6 +246,10 @@ private:
 	float FeelGapAbsSum = 0.f;
 	float FeelGapMaxAbs = 0.f;
 	float FeelLungeMax = 0.f;
+	// S-62: засчитанные попадания, где путь кулака (локоть → фронт) проходит сквозь перчатку защиты (ближе 16 см к её центру).
+	int32 FeelHits = 0;
+	int32 FeelHitsThroughGlove = 0;
+	float FeelGloveMinCm = 1e6f;
 	int32 SepPushes = 0;
 	FSoftClassPath VisualPathFor(int32 Index) const;
 	// Постановка (S-53): лог смены стадий и скриншоты стадий (-BoxStageShots).

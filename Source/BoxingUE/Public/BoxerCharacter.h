@@ -21,6 +21,7 @@
 #include "BoxingFightBPTypes.h"
 #include "BoxerFeel.h"
 #include "BoxerAnimInstances.h"
+#include "BoxerFall.h"
 #include "BoxerCharacter.generated.h"
 
 class UAnimMontage;
@@ -390,9 +391,10 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
 	float FistReachCm = 10.f;
 
-	// Подшаг корпуса к цели, если рука не достаёт (см, пик в кадре контакта).
+	// Подшаг корпуса к цели, если рука не достаёт (см в осях меша, пик в кадре контакта). S-62: 30 → 45 (веб: до 0.5 м) — прямые с
+	// дальней дистанции ядра (1.3–1.4 м) у крупных пар не доставали; против более высокого — ещё × рост соперника / свой.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
-	float MaxLungeCm = 30.f;
+	float MaxLungeCm = 45.f;
 
 	// Цели: центр головы над костью head, радиусы «поверхностей» (голова, корпус, перчатки в блоке), см.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
@@ -436,6 +438,31 @@ public:
 
 	// S-58: проигравший досрочкой остановлен на ногах (RSC по итогам раунда, отказ) — стоит, не падает.
 	bool IsStoppedStanding() const { return bStoppedStanding; }
+
+	// ---------- Падение внутри канатов (S-62, BoxerFall.h) ----------
+	// Лежит на настиле: клип падения дошёл до касания таза (а не «ещё стоит согнувшись») — для баннера HUD.
+	bool IsFloored() const;
+	// Где ляжет тело (мир, пол ринга): голова и таз ИТОГОВОЙ позы клипа с доворотом/сдвигом падения — известно с первого
+	// кадра нокдауна (рефери обходит, камера нокдауна наводится). false — не лежит / раскладки нет.
+	bool GetLyingBody(FVector& OutHead, FVector& OutPelvis) const;
+	// Текущий визуальный сдвиг точки (см) и доворот курса (град) падения — отладка/метрики.
+	FVector2D GetFallOffset() const { return FallOffsetNow; }
+	float GetFallTurn() const { return FallTurnNow; }
+
+	// S-62: левша (Preset.bSouthpaw из ростера) — вся поза логического меша зеркалится (стойка, локомоция, удары), передняя
+	// рука — правая (наведение, реакция соперника). Только визуал. -BoxSouthpaw=0 — выкл., =red|blue|both — принудительно.
+	bool IsSouthpaw() const;
+
+	// Ось зеркала в компонентном пространстве логического меша (UEFN: вперёд +Y, вбок X): 1 — X, 2 — Y.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	int32 SouthpawMirrorAxis = 1;
+
+	// Падение: сдвиг от канатов набирается за FallBlendSeconds, после подъёма уходит за FallReleaseSeconds.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fall")
+	float FallBlendSeconds = 0.7f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fall")
+	float FallReleaseSeconds = 0.6f;
 
 	// ---------- Локомоция ----------
 
@@ -576,4 +603,32 @@ private:
 	FVector AimApproach = FVector::ForwardVector;
 	float AimRadius = 10.f;
 	int32 AimKind = 0; // 0 — голова, 1 — корпус, 2 — перчатки (блок)
+	FVector2D GuardUV = FVector2D::ZeroVector; // S-62: выбранная точка головы мимо перчаток (гистерезис)
+	bool bGuardUVValid = false;
+
+	// ---------- Падение (S-62) ----------
+	struct FFallClip
+	{
+		TArray<FVector> Pts; // точки тела по кадрам клипа (компонентное пространство логического меша, без масштаба облика)
+		FVector Head = FVector::ZeroVector;   // итоговая поза
+		FVector Pelvis = FVector::ZeroVector;
+		float FloorTime = -1.f; // с от начала монтажа: таз опустился на настил
+		bool bValid = false;
+	};
+	const FFallClip* FallClipFor(const UAnimMontage* Montage);
+	void StartFall();
+	void UpdateFall(const FFightSnapshot& Snapshot, float DeltaSeconds);
+	void SolveFall(const FFightSnapshot& Snapshot);
+	float VisualScale() const;
+	TMap<const UAnimMontage*, FFallClip> FallClips;
+	const UAnimMontage* FallMontage = nullptr;
+	BoxerFall::FLayout FallLayout;
+	BoxerFall::FPlaceOut FallSolve;
+	bool bFallActive = false;
+	bool bFallLogged = false;
+	float FallT = 0.f;
+	float FallW = 0.f;
+	FVector2D FallOffsetNow = FVector2D::ZeroVector;
+	float FallTurnNow = 0.f;
+	float FallMaxOutCm = -1e6f; // отладка (-BoxFallLog): кости тела за канатами
 };

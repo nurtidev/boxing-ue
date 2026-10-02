@@ -28,6 +28,11 @@ void ABoxingMenuGameMode::StartPlay()
 		ULevelStreamingDynamic::LoadLevelInstance(GetWorld(), BackgroundMap, FVector::ZeroVector, FRotator::ZeroRotator, bOk);
 		UE_LOG(LogTemp, Log, TEXT("UI: фон меню %s — %s"), *BackgroundMap, bOk ? TEXT("грузится") : TEXT("не загрузился"));
 	}
+	// S-63: ассеты боя — асинхронно, пока игрок в меню (к «В бой» всё уже в памяти, экран загрузки — на остаток).
+	if (UBoxingGameInstanceSubsystem* S = UBoxingGameInstanceSubsystem::Get(this))
+	{
+		S->StartFightPreload();
+	}
 	Super::StartPlay();
 }
 

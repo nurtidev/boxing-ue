@@ -16,5 +16,7 @@ public class BoxingUE : ModuleRules
 		PrivateDependencyModuleNames.AddRange(new string[] { "Json" });
 		// Облик бойцов (S-60/S-58): грумы волос/бороды.
 		PrivateDependencyModuleNames.AddRange(new string[] { "HairStrandsCore" });
+		// Экран загрузки на время LoadMap (S-63): MoviePlayer рисует Slate-экран своим потоком.
+		PrivateDependencyModuleNames.AddRange(new string[] { "MoviePlayer" });
 	}
 }

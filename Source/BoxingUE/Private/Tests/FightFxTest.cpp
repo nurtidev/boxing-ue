@@ -105,6 +105,38 @@ bool FBoxFightFxTest::RunTest(const FString& Parameters)
 		FVector Cam2, Look2;
 		RestShot(0, 0.46f, FVector(-263.f, -263.f, 0.f), RC, Cam2, Look2);
 		TestTrue(TEXT("перерыв: портрет — дальше и выше"), FVector::Dist2D(Cam2, FVector(-263.f, -263.f, 0.f)) > FVector::Dist2D(Cam, FVector(-263.f, -263.f, 0.f)) && Cam2.Z > Cam.Z);
+		// S-62: высокий (198 см) — дальше и выше; голова в кадре ниже верхней панели HUD (≈ 16 % высоты кадра).
+		const FVector At(-263.f, -263.f, 0.f);
+		FVector Cam3, Look3;
+		RestShot(0, 16.f / 9.f, At, RC, Cam3, Look3, 198.f / 178.f);
+		TestTrue(TEXT("перерыв 198 см: дальше и выше, чем 178"), FVector::Dist2D(Cam3, At) > FVector::Dist2D(Cam, At) && Cam3.Z > Cam.Z);
+		// Вертикальная координата головы в кадре: 0 — центр, 1 — верхний край (вертикальный FOV 46°).
+		const auto HeadY = [&At](const FVector& C, const FVector& L, float HeadZ)
+		{
+			const FVector V = (L - C).GetSafeNormal();
+			const FVector Up = (FVector::UpVector - V * FVector::DotProduct(V, FVector::UpVector)).GetSafeNormal();
+			const FVector ToH = FVector(At.X, At.Y, HeadZ) - C;
+			return static_cast<float>(FVector::DotProduct(ToH, Up) / (FVector::DotProduct(ToH, V) * FMath::Tan(FMath::DegreesToRadians(23.0))));
+		};
+		TestTrue(FString::Printf(TEXT("перерыв 198 см: голова ниже панели HUD (%.2f ≤ 0.68)"), HeadY(Cam3, Look3, 190.f)), HeadY(Cam3, Look3, 190.f) <= 0.68f);
+		TestTrue(FString::Printf(TEXT("перерыв 178 см: голова ниже панели HUD (%.2f ≤ 0.68)"), HeadY(Cam, Look, 171.f)), HeadY(Cam, Look, 171.f) <= 0.68f);
+	}
+	// --- кадр итога (S-62): победитель в свободной полосе слева от панели итога ---
+	{
+		const FVector RC(0.f, 0.f, 0.f);
+		const FVector W(50.f, 0.f, 0.f), L(-60.f, 20.f, 0.f), Cam0(0.f, 400.f, 170.f);
+		const float HFov = 2.f * FMath::RadiansToDegrees(FMath::Atan(FMath::Tan(FMath::DegreesToRadians(23.f)) * 16.f / 9.f));
+		FVector Cam, Look;
+		ResultShot(W, L, Cam0, RC, HFov, 1.f, Cam, Look);
+		TestTrue(TEXT("итог: камера внутри апрона"), FMath::Abs(Cam.X) <= 330.5f && FMath::Abs(Cam.Y) <= 330.5f);
+		TestTrue(TEXT("итог: сторона нынешней камеры"), Cam.Y > 0.f);
+		const FVector V = (Look - Cam).GetSafeNormal2D();
+		const FVector Right = FVector::CrossProduct(FVector::UpVector, V); // UE: X вперёд, Y вправо
+		const FVector ToW = W - Cam;
+		const float ScreenX = 0.5f + 0.5f * static_cast<float>(FVector::DotProduct(ToW, Right) /
+			(FVector::DotProduct(ToW, V) * FMath::Tan(FMath::DegreesToRadians(HFov * 0.5f))));
+		TestTrue(FString::Printf(TEXT("итог: победитель слева от панели (x = %.2f)"), ScreenX), ScreenX > 0.05f && ScreenX < 0.27f);
+		TestTrue(TEXT("итог: во весь рост — не ближе 2.7 м"), FVector::Dist2D(Cam, W) >= 270.f);
 	}
 
 	// --- виды событий ---

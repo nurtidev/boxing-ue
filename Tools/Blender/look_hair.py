@@ -395,7 +395,8 @@ def preview(objs, name):
         sc.collection.objects.link(cam)
     sc.camera = cam
     c = Vector((0, 0, 1.60))
-    for vn, loc in (("front", (0.0, -1.0, 1.62)), ("side", (1.0, 0.1, 1.62)), ("back", (0.3, 1.0, 1.66))):
+    for vn, loc in (("front", (0.0, -1.0, 1.62)), ("side", (1.0, 0.1, 1.62)), ("back", (0.3, 1.0, 1.66)),
+                    ("top", (0.0, 0.05, 2.6))):
         cam.location = Vector(loc)
         cam.rotation_euler = (c - cam.location).to_track_quat("-Z", "Y").to_euler()
         sc.render.filepath = OUT + "prev_%s_%s.png" % (name, vn)
@@ -463,6 +464,162 @@ def make_Bun(rng):              # пучок
     return cut + bun_strands(rng, 6000, center, 0.029)
 
 
+# ----------------------------------------------------------------------------- косички (S-64)
+# Косички-«колоски» (cornrows): ряды от линии роста волос к затылку, каждый ряд — плетёная коса из трёх прядей,
+# лежащая на коже; между рядами — проборы (кожа), под ними — редкий подшёрсток, чтобы издали голова читалась
+# тёмной, а не лысой. GR_Cornrows — ряды до линии роста на затылке (мужчины, короткие курчавые у женщин);
+# GR_Braids — ряды сходятся в узел над шеей + из него свисает толстая коса (женские braids/dreads).
+TIE_LOW = Vector((0.0, 0.092, 1.585))   # узел косы — затылок у линии роста
+
+
+def hairline_point(theta, female):
+    """Точка на линии роста волос по азимуту theta (0 — середина лба, + — к левому уху, +X)."""
+    d = Vector((math.sin(theta), -math.cos(theta), 0.0))
+    p = Vector((0.0, 0.0, 1.66)) + d * 0.12
+    for _ in range(8):
+        q, _n = HEAD.project(p)
+        z = hairline_z(q, female) + 0.006
+        if math.radians(55) < abs(theta) < math.radians(102):   # над ухом — выше уха (за ухом — по линии роста)
+            z = max(z, 1.652)
+        p = Vector((q.x, q.y, z)) + d * 0.01
+    q, _n = HEAD.project(p)
+    return q
+
+
+def march(start, target, h, up_bias=0.0, step=0.003, max_len=0.40, stop=0.010):
+    """Центральная линия ряда по коже от start к target: сечение головы плоскостью через start, target и точку
+    под центром головы (дуга «большого круга»), ход — по касательной в этой плоскости. up_bias > 0 — первый шаг
+    вверх (средние ряды идут через макушку, а не соскальзывают на висок)."""
+    pts, nrms = [], []
+    p, n = HEAD.project(start)
+    target, _tn = HEAD.project(target)          # цель — на коже
+    centre = Vector((0.0, 0.0, 1.55))
+    m = (target - p).cross(centre - p)
+    if m.length < 1e-6:
+        m = Vector((1, 0, 0))
+    m.normalize()
+    prev = (target - p) + Vector((0, 0, up_bias))
+    total = 0.0
+    best = 1e9
+    while total < max_len:
+        pts.append(p + n * h)
+        nrms.append(n)
+        dist = (target - p).length
+        if dist < stop or (best < 0.03 and dist > best + 0.002):
+            break
+        best = min(best, dist)
+        t = m.cross(n)
+        if t.length < 1e-6:
+            break
+        t.normalize()
+        if t.dot(prev) < 0:
+            t = -t
+        q, qn = HEAD.project(p + t * step)
+        if q is None or (q - p).length < 1e-5:
+            break
+        total += (q - p).length
+        prev = q - p
+        p, n = q, qn
+    return pts, nrms
+
+
+def resample(pts, nrms, ds):
+    """Равный шаг ds по длине дуги (нормали — интерполяция)."""
+    acc = [0.0]
+    for a, b in zip(pts, pts[1:]):
+        acc.append(acc[-1] + (b - a).length)
+    L = acc[-1]
+    n = max(2, int(L / ds) + 1)
+    out_p, out_n = [], []
+    j = 0
+    for k in range(n):
+        s = L * k / (n - 1)
+        while j < len(acc) - 2 and acc[j + 1] < s:
+            j += 1
+        t = 0.0 if acc[j + 1] == acc[j] else (s - acc[j]) / (acc[j + 1] - acc[j])
+        out_p.append(pts[j].lerp(pts[j + 1], t))
+        out_n.append(nrms[j].lerp(nrms[j + 1], t).normalized())
+    return out_p, out_n, L
+
+
+def plait(rng, centre, nrms, width, period, fibers, fiber_r, taper=0.35):
+    """Коса из трёх прядей вдоль centre (нормали nrms — «наружу» от кожи). Каждая прядь — пучок волокон."""
+    n = len(centre)
+    tang = [(centre[min(i + 1, n - 1)] - centre[max(i - 1, 0)]).normalized() for i in range(n)]
+    acc = [0.0]
+    for a, b in zip(centre, centre[1:]):
+        acc.append(acc[-1] + (b - a).length)
+    L = acc[-1] or 1.0
+    out = []
+    for j in range(3):
+        ph = 2 * math.pi * j / 3
+        for _ in range(fibers):
+            a = rng.random() * 2 * math.pi
+            r0 = math.sqrt(rng.random())
+            jit = (rng.random() - 0.5) * 0.4
+            pts = []
+            for i in range(n):
+                s = acc[i] / L
+                w = width * (1.0 - taper * s)
+                u = 2 * math.pi * acc[i] / period + ph
+                up = nrms[i]
+                side = up.cross(tang[i]).normalized()
+                # плетение: прядь ходит из стороны в сторону и через верх (поверх соседних)
+                c = centre[i] + side * (0.5 * w * math.sin(u)) + up * (0.18 * w * math.cos(u))
+                rr = fiber_r * (1.0 - 0.3 * s) * r0
+                aa = a + jit * s
+                pts.append(c + side * (math.cos(aa) * rr) + up * (math.sin(aa) * rr * 0.7))
+            out.append(pts)
+    return out
+
+
+def underlay(rng, n, female):
+    """Подшёрсток под косичками: короткие волоски, прижатые к коже (затемняют проборы)."""
+    return scalp_hair(HEAD, rng, n, 0.008, female=female, comb=comb_back(TIE_LOW), h0=0.0006, h1=0.0010, k_pts=4,
+                      jitter=0.5, len_var=0.3, clumps=0.0)
+
+
+def cornrow_rows(rng, female, converge, n_rows=19, spread=122.0, width=0.0155, period=0.011):
+    rows = []
+    for i in range(n_rows):
+        th = math.radians(-spread + 2 * spread * i / (n_rows - 1))
+        f = hairline_point(th, female)
+        if converge:
+            tgt = TIE_LOW + Vector((0.008 * math.sin(th), 0.0, 0.0))
+        else:                               # ряды прямо назад, к линии роста на затылке
+            tgt = Vector((0.75 * f.x, 0.115, 1.555))
+        c, nn = march(f, tgt, 0.0045, up_bias=0.15 * max(0.0, 1.0 - abs(math.degrees(th)) / 60.0))
+        if len(c) < 4:
+            continue
+        c, nn, _L = resample(c, nn, 0.0016)
+        log("ряд %+.0f°: старт (%.3f %.3f %.3f), конец (%.3f %.3f %.3f), длина %.3f" % (
+            math.degrees(th), f.x, f.y, f.z, c[-1].x, c[-1].y, c[-1].z, _L))
+        rows += plait(rng, c, nn, width, period, 34, 0.0028, taper=0.3 if converge else 0.45)
+    return rows
+
+
+@groom
+def make_Cornrows(rng):         # косички-колоски назад, без хвоста
+    return cornrow_rows(rng, False, converge=False) + underlay(rng, 30000, False)
+
+
+@groom
+def make_Braids(rng):           # колоски в узел на затылке + свисающая коса
+    rows = cornrow_rows(rng, True, converge=True)
+    path = bezier(TIE_LOW, TIE_LOW + Vector((0, 0.035, -0.015)), TIE_LOW + Vector((0, 0.06, -0.11)),
+                  TIE_LOW + Vector((0, 0.045, -0.24)))
+    c, nn = [], []
+    back = Vector((0, 1, 0))
+    for k in range(160):
+        p, fwd = path(k / 159)
+        c.append(p)
+        nn.append((back - fwd * back.dot(fwd)).normalized())   # «наружу» — от шеи
+    c, nn, _L = resample(c, nn, 0.002)
+    tail = plait(rng, c, nn, 0.030, 0.034, 260, 0.0075, taper=0.55)
+    knot = bun_strands(rng, 400, TIE_LOW + Vector((0, 0.010, -0.004)), 0.012, k_pts=10)
+    return rows + tail + knot + underlay(rng, 30000, True)
+
+
 @groom
 def make_Beard(rng):            # короткая борода
     return beard(HEAD, rng, 9000, "beard", 0.010, 0.003)
@@ -495,7 +652,8 @@ def main():
             continue
         rng = random.Random(name)
         strands = fn(rng)
-        ob = export(name, strands, radius_cm={"GR_Ponytail": 0.007, "GR_Bun": 0.007, "GR_Short": 0.0035, "GR_Medium": 0.0035}.get(
+        ob = export(name, strands, radius_cm={"GR_Ponytail": 0.007, "GR_Bun": 0.007, "GR_Short": 0.0035, "GR_Medium": 0.0035,
+                                              "GR_Cornrows": 0.006, "GR_Braids": 0.006}.get(
             name, 0.004 if "Beard" in name or name in ("GR_Goatee", "GR_Mustache") else 0.003))
         preview([ob], name)
         made.append(name)

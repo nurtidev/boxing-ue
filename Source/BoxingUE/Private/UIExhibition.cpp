@@ -8,6 +8,7 @@
 #include "Components/CanvasPanelSlot.h"
 #include "Components/EditableTextBox.h"
 #include "Components/HorizontalBox.h"
+#include "Components/HorizontalBoxSlot.h"
 #include "Components/ProgressBar.h"
 #include "Components/ScrollBox.h"
 #include "Components/ScrollBoxSlot.h"
@@ -45,18 +46,30 @@ namespace
 		{
 			return B.Accolades.IsEmpty() ? TEXT("без крупных медалей") : B.Accolades;
 		}
+		// Бейдж, повторяющий рекорд («50-0» у Мейвезера при рекорде «50-0-0»), не дублируем.
 		FString S = B.Badge;
 		if (!B.ProRecord.IsEmpty())
 		{
+			TArray<FString> Parts;
+			B.ProRecord.ParseIntoArray(Parts, TEXT("-"));
+			const FString WL = Parts.Num() >= 2 ? Parts[0] + TEXT("-") + Parts[1] : B.ProRecord;
+			if (S == WL || S == B.ProRecord)
+			{
+				S.Reset();
+			}
 			S += (S.IsEmpty() ? TEXT("") : TEXT(" · ")) + B.ProRecord;
+		}
+		// Легенды: в вебе — эмодзи 🏛 (шрифт UE его не рисует) → словом.
+		if (B.Kind == ERosterKind::Legend)
+		{
+			S = TEXT("Легенда") + (S.IsEmpty() ? FString() : TEXT(" · ") + S);
 		}
 		return S;
 	}
 
-	// Реализм межвесового боя (realismTag веба): решает отклонение от середины.
-	void Realism(float A, float B, FString& Text, FLinearColor& Color)
+	// Реализм межвесового боя (realismTag веба): D — макс. отклонение бойца от веса боя (WeightStretch).
+	void Realism(float D, FString& Text, FLinearColor& Color)
 	{
-		const float D = FMath::Abs(A - B) * 0.5f;
 		if (D <= 4.f) { Text = TEXT("реальный бой"); Color = BoxUi::Good; }
 		else if (D <= 8.f) { Text = TEXT("кэтчвейт — натяжка"); Color = BoxUi::Warn; }
 		else if (D <= 14.f) { Text = TEXT("бой мечты — почти невозможно"); Color = BoxUi::Gold; }
@@ -133,7 +146,7 @@ UWidget* UBoxingExhibitionWidget::BuildUi()
 	AddV(Left, CountText, false, FMargin(4.f, 0.f, 0.f, 8.f));
 	List = WidgetTree->ConstructWidget<UScrollBox>();
 	List->SetScrollbarThickness(FVector2D(8.f, 8.f));
-	List->SetAlwaysShowScrollbar(true);
+	List->SetAlwaysShowScrollbar(false); // S-63: при одном бойце полоса на всю высоту — только когда есть что листать
 	List->SetScrollWhenFocusChanges(EScrollWhenFocusChanges::AnimatedScroll); // геймпад: строка в фокусе всегда видна
 	AddV(Left, List, true);
 	AddH(Body, Left, true, FMargin(0.f, 0.f, 28.f, 0.f), VAlign_Fill);
@@ -327,7 +340,8 @@ UWidget* UBoxingExhibitionWidget::MakeCard(const FRosterBoxer* B, bool bRed, boo
 	for (int32 I = 0; I < BoxStat::Num && I < St.Num(); ++I)
 	{
 		UHorizontalBox* L = WidgetTree->ConstructWidget<UHorizontalBox>();
-		AddH(L, Sized(Txt(BoxStat::Label(I), 15, BoxUi::Muted), 118.f));
+		// Подпись — с запасом под «Подбородок» (на 118 px упиралась в полосу), полоса — с отступом.
+		AddH(L, Sized(Txt(BoxStat::Label(I), 15, BoxUi::Muted), 128.f), false, FMargin(0.f, 0.f, 10.f, 0.f));
 		AddH(L, Sized(Bar(BoxUi::StatColor(St[I]), St[I] / 100.f), 0.f, 10.f), true);
 		UTextBlock* V = Txt(FString::Printf(TEXT("%.0f"), St[I]), 15, BoxUi::Text, true);
 		V->SetJustification(ETextJustify::Right);
@@ -376,16 +390,66 @@ void UBoxingExhibitionWidget::RebuildSide()
 	AddH(Cards, MakeCard(B, false, bProFight), true, FMargin(0.f), VAlign_Fill);
 	AddV(Side, Cards, false, FMargin(0.f, 0.f, 0.f, 16.f));
 
-	// Вес и реализм.
+	// Карточка пары (S-63 ← S-61): вес боя с проекцией (сгонка/переход вверх) и «честный» прогноз исхода ядром.
 	if (R && B)
 	{
+		const FPairForecast& F = S->ForecastPair(*R, *B, Rounds, IsProRules());
 		FString RT;
 		FLinearColor RC;
-		Realism(R->WeightKg, B->WeightKg, RT, RC);
+		Realism(F.Stretch, RT, RC);
+		UVerticalBox* PairCol = WidgetTree->ConstructWidget<UVerticalBox>();
 		UHorizontalBox* W = WidgetTree->ConstructWidget<UHorizontalBox>();
-		AddH(W, Txt(FString::Printf(TEXT("Вес: %s против %s — "), *Kg(R->WeightKg), *Kg(B->WeightKg)), 16, BoxUi::Text));
+		AddH(W, Txt(FString::Printf(TEXT("Вес боя %s"), *Kg(F.RingKg)), 17, BoxUi::Text, true), false, FMargin(0.f, 0.f, 14.f, 0.f));
 		AddH(W, Txt(RT, 16, RC, true));
-		AddV(Side, W, false, FMargin(4.f, 0.f, 0.f, 14.f));
+		AddV(PairCol, W, false, FMargin(0.f, 0.f, 0.f, 4.f));
+		auto Shift = [](float Delta) -> FString
+		{
+			if (FMath::Abs(Delta) < 0.25f) return TEXT("в своём весе");
+			return Delta > 0.f ? FString::Printf(TEXT("сгонка −%.1f кг"), Delta) : FString::Printf(TEXT("вверх +%.1f кг"), -Delta);
+		};
+		UHorizontalBox* Wd = WidgetTree->ConstructWidget<UHorizontalBox>();
+		AddH(Wd, Txt(FString::Printf(TEXT("%s: %s, %s"), *R->Name, *Kg(R->WeightKg), *Shift(F.RedDelta)), 14, BoxUi::Muted), true);
+		UTextBlock* BW = Txt(FString::Printf(TEXT("%s: %s, %s"), *B->Name, *Kg(B->WeightKg), *Shift(F.BlueDelta)), 14, BoxUi::Muted);
+		BW->SetJustification(ETextJustify::Right);
+		AddH(Wd, BW, true);
+		AddV(PairCol, Wd, false, FMargin(0.f, 0.f, 0.f, 10.f));
+		if (F.bValid)
+		{
+			// Полоса шансов: красный | ничья | синий (доли — веса заполнения слотов).
+			UHorizontalBox* Split = WidgetTree->ConstructWidget<UHorizontalBox>();
+			auto Part = [this, Split](float Share, const FLinearColor& C)
+			{
+				if (Share <= 0.005f)
+				{
+					return;
+				}
+				UHorizontalBoxSlot* PS = Split->AddChildToHorizontalBox(Sized(Box(nullptr, C, 3.f, FMargin(0.f)), 0.f, 12.f));
+				FSlateChildSize Size(ESlateSizeRule::Fill);
+				Size.Value = Share;
+				PS->SetSize(Size);
+				PS->SetPadding(FMargin(1.f, 0.f));
+			};
+			Part(F.Odds.RedWin, BoxUi::Red);
+			Part(F.Odds.Draw, BoxUi::Muted);
+			Part(F.Odds.BlueWin, BoxUi::Blue);
+			AddV(PairCol, Split, false, FMargin(0.f, 0.f, 0.f, 6.f));
+			UHorizontalBox* Pct = WidgetTree->ConstructWidget<UHorizontalBox>();
+			auto P = [](float V) { return FMath::RoundToInt(V * 100.f); };
+			AddH(Pct, Txt(FString::Printf(TEXT("Красный %d%%"), P(F.Odds.RedWin)), 17, FMath::Lerp(BoxUi::Red, FLinearColor::White, 0.25f), true), true);
+			if (IsProRules())
+			{
+				UTextBlock* D = Txt(FString::Printf(TEXT("ничья %d%%"), P(F.Odds.Draw)), 15, BoxUi::Muted);
+				D->SetJustification(ETextJustify::Center);
+				AddH(Pct, D, true);
+			}
+			UTextBlock* BP = Txt(FString::Printf(TEXT("Синий %d%%"), P(F.Odds.BlueWin)), 17, FMath::Lerp(BoxUi::Blue, FLinearColor::White, 0.25f), true);
+			BP->SetJustification(ETextJustify::Right);
+			AddH(Pct, BP, true);
+			AddV(PairCol, Pct, false, FMargin(0.f, 0.f, 0.f, 2.f));
+			AddV(PairCol, Txt(FString::Printf(TEXT("Прогноз ядра по %d боям с учётом веса · досрочно: %d%% / %d%% · нокдаунов за бой: %.1f"),
+				F.Odds.Fights, P(F.Odds.RedStoppage), P(F.Odds.BlueStoppage), F.Odds.KnockdownsPerFight), 13, BoxUi::Muted));
+		}
+		AddV(Side, Box(PairCol, BoxUi::WithAlpha(BoxUi::Panel, 0.7f), 10.f, FMargin(16.f, 12.f)), false, FMargin(0.f, 0.f, 0.f, 14.f));
 	}
 
 	// Раунды.
@@ -631,7 +695,7 @@ void UBoxingExhibitionWidget::NativeTick(const FGeometry& MyGeometry, float InDe
 		AutoStep = 7;
 		Fight();
 	}
-	else if (AutoStep == 7 && AutoTime > 15.f)
+	else if (AutoStep == 7 && AutoTime > 120.f) // с экраном загрузки (S-63) первый бой может ждать предзагрузку
 	{
 		// Бой не стартовал (пара не собралась) — не висеть.
 		AutoStep = 8;

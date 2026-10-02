@@ -17,6 +17,8 @@
 #include "BoxingFightBPTypes.h"
 #include "Containers/Ticker.h"
 #include "InputCoreTypes.h"
+#include "Engine/StreamableManager.h"
+#include "FightProfile.h"
 #include "BoxingGameInstanceSubsystem.generated.h"
 
 class ABoxingFightGameMode;
@@ -77,6 +79,17 @@ struct FRosterBoxer
 	FString Origin() const;
 };
 
+// Прогноз пары для экрана Выставки (S-63 ← S-61): вес боя, сгонка/набор каждого, «честный» шанс исхода ядром.
+struct FPairForecast
+{
+	bool bValid = false;
+	float RingKg = 0.f;      // вес боя (кэтчвейт, привязанный к реальной категории)
+	float RedDelta = 0.f;    // натуральный − вес боя: > 0 сгонка, < 0 переход вверх
+	float BlueDelta = 0.f;
+	float Stretch = 0.f;     // WeightStretch: ≤ 4 реальный бой, ≤ 8 кэтчвейт, ≤ 14 бой мечты, дальше — фэнтези
+	BoxingFightProfile::FOutcomeOdds Odds;
+};
+
 // Что выбрано в Выставке.
 USTRUCT(BlueprintType)
 struct FExhibitionSetup
@@ -123,6 +136,11 @@ public:
 	void SetExhibition(const FExhibitionSetup& Setup) { Exhibition = Setup; }
 	// Авто-раунды профи: чемпион vs чемпион → 12, иначе 10 (autoProRounds веба).
 	static int32 AutoProRounds(const FRosterBoxer& A, const FRosterBoxer& B);
+	// Вес боя пары (App.tsx веба): середина пары → ближайшая реальная категория — любители WEIGHT_CLASSES, профи/легенды —
+	// веса дивизионов профи-ростера своего пола.
+	float RingWeightKg(const FRosterBoxer& Red, const FRosterBoxer& Blue, bool bProFight) const;
+	// Прогноз пары (кэш по паре/раундам; первый расчёт ≈ 50–70 мс — 60 боёв ядра, BoxingFightProfile::PredictOutcome).
+	const FPairForecast& ForecastPair(const FRosterBoxer& Red, const FRosterBoxer& Blue, int32 Rounds, bool bProRules) const;
 	// Пресеты/раунды/сид выбранной пары → GameMode (зовётся из InitGame). Нет выбора — ничего не меняет.
 	bool ApplyToFightMode(ABoxingFightGameMode& Mode) const;
 
@@ -132,6 +150,24 @@ public:
 	void OpenMenu(const UObject* WorldContext);
 	// Сразу открыть экран Выставки при входе в меню (после «В меню» из итога — нет: главный экран).
 	bool bOpenExhibitionOnMenu = false;
+
+	// ---------- Загрузка боя (S-63) ----------
+	// Было: каждый «В бой»/«Реванш» — 12.7–16.1 с замершего кадра (LoadMap L_Ring синхронно грузил BP_Boxer с базами
+	// Motion Matching, облики, грумы; после боя LoadMap собирал мусор — и следующий бой грузил всё заново).
+	// Стало: (1) ассеты боя подгружаются АСИНХРОННО ещё в меню (StartFightPreload: меню живое, арена крутится);
+	// (2) всё загруженное из контента удерживается между картами (KeepLoadedAssetsResident на PreLoadMap) — реванш и
+	// повторный бой не грузят заново; (3) экран загрузки: UMG-виджет поверх меню/итога, пока догружается, и Slate-экран
+	// MoviePlayer на сам LoadMap (рисуется своим потоком — кадр не замирает).
+	void StartFightPreload();
+	bool IsFightPreloadDone() const;
+	float GetFightPreloadProgress() const;
+	bool IsTransitionPending() const { return bTransitionPending; }
+	// Тексты экрана загрузки: имена углов, детали боя, подсказка управления, стадия.
+	FString LoadingRedName() const;
+	FString LoadingBlueName() const;
+	FString LoadingInfo() const;
+	FString LoadingTip() const;
+	FString LoadingStage() const;
 
 	// ---------- Сценарий UI-проверки ----------
 	bool bAuto = false;
@@ -154,6 +190,45 @@ public:
 	bool bScript = false;
 
 private:
+	// Переход на карту боя: экран загрузки сразу, OpenLevel — когда предзагрузка готова.
+	void BeginRingTransition(const UObject* WorldContext, const TCHAR* What);
+	bool TickTransition(float Dt);
+	void OnPreLoadMap(const FString& MapName);
+	void OnPostLoadMap(UWorld* World);
+	void KeepLoadedAssetsResident();
+	void SetupMovieLoadingScreen();
+	// Бюджет асинхронной загрузки за кадр (s.AsyncLoadingTimeLimit, мс): в меню — умеренный (меню живое), на экране
+	// загрузки — большой (грузим почти на полной скорости, полоса прогресса всё равно рисуется).
+	void SetAsyncBudget(float Ms);
+	float DefaultAsyncBudget = -1.f;
+	// Первые кадры боя (прогрев PSO/шейдеров MetaHuman — первый кадр до ~8 с на холодную) — под тем же экраном загрузки.
+	bool TickRingCover(float Dt);
+	TWeakObjectPtr<UUserWidget> RingCover;
+	int32 RingCoverFrames = 0;
+	double RingCoverAt = 0.0;
+	FTSTicker::FDelegateHandle RingCoverTicker;
+
+	FStreamableManager Streamable;
+	TSharedPtr<FStreamableHandle> PreloadHandle;
+	int32 PreloadRequested = 0;
+	double PreloadStartAt = 0.0;
+	double PreloadDoneAt = 0.0;
+	// Удержание загруженного между картами (только ассеты контента: не мир, не акторы).
+	UPROPERTY(Transient)
+	TSet<TObjectPtr<UObject>> Resident;
+	bool bTransitionPending = false;
+	bool bTransitionOpened = false;
+	double TransitionAt = 0.0;
+	double LoadMapAt = 0.0;
+	int32 TransitionFrames = 0;
+	FString TransitionWhat;
+	TWeakObjectPtr<UWorld> TransitionWorld;
+	FTSTicker::FDelegateHandle TransitionTicker;
+	FTSTicker::FDelegateHandle FirstFrameTicker;
+	int32 TipIndex = 0;
+	FDelegateHandle PreLoadMapHandle;
+	FDelegateHandle PostLoadMapHandle;
+
 	void LoadRoster();
 	void ReadPickFromCommandLine();
 	bool TickScript(float Dt);
@@ -168,6 +243,9 @@ private:
 	FTSTicker::FDelegateHandle ScriptTicker;
 
 	TArray<FRosterBoxer> Roster;
+	mutable TMap<FString, FPairForecast> ForecastCache;
+	TArray<double> ProClassesM;
+	TArray<double> ProClassesF;
 	TMap<FString, int32> ById;
 	FString RosterError;
 	FExhibitionSetup Exhibition;

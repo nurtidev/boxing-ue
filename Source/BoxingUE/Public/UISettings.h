@@ -1,5 +1,5 @@
 // Настройки игры (S-59): звук (общая громкость / эффекты / зал), вибрация геймпада, подсказки управления в бою,
-// графика (пресет Scalability, разрешение, режим окна). Язык — пока только русский.
+// графика (пресет Scalability, разрешение рендера, разрешение, режим окна). Язык — пока только русский.
 //
 // Хранение: свои поля — секция [BoxingSettings] в GameUserSettings.ini (GConfig, как mute S-54),
 // графика — штатный UGameUserSettings (Scalability, разрешение, режим окна). Всё сохраняется сразу,
@@ -64,7 +64,7 @@ protected:
 	virtual void NativeTick(const FGeometry& MyGeometry, float InDeltaTime) override;
 
 private:
-	enum class ERow : uint8 { Master, Sfx, Crowd, Vibration, Hints, Quality, Resolution, WindowMode };
+	enum class ERow : uint8 { Master, Sfx, Crowd, Vibration, Hints, Quality, RenderScale, Resolution, WindowMode };
 	struct FRow
 	{
 		ERow Kind = ERow::Master;

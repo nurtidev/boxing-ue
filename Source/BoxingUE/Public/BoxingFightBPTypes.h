@@ -100,6 +100,15 @@ struct FBoxerPreset
 	float ReachCm = 183.f;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
 	float WeightKg = 71.f;
+	// Проекция на вес боя (S-61, BoxingFightProfile::ProjectToWeight — fightProfile веба): массы урона. 0 — WeightKg
+	// (бой на родном весе). WeightKg — натуральный вес (тело, масштаб модели), статы — уже после сгонки/набора.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	float MassForPower = 0.f;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	float DurabilityMass = 0.f;
+	// Вес боя, кг (0 — свой): для HUD/итога «бой в весе N кг».
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	float RingWeightKg = 0.f;
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing")
 	EBoxerStyle Style = EBoxerStyle::Balanced;
@@ -109,6 +118,10 @@ struct FBoxerPreset
 	bool bFemale = false;
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
 	int32 Age = 25;
+
+	// S-62: левша (стойка southpaw из ростера) — только визуал: поза зеркалится, передняя рука — правая. Ядро не знает.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	bool bSouthpaw = false;
 
 	// 1 — обстрелян; < 1 — «зелёный» на дистанции (налог в баке и у судей).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing", meta = (ClampMin = "0", ClampMax = "1"))
@@ -133,6 +146,9 @@ struct FBoxerPreset
 		S.WeightKg = WeightKg;
 		S.Style = static_cast<EBoxStyle>(Style);
 		S.Seasoning = Seasoning;
+		S.bFemale = bFemale; // S-61: доля досрочек у профи
+		S.MassForPower = MassForPower;
+		S.DurabilityMass = DurabilityMass;
 		S.bAiControlled = bAi;
 		return S;
 	}

@@ -29,6 +29,8 @@ struct FBoxerLayerParams
 	float TorsoAlpha = 1.f; // корпус/шея/голова из монтажа верха
 	float ArmsAlpha = 1.f;  // руки из монтажа верха
 	bool bFx = false;       // процедурный слой здесь (нет визуальной подмены)
+	bool bMirror = false;   // S-62: левша — поза зеркалится целиком (передняя рука и нога — правые)
+	uint8 MirrorAxis = 1;   // ось зеркала в компонентном пространстве логического меша: 1 — X, 2 — Y
 };
 
 // ---------- Слой верха тела (пост-процесс логического меша) ----------
@@ -46,6 +48,12 @@ struct FBoxerLayerRootNode : public FAnimNode_Base
 	// Повтор нокаута (S-54): записанная локальная поза меша (индексы костей меша) вместо своей.
 	bool bReplay = false;
 	TArray<FTransform> ReplayBones;
+	// S-62: зеркало левши — пары костей (_l/_r) и компонентные повороты позы привязки, кэш по контейнеру костей.
+	TArray<FCompactPoseBoneIndex> MirrorBones;
+	TCustomBoneIndexArray<FQuat, FCompactPoseBoneIndex> MirrorRefRots;
+	uint16 MirrorSerial = MAX_uint16;
+	const void* MirrorContainer = nullptr;
+	void ResolveMirror(const FBoneContainer& Bones);
 
 	FBoxerLayerRootNode();
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;

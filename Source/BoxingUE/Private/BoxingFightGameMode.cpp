@@ -14,6 +14,7 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "HAL/PlatformMisc.h"
 #include "HAL/PlatformTime.h"
+#include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
@@ -223,10 +224,27 @@ void ABoxingFightGameMode::ReadCommandLine()
 	}
 }
 
+void ABoxingFightGameMode::ApplyArenaDress(bool bPro)
+{
+	// Профи-набор сохранён в уровне скрытым; коллизию пола держит любительский канвас (Docs/PERF.md).
+	TArray<AActor*> Am, Pro;
+	UGameplayStatics::GetAllActorsWithTag(GetWorld(), TEXT("ArenaAmateur"), Am);
+	UGameplayStatics::GetAllActorsWithTag(GetWorld(), TEXT("ArenaPro"), Pro);
+	for (AActor* A : Am)
+	{
+		A->SetActorHiddenInGame(bPro);
+	}
+	for (AActor* A : Pro)
+	{
+		A->SetActorHiddenInGame(!bPro);
+	}
+}
+
 void ABoxingFightGameMode::StartPlay()
 {
 	Super::StartPlay();
 	LocateRing();
+	ApplyArenaDress(Rounds > 3); // профи — как pro = rounds > 3 в вебе
 
 	UClass* Cls = BoxerClass.Get();
 	if (!Cls)
@@ -361,6 +379,7 @@ void ABoxingFightGameMode::StartFight()
 	Cfg.BreakSeconds = BreakSeconds;
 	Cfg.bAutoProceed = true;
 	Cfg.bAllowDraw = bAllowDraw;
+	Cfg.bProRules = bAllowDraw; // S-61: профи-правила (досрочки от удара, рефери, судьи профи) — там же, где ничья возможна
 	Cfg.bCorners = bCorners;
 	Cfg.Seed = static_cast<uint32>(Seed);
 	Core.Init(Cfg);
@@ -740,6 +759,8 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 			MaxTrackErrorCm, Core.IsOver() ? *GetResultText() : TEXT("бой идёт"));
 		UE_LOG(LogTemp, Log, TEXT("FEEL СВОДКА: мин. дистанция торсов (spine_05) %.0f см, голов %.0f см; раздвижек %d кадров (мин. %.0f см); контактов с наведением %d, зазор кулака |ср.| %.1f см, макс. %.1f см; подшаг макс. %.1f см"),
 			MinChestSepCm, MinHeadSepCm, SepPushes, VisMinSepCm, FeelContacts, FeelContacts ? FeelGapAbsSum / FeelContacts : 0.f, FeelGapMaxAbs, FeelLungeMax);
+		UE_LOG(LogTemp, Log, TEXT("FEEL гард (S-62): попаданий %d, путь кулака сквозь перчатку защиты (< 16 см до её центра) %d (%.0f%%), мин. от пути до центра перчатки %.1f см"),
+			FeelHits, FeelHitsThroughGlove, FeelHits ? 100.f * FeelHitsThroughGlove / FeelHits : 0.f, FeelGloveMinCm);
 		QuitAfter = -1.f;
 		FPlatformMisc::RequestExit(false, TEXT("BoxQuitAfter"));
 	}
@@ -836,10 +857,32 @@ void ABoxingFightGameMode::CheckFeelContacts()
 		FeelGapAbsSum += FMath::Abs(Dbg.FistGapCm);
 		FeelGapMaxAbs = FMath::Max(FeelGapMaxAbs, FMath::Abs(Dbg.FistGapCm));
 		FeelLungeMax = FMath::Max(FeelLungeMax, Dbg.LungeCm);
+		// S-62: засчитанное попадание — путь кулака (локоть → фронт) не должен идти сквозь перчатку защиты.
+		float GloveCm = -1.f;
+		const ABoxerCharacter* Def = GetBoxer(1 - I);
+		const USkeletalMeshComponent* DM = Def ? Def->GetFeelMesh() : nullptr;
+		if (Kind == 1 && DM && !Dbg.Elbow.IsNearlyZero())
+		{
+			GloveCm = 1e6f;
+			for (const TCHAR* Sfx : {TEXT("_l"), TEXT("_r")})
+			{
+				const FName H(*(FString(TEXT("hand")) + Sfx)), L(*(FString(TEXT("lowerarm")) + Sfx));
+				if (DM->GetBoneIndex(H) == INDEX_NONE || DM->GetBoneIndex(L) == INDEX_NONE)
+				{
+					continue;
+				}
+				const FVector Hp = DM->GetBoneLocation(H);
+				const FVector Glove = Hp + (Hp - DM->GetBoneLocation(L)).GetSafeNormal() * 6.f;
+				GloveCm = FMath::Min(GloveCm, BoxerFeel::SegPointDist(Dbg.Elbow, Dbg.FistFront, Glove));
+			}
+			++FeelHits;
+			FeelHitsThroughGlove += GloveCm < 16.f ? 1 : 0; // перчатка ~9 см + кулак ~7 см: объёмы пересекаются
+			FeelGloveMinCm = FMath::Min(FeelGloveMinCm, GloveCm);
+		}
 		if (bLogEvents)
 		{
-			UE_LOG(LogTemp, Log, TEXT("FEEL контакт %s [%d]: зазор кулака %.1f см, подшаг %.1f см, aim %.2f reach %.2f, дист. ядра %.2f м"),
-				Kind == 1 ? TEXT("Hit") : TEXT("Blocked"), I, Dbg.FistGapCm, Dbg.LungeCm, Dbg.AimW, Dbg.ReachW, Snap.Distance);
+			UE_LOG(LogTemp, Log, TEXT("FEEL контакт %s [%d]: зазор кулака %.1f см, подшаг %.1f см, aim %.2f reach %.2f, дист. ядра %.2f м, до перчатки защиты %.1f см"),
+				Kind == 1 ? TEXT("Hit") : TEXT("Blocked"), I, Dbg.FistGapCm, Dbg.LungeCm, Dbg.AimW, Dbg.ReachW, Snap.Distance, GloveCm);
 		}
 	}
 }

@@ -105,14 +105,29 @@ UWidget* UBoxingFightResultWidget::BuildUi()
 			const FLinearColor C = A > B ? BoxUi::Red : (B > A ? BoxUi::Blue : BoxUi::Text);
 			return Txt(FString::Printf(TEXT("%d – %d"), A, B), Size, FMath::Lerp(C, FLinearColor::White, 0.25f), bBold);
 		};
+		// S-63: досрочка (KO/RSC/сдача) — раунд остановки не завершён и не судится (было «10 – 10» в недоигранном раунде
+		// сдачи); итог — по завершённым раундам.
+		const bool bStopped = R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC;
+		FJudgeCard Totals[3];
+		int32 Completed = 0;
 		int32 Row = 1;
 		for (const FRoundResult& RR : R.Rounds)
 		{
-			Cell(Txt(FString::FromInt(RR.Round), 17, BoxUi::Text, true), Row, 0, HAlign_Left);
+			const bool bUnfinished = bStopped && RR.Round == R.StoppedRound;
+			Cell(Txt(bUnfinished ? FString::Printf(TEXT("%d · не завершён"), RR.Round) : FString::FromInt(RR.Round), 17,
+				bUnfinished ? BoxUi::Muted : BoxUi::Text, true), Row, 0, HAlign_Left);
 			for (int32 J = 0; J < 3; ++J)
 			{
+				if (bUnfinished)
+				{
+					Cell(Txt(TEXT("—"), 17, BoxUi::Muted), Row, J + 1);
+					continue;
+				}
 				Cell(Score(RR.JudgeCards[J].Red, RR.JudgeCards[J].Blue, 17, false), Row, J + 1);
+				Totals[J].Red += RR.JudgeCards[J].Red;
+				Totals[J].Blue += RR.JudgeCards[J].Blue;
 			}
+			Completed += bUnfinished ? 0 : 1;
 			const FString Kd = (RR.Knockdowns[0] || RR.Knockdowns[1]) ? FString::Printf(TEXT("%d – %d"), RR.Knockdowns[0], RR.Knockdowns[1]) : TEXT("—");
 			Cell(Txt(Kd, 17, RR.Knockdowns[0] || RR.Knockdowns[1] ? BoxUi::Gold : BoxUi::Muted), Row, 4);
 			++Row;
@@ -120,12 +135,20 @@ UWidget* UBoxingFightResultWidget::BuildUi()
 		Cell(Txt(TEXT("Итог"), 19, BoxUi::Text, true), Row, 0, HAlign_Left);
 		for (int32 J = 0; J < 3; ++J)
 		{
-			Cell(Score(R.JudgeTotals[J].Red, R.JudgeTotals[J].Blue, 21, true), Row, J + 1);
+			if (bStopped && Completed == 0)
+			{
+				Cell(Txt(TEXT("—"), 21, BoxUi::Muted, true), Row, J + 1);
+			}
+			else
+			{
+				const FJudgeCard& T = bStopped ? Totals[J] : R.JudgeTotals[J];
+				Cell(Score(T.Red, T.Blue, 21, true), Row, J + 1);
+			}
 		}
 		Cell(Txt(FString::Printf(TEXT("%d – %d"), R.Knockdowns[0], R.Knockdowns[1]), 19, BoxUi::Gold, true), Row, 4);
 		if (R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC)
 		{
-			AddV(Col, Txt(TEXT("Досрочная победа — карты на момент остановки"), 14, BoxUi::Muted), false, FMargin(0.f, 0.f, 0.f, 6.f), HAlign_Center);
+			AddV(Col, Txt(FString::Printf(TEXT("Досрочно: раунд %d не завершён и не судится · итог — по завершённым раундам"), R.StoppedRound), 14, BoxUi::Muted), false, FMargin(0.f, 0.f, 0.f, 6.f), HAlign_Center);
 		}
 
 		UHorizontalBox* Legend = WidgetTree->ConstructWidget<UHorizontalBox>();

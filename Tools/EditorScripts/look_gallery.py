@@ -27,7 +27,11 @@ PREFIX = os.environ.get("LOOK_PREFIX", "look3")
 DEFAULT = ("amateur:Санжар Ташкенбай;amateur:Нурбек Оралбай;amateur:Ертуган Зейнулинов;legend:Геннадий Головкин;"
            "pro:Сиякхолва Кусе;amateur:Назым Кызайбай;amateur:Карина Ибрагимова;pro:Александр Усик;"
            "legend:Майк Тайсон;pro:Тайсон Фьюри")
-FIGHTERS = [x for x in os.environ.get("LOOK_FIGHTERS", DEFAULT).split(";") if x]
+# LOOK_FIGHTERS_FILE=<путь к UTF-8 файлу со списком через «;»> — кириллица в переменной окружения из Git Bash
+# доходит до процесса Windows искажённой (кодовая страница), файл надёжнее.
+_FF = os.environ.get("LOOK_FIGHTERS_FILE", "")
+FIGHTERS = [x.strip() for x in (open(_FF, encoding="utf-8").read() if _FF else os.environ.get("LOOK_FIGHTERS", DEFAULT))
+            .split(";") if x.strip()]
 ROW = int(os.environ.get("LOOK_ROW", "5"))
 APPLY = os.environ.get("LOOK_APPLY", "1") != "0"
 KIT = os.environ.get("LOOK_KIT", "pro")

@@ -137,7 +137,14 @@ namespace BoxFx
 	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook);
 	// Кадр перерыва (restShot + walkToCornerShot веба): Corner 0 — красный (−,−), 1 — синий; At — где сейчас боец (идёт к углу
 	// — кадр едет с ним); Aspect — ширина/высота вьюпорта (портрет — дальше, широкий — угол левее центра).
-	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook);
+	// S-62: HeightScale — рост бойца / 178: высокий (198 см) целиком в кадре, голова не под панелью HUD (дальше и выше).
+	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale = 1.f);
+	// S-62: кадр итога (панель итога в центре экрана — 16:9 закрывает ~29…71 % ширины): победитель (с рефери) во весь рост
+	// в свободной полосе слева от панели. Winner/Loser — места бойцов, Cam — нынешняя камера (сторона та же), HFovDeg —
+	// горизонтальный FOV, HeightScale — рост победителя / 178. Камера внутри апрона.
+	constexpr float RESULT_SCREEN_X = 0.15f; // победитель — на этой доле ширины кадра
+	void ResultShot(const FVector& Winner, const FVector& Loser, const FVector& Cam, const FVector& RingCenter, float HFovDeg, float HeightScale,
+		FVector& OutCam, FVector& OutLook, const FVector& WinnerFwd = FVector::ZeroVector); // WinnerFwd — куда он смотрит: камера спереди-сбоку
 
 	float WrapDeg(float A);
 }
@@ -233,8 +240,12 @@ private:
 	float DownMix = 0.f;
 	float RestMix = 0.f;
 	int32 KdSide = 0;
+	bool bKdBodyKnown = false; // S-62: угол выбран уже по раскладке лежащего (а не по стоящему)
 	FVector KdCam = FVector::ZeroVector, KdLook = FVector::ZeroVector;
 	FVector RestCam = FVector::ZeroVector, RestLook = FVector::ZeroVector;
+	// S-62: кадр итога (панель итога открыта) — победитель во весь рост слева от панели.
+	float ResultMix = 0.f;
+	FVector ResultCam = FVector::ZeroVector, ResultLook = FVector::ZeroVector;
 	double Clock = 0.0; // реальное время (с)
 	// вибрация
 	double LastHapticAt = -10.0;

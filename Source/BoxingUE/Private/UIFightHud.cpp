@@ -275,11 +275,20 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 
 	// Баннер.
 	ESlateVisibility BanVis = ESlateVisibility::HitTestInvisible;
+	DownPhaseTime = S.Phase == EFightPhase::Down ? DownPhaseTime + InDeltaTime : 0.f;
 	switch (S.Phase)
 	{
 	case EFightPhase::Down:
 	{
 		const bool bMine = S.DownWho == Me && bHuman;
+		// S-62/S-63: «X на настиле» — когда тело действительно легло (флаг бойца: клип падения дошёл до касания таза), а не
+		// по событию нокдауна (ещё стоит согнувшись). Свой нокдаун — сразу: подъём тапами идёт с первого кадра счёта.
+		// Запас 1.5 с — если флаг так и не пришёл (нет клипа падения), баннер не пропадёт совсем.
+		const ABoxerCharacter* DownBoxer = GM->GetBoxer(S.DownWho);
+		if (!bMine && DownBoxer && !DownBoxer->IsFloored() && DownPhaseTime < 1.5f)
+		{
+			BanVis = ESlateVisibility::Collapsed;
+		}
 		const FBoxerPreset& Down = S.DownWho == 1 ? GM->BluePreset : GM->RedPreset;
 		SetText(BannerTitle, TEXT("НОКДАУН"));
 		SetText(BannerBig, FString::FromInt(FMath::Max(1, S.DownCount)));
@@ -328,7 +337,7 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		DownTime = S.Phase == EFightPhase::Down ? DownTime + InDeltaTime : 0.f;
 		BreakTime = S.Phase == EFightPhase::Between ? BreakTime + InDeltaTime : 0.f;
 		if (!bShotHud && FightTime > 6.f) { bShotHud = true; Sub->TakeUiShot(TEXT("hud")); }
-		if (!bShotKd && DownTime > 0.8f) { bShotKd = true; Sub->TakeUiShot(TEXT("hud_knockdown")); }
+		if (!bShotKd && DownTime > 1.6f) { bShotKd = true; Sub->TakeUiShot(TEXT("hud_knockdown")); }
 		if (!bShotBreak && BreakTime > 1.f) { bShotBreak = true; Sub->TakeUiShot(TEXT("hud_break")); }
 	}
 }

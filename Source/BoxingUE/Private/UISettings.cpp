@@ -111,6 +111,49 @@ namespace
 	{
 		return FString::Printf(TEXT("%d%%"), FMath::RoundToInt(V * 100.f));
 	}
+
+	// S-63: пресет качества — по группам Scalability БЕЗ разрешения рендера. Штатный GetOverallScalabilityLevel требует ещё
+	// и sg.ResolutionQuality, равного значению пресета: в общем ini стояло 0 («по умолчанию движка») — и при всех группах
+	// «эпик» экран писал «Своё», а ←/→ переписывал разрешение на значение из PerfIndexValues (2 / 87 %).
+	int32 QualityPreset(const UGameUserSettings* G)
+	{
+		if (!G)
+		{
+			return -1;
+		}
+		const int32 L = G->GetViewDistanceQuality();
+		const int32 All[] = {G->GetAntiAliasingQuality(), G->GetShadowQuality(), G->GetGlobalIlluminationQuality(), G->GetReflectionQuality(),
+			G->GetPostProcessingQuality(), G->GetTextureQuality(), G->GetVisualEffectQuality(), G->GetFoliageQuality(), G->GetShadingQuality()};
+		for (const int32 V : All)
+		{
+			if (V != L)
+			{
+				return -1;
+			}
+		}
+		return L >= 0 && L <= 3 ? L : -1;
+	}
+
+	// Разрешение рендера пресета: высокое и эпик — 100 % (честная картинка; было 72.9 % — r.ScreenPercentage.Default
+	// при sg.ResolutionQuality=0), низкое / среднее — с запасом по FPS.
+	float PresetRenderScale(int32 Q)
+	{
+		return Q >= 2 ? 100.f : (Q == 1 ? 85.f : 70.f);
+	}
+
+	// Шаги ползунка «Разрешение рендера»: 0 — авто (по умолчанию движка), дальше проценты.
+	const float RenderScales[] = {0.f, 50.f, 60.f, 67.f, 70.f, 75.f, 80.f, 85.f, 90.f, 100.f};
+
+	float CurrentRenderScale(const UGameUserSettings* G)
+	{
+		if (!G)
+		{
+			return 100.f;
+		}
+		float Norm = 0.f, Value = 0.f, Min = 0.f, Max = 0.f;
+		G->GetResolutionScaleInformationEx(Norm, Value, Min, Max);
+		return Value;
+	}
 }
 
 UWidget* UBoxingSettingsWidget::BuildUi()
@@ -159,6 +202,7 @@ UWidget* UBoxingSettingsWidget::BuildUi()
 	MakeRow(Col, ERow::Hints, TEXT("Подсказки управления в бою"));
 	Section(TEXT("ГРАФИКА"));
 	MakeRow(Col, ERow::Quality, TEXT("Качество"));
+	MakeRow(Col, ERow::RenderScale, TEXT("Разрешение рендера"));
 	MakeRow(Col, ERow::Resolution, TEXT("Разрешение"));
 	MakeRow(Col, ERow::WindowMode, TEXT("Режим окна"));
 	ScreenNote = Txt(TEXT(""), 14, BoxUi::Warn);
@@ -254,12 +298,33 @@ void UBoxingSettingsWidget::Change(ERow Kind, int32 Dir)
 	case ERow::Quality:
 		if (GUS)
 		{
-			const int32 Q = GUS->GetOverallScalabilityLevel(); // −1 — «своё»
+			const int32 Q = QualityPreset(GUS); // −1 — «своё»
 			const int32 Next = Dir == 0 ? (Q < 0 || Q >= 3 ? 0 : Q + 1) : FMath::Clamp((Q < 0 ? 2 : Q) + Dir, 0, 3);
 			GUS->SetOverallScalabilityLevel(Next);
+			GUS->SetResolutionScaleValueEx(PresetRenderScale(Next));
 			GUS->ApplyNonResolutionSettings();
 			GUS->SaveSettings();
-			UE_LOG(LogTemp, Log, TEXT("UI: качество графики → %s"), QualityName(Next));
+			UE_LOG(LogTemp, Log, TEXT("UI: качество графики → %s, разрешение рендера %.0f%%"), QualityName(Next), CurrentRenderScale(GUS));
+		}
+		break;
+	case ERow::RenderScale:
+		if (GUS)
+		{
+			const float Cur = CurrentRenderScale(GUS);
+			int32 I = 0;
+			for (int32 K = 0; K < UE_ARRAY_COUNT(RenderScales); ++K)
+			{
+				if (FMath::Abs(RenderScales[K] - Cur) < FMath::Abs(RenderScales[I] - Cur))
+				{
+					I = K;
+				}
+			}
+			const int32 N = UE_ARRAY_COUNT(RenderScales);
+			I = Dir == 0 ? (I + 1) % N : FMath::Clamp(I + Dir, 0, N - 1);
+			GUS->SetResolutionScaleValueEx(RenderScales[I]);
+			GUS->ApplyNonResolutionSettings();
+			GUS->SaveSettings();
+			UE_LOG(LogTemp, Log, TEXT("UI: разрешение рендера → %.0f%%"), RenderScales[I]);
 		}
 		break;
 	case ERow::Resolution:
@@ -291,7 +356,13 @@ void UBoxingSettingsWidget::Refresh()
 		case ERow::Crowd: V = Pct(D.Crowd); break;
 		case ERow::Vibration: V = D.bVibration ? TEXT("Вкл") : TEXT("Выкл"); C = D.bVibration ? BoxUi::Good : BoxUi::Muted; break;
 		case ERow::Hints: V = D.bControlsHints ? TEXT("Вкл") : TEXT("Выкл"); C = D.bControlsHints ? BoxUi::Good : BoxUi::Muted; break;
-		case ERow::Quality: V = FString::Printf(TEXT("‹  %s  ›"), QualityName(GUS ? GUS->GetOverallScalabilityLevel() : -1)); break;
+		case ERow::Quality: V = FString::Printf(TEXT("‹  %s  ›"), QualityName(QualityPreset(GUS))); break;
+		case ERow::RenderScale:
+		{
+			const float RS = CurrentRenderScale(GUS);
+			V = RS <= 0.f ? TEXT("‹  Авто (движок)  ›") : FString::Printf(TEXT("‹  %d %%  ›"), FMath::RoundToInt(RS));
+			break;
+		}
 		case ERow::Resolution:
 			V = Resolutions.IsValidIndex(ResIndex) ? FString::Printf(TEXT("‹  %d × %d  ›"), Resolutions[ResIndex].X, Resolutions[ResIndex].Y) : TEXT("—");
 			break;

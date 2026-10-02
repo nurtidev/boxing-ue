@@ -85,6 +85,11 @@ namespace BoxRef
 		// UE (S-58): рост бойцов / 1.78 — обход тел (PASS_R) по габариту (тяж с мухачом разные), 1 — как в вебе.
 		double FighterScale[2] = {1, 1};
 		FV FightCam;
+		// UE (S-62): где ляжет тело сбитого (голова и таз итоговой позы падения, с доворотом от канатов) — известно с
+		// первого кадра нокдауна. Нет — оценка веба LyingBody (0.6 м за точкой падения).
+		bool bHasLying = false;
+		FV LyingHead;
+		FV LyingPelvis;
 		FDown Down;
 		FOver Over;
 	};
@@ -163,7 +168,8 @@ namespace BoxRef
 	BOXINGUE_API FV CountSpot(const FV& Down, const FV& Toward, const FV& Cam);
 	BOXINGUE_API double RouteDist(const TArray<FV>& Route, const FV& P);
 	BOXINGUE_API TArray<FV> RouteAhead(const TArray<FV>& Route, const FV& P);
-	BOXINGUE_API FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current);
+	// Head (UE, S-62) — голова лежащего: рефери держится и от неё (тело длиннее оценки веба).
+	BOXINGUE_API FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head = nullptr);
 	BOXINGUE_API FV AnnounceSpot(const FV& F0, const FV& F1, const FV& Cam);
 	BOXINGUE_API FArm WristArm(double S, const FV& Ref, double Yaw, const FV& F, double H, bool bHigh);
 	BOXINGUE_API double CountLift(double Age, double Beat);

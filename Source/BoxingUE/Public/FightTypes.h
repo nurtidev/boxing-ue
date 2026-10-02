@@ -181,6 +181,7 @@ struct FFighterSetup
 	float DurabilityMass = 0.f; // FightProfile.durabilityMass (0 — WeightKg)
 	EBoxStyle Style = EBoxStyle::Balanced;
 	float Seasoning = 1.f;  // 1 — обстрелян; <1 — «зелёный» на дистанции (налог в судействе/баке)
+	bool bFemale = false;   // профи-правила (S-61): женский профи-бокс досрочит заметно реже (PRO_FEMALE_K)
 	bool bAiControlled = false;
 };
 
@@ -195,6 +196,10 @@ struct FFightConfig
 	float BreakSeconds = 60.f;   // перерыв между раундами
 	bool bAutoProceed = true;    // false — перерыв длится, пока UE-слой не подаст Proceed
 	bool bAllowDraw = false;     // профи: ничья возможна; любители — добивается по очкам
+	// Профи-правила (S-61, осознанное отличие от веба — Docs/FIGHT_CORE_PORT.md «Профи: досрочки и судьи»): без шлема и в
+	// малых перчатках чистый силовой может уронить (сильнее — в тяжёлых весах), рефери останавливает избиение, у судей
+	// свой взгляд на раунд. false — любители: ядро бит-в-бит как веб (ни одного нового броска ГСЧ).
+	bool bProRules = false;
 	// Постановка раунда (corners.ts): старт и перерыв в своих углах, выход по гонгу, нейтральный угол на
 	// нокдауне. false — прежний режим «раунд с центра» (corners:false веба; проверки механики).
 	bool bCorners = true;

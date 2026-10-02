@@ -462,7 +462,11 @@ ABoxingReferee* ABoxingReferee::SpawnFor(ABoxingFightGameMode* GM)
 	R->AddTickPrerequisiteActor(GM); // сначала ядро (снимок), потом рефери
 	if (UCharacterMovementComponent* Cmc = R->GetCharacterMovement())
 	{
-		Cmc->PrimaryComponentTick.AddPrerequisite(R, R->PrimaryActorTick); // CMC — после того, как задан ход
+		// CMC — после того, как задан ход. S-62: у движения по умолчанию обратная связь (bTickBeforeOwner — актор ждёт
+		// свой CMC), вместе с нашей она давала цикл пререквизитов и предупреждение LogTick каждый кадр (~3000 строк/мин).
+		Cmc->bTickBeforeOwner = false;
+		R->PrimaryActorTick.RemovePrerequisite(Cmc, Cmc->PrimaryComponentTick);
+		Cmc->PrimaryComponentTick.AddPrerequisite(R, R->PrimaryActorTick);
 	}
 	for (int32 I = 0; I < 2; ++I)
 	{
@@ -743,6 +747,17 @@ void ABoxingReferee::Tick(float DeltaSeconds)
 		In.FighterScale[I] = H > 0.f ? H / 178.0 : 1.0; // габарит бойца по росту (облик S-60 масштабирует визуал так же)
 	}
 	In.FightCam = CameraForBrain(BoxRef::EPhase::Fight);
+	// S-62: где ляжет сбитый (итоговая поза падения с доворотом от канатов) — обходить всё тело, а не точку ног.
+	{
+		const int32 DownI = In.Down.bValid ? In.Down.Who : (In.Over.bValid && In.Over.bStoppage && In.Over.Winner >= 0 ? 1 - In.Over.Winner : -1);
+		FVector LHead, LPelvis;
+		if (DownI >= 0 && GM->GetBoxer(DownI)->GetLyingBody(LHead, LPelvis))
+		{
+			In.bHasLying = true;
+			In.LyingHead = BoxRef::FV((LHead.X - Floor.X) / 100.0, (LHead.Y - Floor.Y) / 100.0);
+			In.LyingPelvis = BoxRef::FV((LPelvis.X - Floor.X) / 100.0, (LPelvis.Y - Floor.Y) / 100.0);
+		}
+	}
 	if (!bBrainInit)
 	{
 		bBrainInit = true;
@@ -934,6 +949,21 @@ void ABoxingReferee::UpdateMetrics(const BoxRef::FInput& In, float DeltaSeconds)
 	{
 		KdSeen = 1;
 	}
+	// S-62: до тела сбитого — падающего и лежащего (кости видимого меша), а не до точки его ног.
+	if (S.Phase == EFightPhase::Down && S.DownWho >= 0 && S.DownWho < 2)
+	{
+		if (const USkeletalMeshComponent* M = GM->GetBoxer(S.DownWho)->GetFeelMesh())
+		{
+			static const TCHAR* Bones[] = {TEXT("head"), TEXT("pelvis"), TEXT("hand_l"), TEXT("hand_r"), TEXT("lowerarm_l"), TEXT("lowerarm_r"), TEXT("foot_l"), TEXT("foot_r")};
+			for (const TCHAR* B : Bones)
+			{
+				if (M->GetBoneIndex(FName(B)) != INDEX_NONE)
+				{
+					MinDownBodyCm = FMath::Min(MinDownBodyCm, static_cast<float>(FVector::Dist2D(Me, M->GetBoneLocation(FName(B)))));
+				}
+			}
+		}
+	}
 	// «Рефери закрывает бойца в кадре»: лучи камеры к точкам бойца (40…170 см) проходят сквозь ось рефери
 	// (вертикальный отрезок, радиус OCC_R) ближе к камере, чем боец. Боец закрыт, если закрыто ≥ OCC_FRAC точек.
 	const APlayerController* PC = GetWorld()->GetFirstPlayerController();
@@ -1028,9 +1058,9 @@ void ABoxingReferee::LogSummary(const TCHAR* Why)
 		return;
 	}
 	bSummaryLogged = true;
-	UE_LOG(LogTemp, Log, TEXT("REF СВОДКА (%s): кадров боя %d — рефери закрывает бойца в кадре камеры %d (%.1f%%), макс. подряд %.2f с; во всех фазах %d из %d; сбоку 1.2–2 м %.1f%%; мин. до стоящего бойца %.0f см; макс. ход актора %.2f м/с, макс. отставание от логики %.0f см"),
+	UE_LOG(LogTemp, Log, TEXT("REF СВОДКА (%s): кадров боя %d — рефери закрывает бойца в кадре камеры %d (%.1f%%), макс. подряд %.2f с; во всех фазах %d из %d; сбоку 1.2–2 м %.1f%%; мин. до стоящего бойца %.0f см; мин. до тела сбитого %.0f см; макс. ход актора %.2f м/с, макс. отставание от логики %.0f см"),
 		Why, FightFrames, OccludedFrames, FightFrames ? 100.f * OccludedFrames / FightFrames : 0.f, OccludedWorst, OccludedAny, AllFrames,
-		FightFrames ? 100.f * SideOk / FightFrames : 0.f, MinStandCm, MaxSpeedSeen, MaxLagCm);
+		FightFrames ? 100.f * SideOk / FightFrames : 0.f, MinStandCm, MinDownBodyCm, MaxSpeedSeen, MaxLagCm);
 }
 
 void ABoxingReferee::UpdateShots(const BoxRef::FInput& In)

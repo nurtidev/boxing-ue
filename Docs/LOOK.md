@@ -219,7 +219,7 @@ Feet скрыт в BP).
 | морфы `Heavy/Lean/Muscular/Female` на `SKM_BoxerBody(_Amateur/_Top)`, `SKM_BoxerKit`, `SKM_BoxerVest(Headgear)`, `SKM_BoxerTop` | телосложение и женская фигура; одежда морфится вместе с кожей | `Tools/Blender/look_morphs.py` (зовут look_kit / look_outfits перед экспортом) |
 | `SKM_BoxerTop`, `SKM_BoxerBody_Top`, `BP_BoxerLook_<угол>_Female` | топ профи-женщины, тело без кожи под ним | look_outfits (`make_vest(bot=TOP_BOT)`), look_build_outfits |
 | `/Game/BoxingLocal/Characters/Skin/T_SkinFace_LOD{1,3,5}_T<1..6>`, `T_SkinBody_T<1..6>` | кожа по тонам: перекраска текстур Kellan (цель тона на шве шеи, пятна сжаты) | `look_skin.py` (export) → `Tools/Blender/look_skin_tones.py` → `look_skin.py` (import) |
-| `/Game/BoxingLocal/Characters/Grooms/GR_{Short,Buzz,Medium,Ponytail,Bun,Beard,FullBeard,Goatee,Mustache}` | свои грумы (кривые волос по скальпу/низу лица Kellan) | `Tools/Blender/look_hair.py` → `look_groom_import.py` (полный редактор, `-EnablePlugins=AlembicHairImporter`) |
+| `/Game/BoxingLocal/Characters/Grooms/GR_{Short,Buzz,Medium,Ponytail,Bun,Cornrows,Braids,Beard,FullBeard,Goatee,Mustache}` | свои грумы (кривые волос по скальпу/низу лица Kellan) | `Tools/Blender/look_hair.py` → `look_groom_import.py` (полный редактор, `-EnablePlugins=AlembicHairImporter`) |
 | `Content/Boxing/Data/Appearance.json` | облик 522 бойцов | `look_appearance.py` |
 | `/Game/BoxingLocal/Tmp/L_LookGallery` | галерея (копия ринга, 10 персонажей GASP) | `look_gallery.py` |
 
@@ -253,10 +253,40 @@ Feet скрыт в BP).
   архетип `SKM_Face`; в проекте голов, кроме Kellan, нет (Content/MetaHumans: Common + Kellan).
 - Возможный следующий шаг без облака: морфы лица на копии `Kellan_FaceMesh` (разрез глаз, нос, губы; женское лицо) —
   геометрия в Blender, DNA/RigLogic остаются. В S-60 не делал (риск для рига лица, нужна отдельная задача).
-- Тату не рисуются. Длинные распущенные, косички, дреды сводятся к хвосту / волнам Kellan. Брови — грум Kellan (только цвет).
+- Тату не рисуются. Длинные распущенные сводятся к хвосту; косички — колоски (S-64, ниже); мужские дреды — к «средним» (прямые) /
+  колоскам (курчавые). Брови — грум Kellan (только цвет).
 - Женщины: фигура морфом на мужском теле + топ/хвост; лицо мужское (Kellan) — вблизи читается.
 
 ### Бюджет
-Грумы (пряди/точки): Short 26k/208k, Buzz 30k/150k, Medium 24k/288k, Ponytail 57k/373k, Bun 56k/364k, бороды 2.5–12k
+Грумы (пряди/точки): Cornrows 14k/~290k, Braids 15k/~370k (S-64), Short 26k/208k, Buzz 30k/150k, Medium 24k/288k, Ponytail 57k/373k, Bun 56k/364k, бороды 2.5–12k
 (uasset 0.2–4.2 МБ, всего 17 МБ). Текстуры кожи — 24 шт. (1024², LOD5 512²; uasset 20 МБ, в сборке BC1 ≈ 12 МБ). Морфы:
 +4 ключа на 6 мешах. Для мобильных грумы прядями дороги — нужны карточки (Cards LOD), отдельная работа.
+
+## S-64: косички (braids / cornrows) и правило «без лысых женщин»
+
+Было: стиль `braids` у курчавых (тон 5–6) сводился к волнам Kellan `Hair_S_360Waves` с `HairLengthScale` 0.8 — на голове
+почти ничего, Шилдс выглядела лысой; у Маршалл (тон 2) тот же `braids` давал хвост.
+
+Новые грумы (`Tools/Blender/look_hair.py`, процедурно по скальпу лица Kellan, как прошлые):
+- **`GR_Cornrows`** — 19 рядов-колосков от линии роста волос (азимут ±122° от середины лба, над ухом — выше уха) к линии
+  роста на затылке. Ряд — дуга по коже в плоскости «старт — цель — точка под центром головы» (средние ряды идут через
+  макушку, боковые — над ухом назад), каждый ряд — плетёная коса из трёх прядей (34 волокна на прядь, период 1.1 см,
+  ширина 1.55 см, к концу тоньше); под рядами — короткий прижатый подшёрсток (проборы издали темнеют, а не светят кожей).
+- **`GR_Braids`** — те же ряды, сходящиеся в узел над шеей (`TIE_LOW`), + свисающая коса 24 см (3 пряди × 260 волокон,
+  период 3.4 см) и узел. Коса жёстко на голове (как хвост `GR_Ponytail`): при сильных поворотах может касаться спины.
+
+Правило в `look_appearance.py`:
+
+| стиль | мужчины (прямые / курчавые) | женщины (прямые / курчавые) |
+|---|---|---|
+| `braids` | Cornrows / Cornrows | **Braids / Braids** |
+| `dreads` | Medium / Cornrows | Braids / Braids |
+| `afro` | Short / волны Kellan | Short / **Bun** (пучок) |
+| `short` | Short / волны | Short / **Cornrows** |
+| `buzz` | Buzz / волны 0.38 | Buzz / волны **полной длины** (0.72–1.0, не «под ноль») |
+| `bald` | нет | Cornrows (в ростере таких нет) |
+
+Итог по ростеру (522): женщин с `GR_Braids` — 17 (Шилдс, Маршалл, Баумгарднер, Дюбуа, Фундора, Грин …), мужчин с
+`GR_Cornrows` — 4 (Уайлдер, Дэвис, Ярд, Форд); женщин без грума или с волнами < 1 — 0.
+Пересборка: `LOOK_HAIR_ONLY=GR_Cornrows,GR_Braids` + `look_hair.py` → `LOOK_GROOM_ONLY=GR_Cornrows,GR_Braids` +
+`look_groom_import.py` → `look_appearance.py`. Снимки: `Docs/screens/look4_*`.

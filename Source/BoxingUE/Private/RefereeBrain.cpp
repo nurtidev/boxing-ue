@@ -400,7 +400,7 @@ namespace BoxRef
 		return Out;
 	}
 
-	FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current)
+	FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head)
 	{
 		const FV Ideal = CountSpot(Down, Toward, Cam);
 		auto Viol = [](double D, double Need) { return D < Need ? (Need - D) * 20 + 5 : 0.0; };
@@ -408,6 +408,7 @@ namespace BoxRef
 		{
 			double C = Hyp(P, Ideal);
 			C += Viol(Hyp(P, Down), DOWN_CLEAR) + Viol(Hyp(P, Body), BODY_CLEAR);
+			if (Head) C += Viol(Hyp(P, *Head), BODY_CLEAR);
 			if (Route) C += Viol(RouteDist(*Route, P), ROUTE_CLEAR);
 			if (Stand) C += Viol(Hyp(P, *Stand), STAND_CLEAR);
 			if (BlocksView(P, Cam, Down) || BlocksView(P, Cam, Body)) C += 2;
@@ -667,12 +668,19 @@ namespace BoxRef
 		{
 			const FV Down = DownAt;
 			const FV Toward = bHasToward ? TowardAt : StandAt;
-			const FV Body = LyingBody(Down, StandAt);
+			const FV Body = In.bHasLying ? FV((In.LyingHead.X + In.LyingPelvis.X) / 2, (In.LyingHead.Z + In.LyingPelvis.Z) / 2) : LyingBody(Down, StandAt);
 			const FV* Cur = bHasGoal ? &Goal : nullptr;
-			Target = DownSpot(Down, Body, Toward, In.Camera, bHasRoute ? &Route : nullptr, &In.Fighters[1 - DownIdx], Cur);
+			Target = DownSpot(Down, Body, Toward, In.Camera, bHasRoute ? &Route : nullptr, &In.Fighters[1 - DownIdx], Cur,
+				In.bHasLying ? &In.LyingHead : nullptr);
 			PushFighters(PASS_R);
 			Obs.Add({Body, 0.7, false});
 			Obs.Add({Down, 0.75, false});
+			if (In.bHasLying)
+			{
+				// UE (S-62): падающее тело целиком — от ног до головы (клип, масштаб облика, доворот от канатов).
+				Obs.Add({In.LyingHead, 0.7, false});
+				Obs.Add({In.LyingPelvis, 0.7, false});
+			}
 			// Стоящий ещё идёт в угол — его путь впереди него — стена.
 			if (Mode == EMode::Count && bHasRoute && Dn.bValid && !Dn.bArrived)
 			{
@@ -733,7 +741,7 @@ namespace BoxRef
 		}
 		else if (Mode == EMode::Count || Mode == EMode::Stop)
 		{
-			const FV Body = LyingBody(DownAt, StandAt);
+			const FV Body = In.bHasLying ? In.LyingPelvis : LyingBody(DownAt, StandAt);
 			Look = FV((DownAt.X + Body.X) / 2, (DownAt.Z + Body.Z) / 2);
 		}
 		const double Speed = Hyp2(Vel.X, Vel.Z);

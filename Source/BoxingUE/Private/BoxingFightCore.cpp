@@ -189,6 +189,42 @@ namespace BoxingFightConst
 
 	// ---------- hud.ts ----------
 	constexpr double POSE_CONTACT = 0.5;
+
+	// ---------- S-61: профи-правила (НЕТ в вебе — осознанное отличие UE, Docs/FIGHT_CORE_PORT.md) ----------
+	// Веб профи от любителей отличает только ничьей и проекцией статов: нокдаун там — от давления раунда simulate, и у
+	// близких по уровню пар досрочек нет вовсе (0 KO за 1400 бот-боёв UE). Профи без шлема и в малых перчатках — чистый
+	// силовой может уронить сам по себе. Всё ниже работает только при FFightConfig::bProRules; у любителей ни одной
+	// новой ветки и ни одного нового броска ГСЧ — паритет с вебом бит-в-бит.
+	// (1) Чистый удар роняет: шанс на попадание ∝ (шок − порог)², шок = урон по здоровью (сила vs подбородок, масса, тип
+	//     удара, контра, форма — уже в HpDmg); корпус бьёт слабее «по голове», но тоже роняет.
+	constexpr double PRO_SHOT_K = 0.0036;     // масштаб шанса нокдауна от чистого удара
+	constexpr double PRO_SHOCK_MIN = 0.40;    // ниже — удар «не тот» (джебы, вялые, по крепкому подбородку)
+	constexpr double PRO_BODY_SHOCK = 0.8;    // корпус: печень роняет, но реже головы
+	constexpr double PRO_SHOT_CAP = 0.35;     // потолок шанса за одно попадание
+	// Уязвимость: износ (здоровье HUD), «поплыл» (попадание в окно встряски предыдущего), пустой бак.
+	constexpr double PRO_WEAR_K = 1.6;        // ×(1 + k·(1 − здоровье)): побитого роняет легче
+	constexpr double PRO_HURT_MUL = 1.6;      // добивание поплывшего
+	constexpr double PRO_GAS_K = 0.6;         // ×(1 + k·(1 − стамина/макс.))
+	// Вес дивизиона: импульс удара растёт с массой быстрее, чем «держит» шея — тяжи досрочат чаще (сила/подбородок
+	// в simulate нормированы на √(масса/70) и у равных по весу сокращаются, поэтому весу нужен свой множитель).
+	constexpr double PRO_MASS_EXP = 1.0;      // ×((масса пары / 2) / 70)^exp: 100 кг ×1.36, 51 кг ×0.73
+	// Женский профи-бокс досрочит заметно реже мужского при той же массе (реальная статистика, 2-минутные раунды).
+	constexpr double PRO_FEMALE_K = 0.5;
+	// (2) Не встал: к шансу KO simulate — тяжесть удара, износ.
+	constexpr double PRO_KO_SHOT = 0.15;      // + k·(шок − порог)·уязвимость
+	constexpr double PRO_KO_WEAR = 0.25;      // + k·(1 − здоровье)
+	constexpr double PRO_KO_CAP = 0.8;
+	constexpr double PRO_RISE_KO_K = 0.8;     // подъём человека тапами: прибавка ×(1 − k·KoChance) (у любителей k = 0.5, как веб)
+	// (3) Рефери: встал «плывущим» — останавливает (RSC); поплывший под градом ударов — останавливает.
+	constexpr double PRO_RISE_HEALTH = 0.6;   // встал со здоровьем ниже — рефери может прекратить
+	constexpr double PRO_RISE_STOP = 1.1;     // шанс = k·(KoChance + (1 − здоровье/порог)⁺); второй нокдаун раунда — +0.25
+	constexpr double PRO_REF_HEALTH = 0.6;    // поплывший с таким здоровьем — под угрозой остановки
+	constexpr double PRO_REF_K = 0.15;        // шанс на чистое попадание ∝ урон·(1 − здоровье/порог)
+	// (4) Судьи профи: у каждого свой «вкус» (чистый объём или эффективная мощь), «явный» раунд шире, 10-10 — редкость.
+	constexpr double PRO_JUDGE_LEAN = 0.35;   // вкус судьи: вес попаданий ×(1 − L), урона ×(1 + L), L ∈ ±0.35
+	constexpr double PRO_CLEAR_MARGIN = 11.0; // раунд «для всех» (без разброса) — только при перевесе ≥ 11 (у любителей 4.5)
+	constexpr double PRO_JUDGE_NOISE = 4.0;   // разброс восприятия раунда ±4 (у любителей ±1.6)
+	constexpr double PRO_EVEN = 0.05;         // 10-10 только при |восприятие| < 0.05 (у любителей 0.5)
 }
 
 using namespace BoxingFightConst;
@@ -430,6 +466,10 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	{
 		Form[0] = Form[1] = 1; // как веб: проверка нокаута, а не боя — без «формы дня»
 	}
+	// Профи (S-61): вкус каждого судьи — после всех бросков веба, у любителей не бросается.
+	bPro = Config.bProRules;
+	ProShotSev = 0;
+	for (int32 K = 0; K < 3; ++K) JudgeLean[K] = bPro ? Rng.Range(-PRO_JUDGE_LEAN, PRO_JUDGE_LEAN) : 0;
 }
 
 // ======================================================================
@@ -606,7 +646,10 @@ bool FBoxingFightCore::HumanRiseTap(int32 I)
 {
 	if (Phase != EFightPhase::Down || !bHasDown || Down.Who != I) return false;
 	const double KdHarder = 1 + RISE_KD_HARDER * FMath::Max(0, Rt[I].Kd - 1);
-	Down.RiseProgress = FMath::Min(1.0, Down.RiseProgress + (RISE_PER_TAP * (1 - 0.5 * Down.KoChance)) / KdHarder);
+	// Профи (S-61): тяжёлый нокдаун держит сильнее — тап даёт ×(1 − KoChance) вместо ×(1 − 0.5·KoChance): с шансом KO ИИ
+	// ≳ 0.4 при ~6 тапах/с уже не встать (у ИИ тот же нокдаун решает бросок KoChance).
+	const double RiseKo = bPro ? PRO_RISE_KO_K : 0.5;
+	Down.RiseProgress = FMath::Min(1.0, Down.RiseProgress + (RISE_PER_TAP * FMath::Max(0.0, 1 - RiseKo * Down.KoChance)) / KdHarder);
 	if (Down.RiseProgress >= 1) RiseUp();
 	return true;
 }
@@ -715,6 +758,7 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 
 	if (Rng.Next() < P)
 	{
+		const bool bWasHurt = T < Def.HurtUntil; // профи (S-61): попадание по уже поплывшему
 		// Раундовые счётчики — в масштабе раунда веба (RoundK = 55 / RoundSeconds).
 		Def.Accumulated += HpDmg * SIM_ROUND_SCALE * RoundK;
 		RPress[DefIdx] += HpDmg;
@@ -741,6 +785,8 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 			(bBody ? BODY_KD : 1) * ArmPow * (0.6 + 0.4 * Rf) * (Punch.bEmpty ? EMPTY_POW : 1));
 		// Dev glassJaw: здоровье в ноль — падение неизбежно (и уже без подъёма).
 		if (bGlassJaw && DefIdx == 1 && Phase == EFightPhase::Fighting && Def.Health() <= 0) Knockdown(AttIdx, DefIdx);
+		// Профи (S-61): чистый удар роняет сам по себе / рефери останавливает избиение. Только если ещё идёт бой.
+		if (bPro && !bGlassJaw && Phase == EFightPhase::Fighting && !bHasResult) TryProShot(AttIdx, DefIdx, HpDmg, bBody, bWasHurt);
 	}
 	else
 	{
@@ -867,6 +913,46 @@ double FBoxingFightCore::PressOf(int32 I) const
 	return RoundK < 1 ? RPressRep[I] * SIM_KD_SCALE : RPress[I] * SIM_KD_SCALE * RoundK;
 }
 
+// ---------- S-61: профи-правила (в вебе нет; см. константы PRO_*) ----------
+double FBoxingFightCore::ProVulnerability(int32 DefIdx, bool bWasHurt) const
+{
+	const FRuntime& Def = Rt[DefIdx];
+	const double Health01 = Def.Health() / 100;
+	return (1 + PRO_WEAR_K * (1 - Health01)) * (bWasHurt ? PRO_HURT_MUL : 1) *
+		(1 + PRO_GAS_K * (1 - ClampD(Def.Stamina / FMath::Max(1.0, Def.MaxStam), 0, 1)));
+}
+
+void FBoxingFightCore::TryProShot(int32 AttIdx, int32 DefIdx, double HpDmg, bool bBody, bool bWasHurt)
+{
+	const FRuntime& Att = Rt[AttIdx];
+	const FRuntime& Def = Rt[DefIdx];
+	const double MassAtt = Att.Prof.MassForPower > 0 ? Att.Prof.MassForPower : Att.Prof.WeightKg;
+	const double MassDef = Def.Prof.DurabilityMass > 0 ? Def.Prof.DurabilityMass : Def.Prof.WeightKg;
+	const double WeightK = FMath::Pow(FMath::Max(20.0, (MassAtt + MassDef) / 2) / 70, PRO_MASS_EXP) *
+		(Att.Prof.bFemale && Def.Prof.bFemale ? PRO_FEMALE_K : 1);
+	const double Excess = HpDmg * (bBody ? PRO_BODY_SHOCK : 1) - PRO_SHOCK_MIN;
+	const double Vul = ProVulnerability(DefIdx, bWasHurt);
+	// (1) Чистый удар роняет. RoundK: раунд длиннее — попаданий больше, шанс на попадание меньше (за бой — тот же).
+	if (Excess > 0)
+	{
+		const double P = FMath::Min(PRO_SHOT_CAP, PRO_SHOT_K * Excess * Excess * Vul * WeightK * FMath::Min(1.0, RoundK));
+		if (Rng.Next() < P)
+		{
+			ProShotSev = Excess * Vul;
+			Knockdown(AttIdx, DefIdx);
+			ProShotSev = 0;
+			return;
+		}
+	}
+	// (3) Поплывший под градом — рефери прекращает бой.
+	const double Health01 = Def.Health() / 100;
+	if (bWasHurt && Health01 < PRO_REF_HEALTH)
+	{
+		const double P = PRO_REF_K * HpDmg * (1 - Health01 / PRO_REF_HEALTH) * FMath::Min(1.0, RoundK);
+		if (Rng.Next() < P) Finish(AttIdx, EFightMethod::RSC);
+	}
+}
+
 void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 {
 	FRuntime& Def = Rt[DefIdx];
@@ -889,8 +975,11 @@ void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 	// Шанс «не встать» — KO-проверка simulate.
 	const double Severity = (PressOf(DefIdx) + Def.Accumulated * 0.12) /
 		FMath::Max(20.0, static_cast<double>(Def.Prof.Stats.Chin));
-	const double KoChance = (bGlassJaw && DefIdx == 1) ? 1.0
+	double KoChance = (bGlassJaw && DefIdx == 1) ? 1.0
 		: FMath::Min(0.6, FMath::Max(0.0, Severity - 0.9) * 0.5 + (RKd[DefIdx] >= 2 ? 0.2 : 0));
+	// Профи (S-61): уронивший удар и износ — чаще не встаёт.
+	if (bPro && !bGlassJaw)
+		KoChance = FMath::Min(PRO_KO_CAP, KoChance + PRO_KO_SHOT * ProShotSev + PRO_KO_WEAR * (1 - Def.Health() / 100));
 	Phase = EFightPhase::Down;
 	bHasDown = true;
 	Down = FDownState();
@@ -948,9 +1037,21 @@ void FBoxingFightCore::RiseUp()
 	R.Stamina = FMath::Max(0.0, R.Stamina - R.MaxStam * 0.12);
 	R.bYawFrozen = false;
 	const int32 Rose = Down.Who;
+	const double KoWas = Down.KoChance; // профи (S-61): насколько тяжёлым был нокдаун — рефери смотрит на вставшего
 	bHasDown = false;
 	Down = FDownState();
 	Phase = EFightPhase::Fighting;
+	// Профи (S-61): встал «плывущим» (мало здоровья, второй нокдаун раунда) — рефери смотрит в глаза и прекращает бой.
+	if (bPro && !bGlassJaw)
+	{
+		const double Health01 = R.Health() / 100;
+		const double P = PRO_RISE_STOP * (KoWas + FMath::Max(0.0, 1 - Health01 / PRO_RISE_HEALTH)) + (RKd[Rose] >= 2 ? 0.25 : 0);
+		if (P > 0 && Rng.Next() < P)
+		{
+			Finish(1 - Rose, EFightMethod::RSC);
+			return;
+		}
+	}
 	for (int32 I = 0; I < 2; ++I)
 	{
 		if (bAi[I]) Rt[I].NextAiAt = T + 0.6;
@@ -1089,6 +1190,17 @@ void FBoxingFightCore::ScoreRound()
 				if (Margin > 0.5) Cb -= 1;
 				else if (Margin < -0.5) Ca -= 1;
 			}
+		}
+		else if (bPro)
+		{
+			// Судьи профи (S-61): у каждого свой вкус — один ценит чистый объём, другой эффективную мощь; «явный для всех»
+			// раунд — только при большом перевесе, близкий каждый видит по-своему, 10-10 — редкость.
+			const double L = JudgeLean[Jd];
+			const double Mk = ((Landed[0] - Landed[1]) * (1 - L) + (DmgTaken[1] - DmgTaken[0]) * 0.6 * (1 + L)) * S;
+			const double Perceived = FMath::Abs(Mk) >= PRO_CLEAR_MARGIN ? Mk : Mk + Rng.Range(-PRO_JUDGE_NOISE, PRO_JUDGE_NOISE) + SeasonBias;
+			if (Perceived >= PRO_EVEN) Cb = 9;
+			else if (Perceived <= -PRO_EVEN) Ca = 9;
+			// иначе — 10-10
 		}
 		else if (FMath::Abs(Margin) >= CLEAR_MARGIN)
 		{

@@ -8620,10 +8620,10 @@
      1.012
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -8960,7 +8960,7 @@
      1.012
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -9028,10 +9028,10 @@
      0.989
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -9164,7 +9164,7 @@
      0.943
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -11061,7 +11061,7 @@
      1.015
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Cornrows.GR_Cornrows",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -15448,7 +15448,7 @@
      0.944
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Cornrows.GR_Cornrows",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -17745,7 +17745,7 @@
      1.028
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -17812,10 +17812,10 @@
      0.954
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -17883,7 +17883,7 @@
      "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
      "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
      "attach": null,
-     "length": 0.38,
+     "length": 0.822,
      "melanin": 0.3,
      "redness": 0.2,
      "white": 0.0,
@@ -19437,10 +19437,10 @@
      1.0
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Cornrows.GR_Cornrows",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -23544,10 +23544,10 @@
      0.984
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Cornrows.GR_Cornrows",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -28259,10 +28259,10 @@
      1.023
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -28527,10 +28527,10 @@
      0.969
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -28661,10 +28661,10 @@
      0.914
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -29200,7 +29200,7 @@
      1.026
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Medium.GR_Medium",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -29334,10 +29334,10 @@
      0.96
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -29401,10 +29401,10 @@
      1.065
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -29602,10 +29602,10 @@
      0.941
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -29669,10 +29669,10 @@
      0.991
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -31819,7 +31819,7 @@
      1.023
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,
@@ -33294,10 +33294,10 @@
      0.983
     ],
     "hair": {
-     "groom": "/Game/MetaHumans/Kellan/MaleHair/Hair/Hair_S_360Waves.Hair_S_360Waves",
-     "binding": "/Game/MetaHumans/Kellan/MaleHair/GroomBinding/Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding.Hair_S_360Waves_m_med_nrw_head_skmesh_Face_Archetype_Binding",
-     "attach": null,
-     "length": 0.8,
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
+     "binding": null,
+     "attach": "FACIAL_C_FacialRoot",
+     "length": 1.0,
      "melanin": 0.98,
      "redness": 0.12,
      "white": 0.0
@@ -34434,7 +34434,7 @@
      0.989
     ],
     "hair": {
-     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Ponytail.GR_Ponytail",
+     "groom": "/Game/BoxingLocal/Characters/Grooms/GR_Braids.GR_Braids",
      "binding": null,
      "attach": "FACIAL_C_FacialRoot",
      "length": 1.0,

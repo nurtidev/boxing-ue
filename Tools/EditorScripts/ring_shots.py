@@ -12,7 +12,11 @@ import time
 import unreal
 
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "Docs", "screens")
-SHOTS = [("PreviewCam", "ring_preview.png"), ("SideCam", "ring_side.png"), ("ArenaCam", "ring_arena.png")]
+# S-64: RING_SHOT_PREFIX=arena3_before — другое имя файлов (<prefix>_preview.png …); RING_SHOT_VARIANT=pro — оформление
+# профи (акторы с тегом ArenaAmateur прячутся в редакторе, ArenaPro — показываются; в игре это делает GameMode).
+PREFIX = os.environ.get("RING_SHOT_PREFIX", "ring")
+VARIANT = os.environ.get("RING_SHOT_VARIANT", "am")
+SHOTS = [("PreviewCam", PREFIX + "_preview.png"), ("SideCam", PREFIX + "_side.png"), ("ArenaCam", PREFIX + "_arena.png")]
 WARMUP = float(os.environ.get("RING_SHOT_WARMUP", "45"))  # с: компиляция шейдеров, Lumen, объёмный туман
 GAP = 12.0
 RES = (1920, 1080)
@@ -41,6 +45,16 @@ def tick(dt):
         state["loaded"] = True
         state["next"] = now + WARMUP
         unreal.SystemLibrary.execute_console_command(None, "r.ScreenPercentage 100")
+        hide_tag = "ArenaPro" if VARIANT != "pro" else "ArenaAmateur"
+        n = 0
+        for a in unreal.get_editor_subsystem(unreal.EditorActorSubsystem).get_all_level_actors():
+            if a.actor_has_tag(hide_tag):
+                a.set_is_temporarily_hidden_in_editor(True)
+                a.set_actor_hidden_in_game(True)
+                n += 1
+            elif a.actor_has_tag("ArenaPro") or a.actor_has_tag("ArenaAmateur"):
+                a.set_actor_hidden_in_game(False)   # снимок идёт видом игры; уровень не сохраняется
+        log("оформление %s: спрятано акторов %d" % (VARIANT, n))
         log("уровень загружен, прогрев %.0f с" % WARMUP)
         return
     if now < state["next"]:

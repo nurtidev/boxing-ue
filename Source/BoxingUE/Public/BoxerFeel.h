@@ -70,6 +70,23 @@ namespace BoxerFeel
 	FBoxReactKick ReactionKick(EBoxFeelEvent Kind, EBoxFeelPunch Punch, bool bRear, bool bBody, float Mag, bool bSlipped);
 	// Огибающие удара по фазе ядра: Aim — доворот руки на цель, Reach — «дотянуться до поверхности» (пик в контакте).
 	void PunchEnvelopes(float Phase, float ContactFrac, float& OutAim, float& OutReach);
+
+	// S-62: точка касания головы МИМО перчаток защиты (засчитанное попадание не приходит в перчатку).
+	// Center/Radius — сфера головы, Start — откуда идёт кулак (плечо у прямых; у хука/апперкота путь — последние
+	// PathCm по направлению подхода), Approach — исходный подход. Gloves — центры перчаток защищающегося, Clear —
+	// радиус перчатки + кулака. Перебор точек на передней полусфере (сбоку/выше/ниже), цена — отклонение + проход
+	// пути сквозь перчатки; Prev (если есть) — прошлый выбор (гистерезис, без дрожи). true — точка сдвинута.
+	struct FGuardAim
+	{
+		FVector Surface = FVector::ZeroVector;
+		FVector Approach = FVector::ForwardVector;
+		FVector2D UV = FVector2D::ZeroVector; // сдвиг по сфере: U — вбок, V — вверх (доли радиуса)
+		float ClearCm = 0.f;                  // запас пути до ближайшей перчатки (< 0 — сквозь)
+	};
+	bool AimAroundGuard(const FVector& Center, float Radius, const FVector& Start, const FVector& Approach, bool bStraight, float PathCm,
+		const FVector Gloves[2], float Clear, const FVector2D* Prev, FGuardAim& Out);
+	// Расстояние от точки до отрезка.
+	float SegPointDist(const FVector& A, const FVector& B, const FVector& P);
 }
 
 struct FBoxerReactionRig
@@ -106,15 +123,31 @@ struct FBoxerFeelFrame
 	bool bBentArm = false;            // хук/апперкот: локоть согнут, дистанцию добирает подшаг
 	int32 PunchKind = 0;              // 0 — прямой, 1 — хук, 2 — апперкот (плоскость локтя в IK)
 
+	// --- S-62: удар соперника идёт сквозь мой гард (не в блок) — перчатку отводит с его пути (мир, см) ---
+	bool bThreat = false;
+	FVector ThreatA = FVector::ZeroVector; // локоть бьющей руки соперника
+	FVector ThreatB = FVector::ZeroVector; // фронт его кулака
+	float ThreatClear = 16.f;              // радиус моей перчатки + его кулака
+	float ThreatW = 0.f;                   // 0..1 — сила отвода (огибающая его удара)
+
 	// Отладка (пишется анимпотоком, читается на игровом потоке с лагом в кадр).
 	bool bActive = false;
 };
+
+namespace BoxerFeel
+{
+	// S-62: куда отвести перчатку (центр Glove) с пути удара A→B: сдвиг перпендикулярно пути до Clear, не больше MaxCm.
+	// Ноль — путь и так мимо.
+	FVector GuardPush(const FVector& Glove, const FVector& A, const FVector& B, float Clear, float MaxCm);
+}
 
 // Отладочный вывод анимпотока (последний кадр с наведением).
 struct FBoxerFeelDebug
 {
 	float FistGapCm = -1.f;   // зазор кисть → её цель вдоль подхода (≈ фронт кулака → поверхность); −1 — нет наведения
 	FVector FistFront = FVector::ZeroVector; // фронт кулака в мире (кадр анимпотока)
+	FVector Elbow = FVector::ZeroVector;     // S-62: локоть бьющей руки в мире (путь удара для гарда соперника)
+	float GuardPushCm = 0.f;                 // S-62: насколько отведена моя перчатка с пути удара соперника
 	float LungeCm = 0.f;
 	float AimW = 0.f;
 	float ReachW = 0.f;

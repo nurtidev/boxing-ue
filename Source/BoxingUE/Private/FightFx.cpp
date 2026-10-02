@@ -3,6 +3,7 @@
 #include "BoxerCharacter.h"
 #include "BoxingFightGameMode.h"
 #include "FightAudio.h"
+#include "BoxingFightHUD.h"
 #include "Components/SkeletalMeshComponent.h"
 #include "Engine/Engine.h"
 #include "Engine/GameViewportClient.h"
@@ -190,14 +191,17 @@ namespace BoxFx
 		OutLook = FVector(Body.X + D.X * 60.f, Body.Y + D.Y * 60.f, RingCenter.Z + 60.f);
 	}
 
-	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook)
+	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale)
 	{
 		const float S = Corner == 0 ? -1.f : 1.f;
 		const FVector C(RingCenter.X + S * 263.f, RingCenter.Y + S * 263.f, RingCenter.Z);
 		const FVector N = (RingCenter - C).GetSafeNormal2D(); // из угла к центру
 		const float Portrait = FMath::Clamp((1.25f - Aspect) / (1.25f - 0.46f), 0.f, 1.f);
 		const float Wide = FMath::Clamp((Aspect - 1.25f) / 0.35f, 0.f, 1.f);
-		const float D = 290.f * (1.f + 0.45f * Portrait);
+		// S-62: боец в UE в углу стоит (стула нет) — кадр веба (сидящий) резал голову 198-см под панелью HUD: дальше
+		// и выше по росту (не меньше, чем для 178 см).
+		const float Hs = FMath::Clamp(HeightScale, 1.f, 1.25f);
+		const float D = 290.f * (1.f + 0.45f * Portrait) * Hs;
 		const FVector R(N.Y, -N.X, 0.f); // вправо от взгляда «камера → угол»
 		FVector Pos = C + N * D + R * 50.f;
 		FVector Look = C + N * 25.f + R * (62.f * Wide);
@@ -207,11 +211,63 @@ namespace BoxFx
 		Pos.X = FMath::Clamp(Pos.X + Dx.X, RingCenter.X - Lim, RingCenter.X + Lim);
 		Pos.Y = FMath::Clamp(Pos.Y + Dx.Y, RingCenter.Y - Lim, RingCenter.Y + Lim);
 		const float Out = FMath::Max3(0.f, static_cast<float>(FMath::Abs(Pos.X - RingCenter.X)) - 305.f, static_cast<float>(FMath::Abs(Pos.Y - RingCenter.Y)) - 305.f);
-		Pos.Z = RingCenter.Z + 162.f + 30.f * Portrait + FMath::Min(50.f, Out * 0.45f);
+		Pos.Z = RingCenter.Z + (162.f + 30.f * Portrait) * Hs + FMath::Min(50.f, Out * 0.45f);
 		Look += Dx;
-		Look.Z = RingCenter.Z + 88.f - 68.f * Portrait;
+		// Точка взгляда чуть выше, чем у веба (стоит, а не сидит): голова не под панелью раунда/счёта HUD.
+		Look.Z = RingCenter.Z + (88.f + 17.f * (1.f - Portrait) - 68.f * Portrait) * Hs;
 		OutCam = Pos;
 		OutLook = Look;
+	}
+
+	void ResultShot(const FVector& Winner, const FVector& Loser, const FVector& Cam, const FVector& RingCenter, float HFovDeg, float HeightScale,
+		FVector& OutCam, FVector& OutLook, const FVector& WinnerFwd)
+	{
+		const float Hs = FMath::Clamp(HeightScale, 0.85f, 1.25f);
+		const float D = 310.f * Hs; // во весь рост: 16:9, вертикальный FOV ≈ 46°
+		const float Lim = 330.f;    // камера внутри апрона (канаты у камеры прячет контроллер)
+		FVector Base = (Cam - Winner).GetSafeNormal2D();
+		if (Base.IsNearlyZero())
+		{
+			Base = FVector(1.f, 0.f, 0.f);
+		}
+		// Сторона — та же, что у нынешней камеры (без облёта через весь ринг); камера внутри апрона, проигравший — не
+		// между камерой и победителем.
+		FVector Best = Base;
+		float BestScore = TNumericLimits<float>::Max();
+		for (int32 Deg = -120; Deg <= 120; Deg += 10)
+		{
+			const FVector Dir = Base.RotateAngleAxis(static_cast<float>(Deg), FVector::UpVector);
+			const FVector C = Winner + Dir * D;
+			float Score = FMath::Abs(Deg) * 0.01f;
+			const float Out = static_cast<float>(FMath::Max(FMath::Abs(C.X - RingCenter.X), FMath::Abs(C.Y - RingCenter.Y))) - Lim;
+			Score += Out > 0.f ? 10.f + Out * 0.1f : 0.f;
+			FVector ToL = Loser - Winner;
+			ToL.Z = 0.f;
+			const float Along = static_cast<float>(FVector::DotProduct(ToL, Dir));
+			const float Across = static_cast<float>((ToL - Dir * Along).Size());
+			if (Along > 30.f && Along < D && Across < 60.f)
+			{
+				Score += 3.f; // проигравший заслонил бы победителя
+			}
+			if (!WinnerFwd.IsNearlyZero())
+			{
+				Score += 0.8f * (1.f - static_cast<float>(FVector::DotProduct(Dir, WinnerFwd.GetSafeNormal2D()))); // лицом к камере, а не спиной
+			}
+			if (Score < BestScore)
+			{
+				BestScore = Score;
+				Best = Dir;
+			}
+		}
+		FVector C = Winner + Best * D;
+		C.Z = RingCenter.Z + 125.f * Hs;
+		// Победитель — на RESULT_SCREEN_X ширины кадра: взгляд повёрнут вправо от направления на него.
+		const float HalfTan = FMath::Tan(FMath::DegreesToRadians(FMath::Clamp(HFovDeg, 30.f, 120.f) * 0.5f));
+		const float Theta = FMath::RadiansToDegrees(FMath::Atan(HalfTan * (1.f - 2.f * RESULT_SCREEN_X)));
+		const FVector ToW = (Winner - C).GetSafeNormal2D();
+		const FVector LookDir = ToW.RotateAngleAxis(Theta, FVector::UpVector);
+		OutCam = C;
+		OutLook = FVector(C.X + LookDir.X * D, C.Y + LookDir.Y * D, RingCenter.Z + 95.f * Hs);
 	}
 }
 
@@ -635,6 +691,12 @@ bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 			Cam = FMath::Lerp(Cam, KdCam, D);
 			Look = FMath::Lerp(Look, KdLook, D);
 		}
+		if (ResultMix > 1e-3f)
+		{
+			const float Rm = ResultMix * ResultMix * (3.f - 2.f * ResultMix);
+			Cam = FMath::Lerp(Cam, ResultCam, Rm);
+			Look = FMath::Lerp(Look, ResultLook, Rm);
+		}
 		// Наезд: камера ближе к паре (от точки взгляда) и чуть ниже; толчок по вектору удара гаснет вместе с наездом.
 		const float Zoom = 1.f - 0.12f * PunchIn * PunchIn;
 		FVector Off = Cam - Look;
@@ -960,7 +1022,19 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 		const ABoxerCharacter* D = GM->GetBoxer(Dn);
 		const ABoxerCharacter* S = GM->GetBoxer(1 - Dn);
 		FVector Body = D->GetActorLocation();
-		if (const USkeletalMeshComponent* M = D->GetFeelMesh())
+		FVector LHead, LPelvis;
+		if (D->GetLyingBody(LHead, LPelvis))
+		{
+			// S-62: где ЛЯЖЕТ тело (итог клипа падения с доворотом от канатов) — кадр верный с первого кадра нокдауна,
+			// пока боец ещё валится (раньше угол выбирался по стоящему, и камера упиралась ему в спину).
+			Body = 0.5f * (LHead + LPelvis);
+			if (!bKdBodyKnown)
+			{
+				bKdBodyKnown = true;
+				KdSide = 0; // угол, выбранный по стоящему телу, — заново
+			}
+		}
+		else if (const USkeletalMeshComponent* M = D->GetFeelMesh())
 		{
 			const FName Pelvis(TEXT("pelvis")), Head(TEXT("head"));
 			if (M->GetBoneIndex(Pelvis) != INDEX_NONE && M->GetBoneIndex(Head) != INDEX_NONE)
@@ -981,6 +1055,10 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 				StandRef.X - RC.X, StandRef.Y - RC.Y, KdSide - 1000, KdCam.X - RC.X, KdCam.Y - RC.Y, KdCam.Z - RC.Z);
 		}
 	}
+	if (!bDown)
+	{
+		bKdBodyKnown = false;
+	}
 	DownMix += ((bDown ? 1.f : 0.f) - DownMix) * (1.f - FMath::Exp(-(bDown ? 1.8f : 2.4f) * RealDt));
 	if (!bDown && DownMix < 0.01f)
 	{
@@ -997,11 +1075,52 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 			GEngine->GameViewport->GetViewportSize(Vp);
 		}
 		const float Aspect = Vp.Y > 0.f ? Vp.X / Vp.Y : 16.f / 9.f;
-		BoxFx::RestShot(GM->GetPlayerIndex(), Aspect, GM->GetBoxer(GM->GetPlayerIndex())->GetActorLocation(), RC, RestCam, RestLook);
+		const ABoxerCharacter* Pl = GM->GetBoxer(GM->GetPlayerIndex());
+		BoxFx::RestShot(GM->GetPlayerIndex(), Aspect, Pl->GetActorLocation(), RC, RestCam, RestLook, Pl->Preset.HeightCm > 0.f ? Pl->Preset.HeightCm / 178.f : 1.f);
 	}
 	RestMix += ((bRest ? 1.f : 0.f) - RestMix) * (1.f - FMath::Exp(-(bRest ? 1.4f : 2.6f) * RealDt));
 	if (!bRest && RestMix < 0.01f)
 	{
 		RestMix = 0.f;
+	}
+	// --- итог (S-62): панель итога в центре экрана закрывала бойцов (видны были только ноги) — победитель с рефери во
+	// весь рост в свободной полосе слева от панели. Портрет — панель на всю ширину: кадр не трогаем.
+	bool bResult = false;
+	if (GM->GetCore().IsOver() && GM->GetBoxer(0) && GM->GetBoxer(1))
+	{
+		const APlayerController* PC = GetWorld()->GetFirstPlayerController();
+		const ABoxingFightHUD* Hud = PC ? Cast<ABoxingFightHUD>(PC->GetHUD()) : nullptr;
+		FVector2D Vp(16.f, 9.f);
+		if (GEngine && GEngine->GameViewport)
+		{
+			GEngine->GameViewport->GetViewportSize(Vp);
+		}
+		const float Aspect = Vp.Y > 0.f ? Vp.X / Vp.Y : 16.f / 9.f;
+		if (Hud && Hud->IsResultOpen() && Aspect >= 1.25f && PC->PlayerCameraManager)
+		{
+			const int32 Wi = GM->GetCore().GetResult().WinnerIndex >= 0 ? GM->GetCore().GetResult().WinnerIndex : GM->GetPlayerIndex();
+			const ABoxerCharacter* W = GM->GetBoxer(Wi);
+			const ABoxerCharacter* L = GM->GetBoxer(1 - Wi);
+			const bool bFirst = ResultMix <= 0.f;
+			if (bFirst)
+			{
+				ResultCam = PC->PlayerCameraManager->GetCameraLocation(); // сторона — от нынешней камеры, один раз
+			}
+			BoxFx::ResultShot(W->GetActorLocation(), L->GetActorLocation(), FVector(ResultCam), RC,
+				PC->PlayerCameraManager->GetFOVAngle(), W->Preset.HeightCm > 0.f ? W->Preset.HeightCm / 178.f : 1.f, ResultCam, ResultLook,
+				bFirst ? W->GetActorForwardVector() : FVector::ZeroVector);
+			bResult = true;
+			if (bLog && bFirst)
+			{
+				const FVector Wl = W->GetActorLocation();
+				UE_LOG(LogTemp, Log, TEXT("FX result-cam: победитель (%.0f, %.0f), камера (%.0f, %.0f, %.0f), взгляд (%.0f, %.0f, %.0f), FOV %.0f"), Wl.X - RC.X, Wl.Y - RC.Y,
+					ResultCam.X - RC.X, ResultCam.Y - RC.Y, ResultCam.Z - RC.Z, ResultLook.X - RC.X, ResultLook.Y - RC.Y, ResultLook.Z - RC.Z, PC->PlayerCameraManager->GetFOVAngle());
+			}
+		}
+	}
+	ResultMix += ((bResult ? 1.f : 0.f) - ResultMix) * (1.f - FMath::Exp(-(bResult ? 1.6f : 3.f) * RealDt));
+	if (!bResult && ResultMix < 0.01f)
+	{
+		ResultMix = 0.f;
 	}
 }

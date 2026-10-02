@@ -218,6 +218,119 @@ void BoxerFeel::PunchEnvelopes(float Phase, float ContactFrac, float& OutAim, fl
 	}
 }
 
+FVector BoxerFeel::GuardPush(const FVector& Glove, const FVector& A, const FVector& B, float Clear, float MaxCm)
+{
+	const FVector AB = B - A;
+	const double L2 = AB.SizeSquared();
+	const double T = L2 > 1e-6 ? FMath::Clamp(FVector::DotProduct(Glove - A, AB) / L2, 0.0, 1.0) : 0.0;
+	const FVector Near = A + AB * T;
+	FVector Away = Glove - Near;
+	const float D = static_cast<float>(Away.Size());
+	if (D >= Clear)
+	{
+		return FVector::ZeroVector;
+	}
+	if (D < 0.5f)
+	{
+		// Ровно на линии — вбок, поперёк удара (по горизонтали).
+		Away = FVector::CrossProduct(FVector::UpVector, AB).GetSafeNormal();
+		if (Away.IsNearlyZero())
+		{
+			Away = FVector::RightVector;
+		}
+	}
+	else
+	{
+		Away /= D;
+	}
+	return Away * FMath::Min(Clear - D, MaxCm);
+}
+
+float BoxerFeel::SegPointDist(const FVector& A, const FVector& B, const FVector& P)
+{
+	const FVector AB = B - A;
+	const double L2 = AB.SizeSquared();
+	const double T = L2 > 1e-6 ? FMath::Clamp(FVector::DotProduct(P - A, AB) / L2, 0.0, 1.0) : 0.0;
+	return static_cast<float>(FVector::Dist(P, A + AB * T));
+}
+
+bool BoxerFeel::AimAroundGuard(const FVector& Center, float Radius, const FVector& Start, const FVector& Approach, bool bStraight, float PathCm,
+	const FVector Gloves[2], float Clear, const FVector2D* Prev, FGuardAim& Out)
+{
+	const FVector A0 = Approach.GetSafeNormal();
+	const FVector Up = FVector::UpVector;
+	FVector Side = FVector::CrossProduct(Up, A0).GetSafeNormal();
+	if (Side.IsNearlyZero())
+	{
+		Side = FVector::RightVector;
+	}
+	const FVector UpN = FVector::CrossProduct(A0, Side).GetSafeNormal() * (FVector::DotProduct(FVector::CrossProduct(A0, Side), Up) >= 0.f ? 1.f : -1.f);
+	auto Eval = [&](float U, float V, FGuardAim& R)
+	{
+		// Точка на передней полусфере: от «навстречу удару» вбок на U и вверх на V (доли радиуса).
+		const FVector N = (-A0 + Side * U + UpN * V).GetSafeNormal();
+		R.Surface = Center + N * Radius;
+		R.Approach = bStraight ? (R.Surface - Start).GetSafeNormal() : A0;
+		R.UV = FVector2D(U, V);
+		if (FVector::DotProduct(R.Approach, N) > -0.2f)
+		{
+			return false; // кулак пришёл бы по касательной/с тыла
+		}
+		const FVector From = bStraight ? Start : R.Surface - R.Approach * PathCm;
+		float Near = TNumericLimits<float>::Max();
+		for (int32 G = 0; G < 2; ++G)
+		{
+			Near = FMath::Min(Near, SegPointDist(From, R.Surface, Gloves[G]) - Clear);
+		}
+		R.ClearCm = Near;
+		return true;
+	};
+	auto Cost = [&](const FGuardAim& R)
+	{
+		float C = static_cast<float>(R.UV.Size()) * 0.6f;
+		if (R.ClearCm < 0.f)
+		{
+			C += 3.f + (-R.ClearCm) * 0.2f;
+		}
+		if (Prev)
+		{
+			C += static_cast<float>(FVector2D::Distance(R.UV, *Prev)) * 0.35f;
+		}
+		return C;
+	};
+	FGuardAim Base;
+	if (!Eval(0.f, 0.f, Base))
+	{
+		Base.Surface = Center - A0 * Radius;
+		Base.Approach = A0;
+		Base.ClearCm = 0.f;
+	}
+	FGuardAim Best = Base;
+	float BestC = Cost(Base);
+	if (Base.ClearCm < 0.f || (Prev && !Prev->IsNearlyZero()))
+	{
+		for (int32 Iu = -4; Iu <= 4; ++Iu)
+		{
+			for (int32 Iv = -2; Iv <= 4; ++Iv)
+			{
+				FGuardAim R;
+				if (!Eval(Iu * 0.25f, Iv * 0.25f, R))
+				{
+					continue;
+				}
+				const float C = Cost(R);
+				if (C < BestC - 1e-4f)
+				{
+					BestC = C;
+					Best = R;
+				}
+			}
+		}
+	}
+	Out = Best;
+	return !Best.UV.IsNearlyZero();
+}
+
 void FBoxerReactionRig::Kick(const FBoxReactKick& K)
 {
 	if (!K.bValid)
@@ -431,6 +544,52 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 		RotateCS(Pose, Head, Turn(F, L, HY * HEAD_SPLIT) * Turn(U, Rt, HR * HEAD_SPLIT) * Turn(F, U, HP * HEAD_SPLIT));
 	}
 
+	// --- 2б. S-62: удар соперника идёт мимо блока (не в перчатки) — моя перчатка на его пути отводится в сторону, а не
+	// проходит сквозь его кулак/предплечье (кулак доходит до головы между перчатками). ---
+	if (Frame.bThreat && Frame.ThreatW > 0.f)
+	{
+		for (int32 S = 0; S < 2; ++S)
+		{
+			if ((bAim && S == Arm) || !Ok(UpperArm[S]) || !Ok(LowerArm[S]) || !Ok(Hand[S]))
+			{
+				continue;
+			}
+			const FTransform UcS = CS(Pose, UpperArm[S]);
+			const FTransform LcS = CS(Pose, LowerArm[S]);
+			const FVector Sh = UcS.GetLocation();
+			const FVector El = LcS.GetLocation();
+			const FVector Hd = CS(Pose, Hand[S]).GetLocation();
+			const float LenU = FVector::Dist(Sh, El);
+			const float LenL = FVector::Dist(El, Hd);
+			if (LenU < 1.f || LenL < 1.f)
+			{
+				continue;
+			}
+			// Центр перчатки — перед костью кисти по предплечью; всё сравнение — в мире (радиусы с масштабом облика).
+			const FVector GloveCS = Hd + (Hd - El).GetSafeNormal() * 6.f;
+			const FVector GloveW = CompToWorld.TransformPosition(GloveCS);
+			const FVector PushW = BoxerFeel::GuardPush(GloveW, Frame.ThreatA, Frame.ThreatB, Frame.ThreatClear, 18.f) * Frame.ThreatW;
+			if (PushW.SizeSquared() < 0.25f)
+			{
+				continue;
+			}
+			const FVector Push = CompToWorld.InverseTransformVector(PushW);
+			FVector NewE, NewH;
+			const FVector Goal = Hd + Push;
+			AnimationCore::SolveTwoBoneIK(Sh, El, Hd, El + (El - (Sh + Hd) * 0.5f).GetSafeNormal() * 30.f, Goal, NewE, NewH, LenU, LenL, false, 1.0, 1.0);
+			const FQuat Qu = FQuat::FindBetweenNormals((El - Sh).GetSafeNormal(), (NewE - Sh).GetSafeNormal());
+			const FQuat NewU = (Qu * UcS.GetRotation()).GetNormalized();
+			const FQuat Ql = FQuat::FindBetweenNormals(Qu.RotateVector(Hd - El).GetSafeNormal(), (NewH - NewE).GetSafeNormal());
+			const FQuat NewL = (Ql * Qu * LcS.GetRotation()).GetNormalized();
+			Pose[UpperArm[S]].SetRotation((ParentRotCS(Pose, UpperArm[S]).Inverse() * NewU).GetNormalized());
+			Pose[LowerArm[S]].SetRotation((ParentRotCS(Pose, LowerArm[S]).Inverse() * NewL).GetNormalized());
+			if (OutDebug)
+			{
+				OutDebug->GuardPushCm = FMath::Max(OutDebug->GuardPushCm, static_cast<float>(PushW.Size()));
+			}
+		}
+	}
+
 	// --- 3. Наведение бьющей руки: доворот на цель + кулак ровно до поверхности (упор, не насквозь) ---
 	if (bAim)
 	{
@@ -491,6 +650,7 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 				OutDebug->AimW = Frame.AimWeight;
 				OutDebug->ReachW = Frame.ReachWeight;
 				OutDebug->FistFront = CompToWorld.TransformPosition(HandNow + Dir * Frame.FistReachCm);
+				OutDebug->Elbow = CompToWorld.TransformPosition(CS(Pose, LowerArm[Arm]).GetLocation());
 			}
 		}
 	}

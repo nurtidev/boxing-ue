@@ -1,5 +1,10 @@
 #include "BoxerCharacter.h"
 #include "BoxerLook.h"
+#include "BoxingFightGameMode.h"
+#include "FightReferee.h"
+#include "Animation/AnimSequenceBase.h"
+#include "Animation/AnimationPoseData.h"
+#include "BonePose.h"
 
 #include "Animation/AnimInstance.h"
 #include "Animation/AnimMontage.h"
@@ -37,6 +42,9 @@ namespace
 	constexpr float HEAVY_MAG = 1.1f;
 	// Попыток найти видимый меш подмены (child actor создаётся при регистрации — обычно сразу).
 	constexpr int32 PHYS_INIT_TRIES = 30;
+	// S-62: обход гарда — радиус перчатки защищающегося и кулака бьющего (см при росте 178; × масштаб облика).
+	constexpr float GUARD_GLOVE_R = 9.f;
+	constexpr float GUARD_FIST_R = 7.f;
 
 	const FName NAME_Contact(TEXT("Contact"));
 	const FName NAME_Peak(TEXT("Peak"));
@@ -343,6 +351,22 @@ void ABoxerCharacter::UpdateMontages(float DeltaSeconds)
 	{
 		return;
 	}
+	// S-62: длинный кадр (скриншот, подгрузка — 0.5–1 с) проматывал падение ЗА конец клипа, монтаж доигрывал и выходил,
+	// и лежащий на счёте вставал в стойку. Пока лежит / в финале — вернуть на кадр удержания.
+	if ((ActiveMontageSlot == EBoxMontageSlot::Knockdown && bKnockedDown) || ActiveMontageSlot == EBoxMontageSlot::Finale)
+	{
+		const FAnimMontageInstance* Inst = ActiveMontage ? Anim->GetActiveInstanceForMontage(ActiveMontage) : nullptr;
+		if (ActiveMontage && (!Inst || Inst->IsStopped()))
+		{
+			UAnimMontage* M = ActiveMontage;
+			const EBoxMontageSlot Slot = ActiveMontageSlot;
+			const float Hold = FMath::Max(0.f, M->GetPlayLength() - M->GetDefaultBlendOutTime() - HOLD_MARGIN);
+			if (PlaySlotMontage(Slot, M, 1.f, Hold))
+			{
+				Anim->Montage_Pause(M);
+			}
+		}
+	}
 	// Монтаж кончился или его перебили снаружи — слот свободен.
 	if (ActiveMontageSlot != EBoxMontageSlot::None && (!ActiveMontage || !Anim->Montage_IsActive(ActiveMontage)))
 	{
@@ -590,6 +614,8 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	bWasBlocking = bBlocking;
 	PrevSlipSide = SlipSide;
 
+	UpdateFall(Snapshot, DeltaSeconds); // S-62: падение внутри канатов (визуальный доворот/сдвиг)
+
 	// Ход — здесь, в тике GameMode: CharacterMovement тикает ПОСЛЕ него (пререквизит в GameMode),
 	// поэтому скорость/ввод этого кадра он и применит, а AnimBP (тикает после CMC) их увидит.
 	TrackFightTarget(DeltaSeconds);
@@ -681,6 +707,7 @@ void ABoxerCharacter::OnKnockdown_Implementation()
 	OnKnockdownDelegate.Broadcast();
 	// Досрочка в этом же кадре (не встанет) — падение-нокаут, иначе — нокдаун.
 	UAnimMontage* M = (bKO && KnockoutMontage) ? KnockoutMontage.Get() : KnockdownMontage.Get();
+	StartFall(); // S-62: где ляжет тело — внутри канатов, мимо соперника и рефери
 	PlaySlotMontage(EBoxMontageSlot::Knockdown, M, 1.f);
 }
 
@@ -911,12 +938,15 @@ void ABoxerCharacter::TrackFightTarget(float DeltaSeconds)
 		return;
 	}
 	const FVector Pos = GetActorLocation();
-	FVector Err = FightTarget - Pos;
+	// S-62: лежащий — с визуальным сдвигом/доворотом падения (тело внутри канатов); ядро о них не знает.
+	const FVector Goal = FightTarget + FVector(FallOffsetNow.X, FallOffsetNow.Y, 0.f);
+	const float GoalYaw = FightYaw + FallTurnNow;
+	FVector Err = Goal - Pos;
 	Err.Z = 0.f;
 	const float Dist = Err.Size();
 	if (Dist > TeleportDistance)
 	{
-		SnapToFightState(FightTarget, FightYaw);
+		SnapToFightState(Goal, GoalYaw);
 		return;
 	}
 
@@ -925,8 +955,8 @@ void ABoxerCharacter::TrackFightTarget(float DeltaSeconds)
 	// На постановке (S-53) курс меняется рывками (развернулся к углу / дошёл — к сопернику) — доворот с
 	// постоянной скоростью STAGE_TURN_DPS; в бою — как раньше, сразу.
 	const FRotator Facing = bStaging
-		? FMath::RInterpConstantTo(FRotator(0.f, GetActorRotation().Yaw, 0.f), FRotator(0.f, FightYaw, 0.f), DeltaSeconds, STAGE_TURN_DPS)
-		: FRotator(0.f, FightYaw, 0.f);
+		? FMath::RInterpConstantTo(FRotator(0.f, GetActorRotation().Yaw, 0.f), FRotator(0.f, GoalYaw, 0.f), DeltaSeconds, STAGE_TURN_DPS)
+		: FRotator(0.f, GoalYaw, 0.f);
 	SetActorRotation(Facing);
 	if (Controller)
 	{
@@ -1167,6 +1197,8 @@ FBoxerLayerParams ABoxerCharacter::GetLayerParams() const
 	P.TorsoAlpha = ActiveMontageSlot == EBoxMontageSlot::Hit ? HitMontageTorsoAlpha : 1.f;
 	P.ArmsAlpha = 1.f;
 	P.bFx = bFeel && !VisualAnim;
+	P.bMirror = IsSouthpaw();
+	P.MirrorAxis = static_cast<uint8>(SouthpawMirrorAxis);
 	return P;
 }
 
@@ -1261,6 +1293,7 @@ bool ABoxerCharacter::CaptureAim(EBoxPunchType Punch, EBoxPunchTarget Target)
 	// Цель: голова / корпус / перчатки (блок на старте удара). Дальше центр цели живой — по позе соперника ДО его
 	// процедурного слоя (без его подшага и реакции), а на время его нырка замирает: нырок честно уводит голову
 	// с линии, кулак проходит мимо (как в вебе).
+	bGuardUVValid = false;
 	AimKind = Target == EBoxPunchTarget::Body ? 1 : (Opp->bBlocking ? 2 : 0);
 	AimRadius = AimKind == 1 ? BodyRadiusCm : (AimKind == 2 ? GuardRadiusCm : HeadRadiusCm);
 	FVector Center;
@@ -1268,7 +1301,8 @@ bool ABoxerCharacter::CaptureAim(EBoxPunchType Punch, EBoxPunchTarget Target)
 	{
 		return false;
 	}
-	bAimLeftArm = BoxingBP::ArmOf(Punch) == EBoxPunchArm::Lead;
+	// Передняя рука — левая у правши, правая у левши (S-62: поза левши зеркалится целиком).
+	bAimLeftArm = (BoxingBP::ArmOf(Punch) == EBoxPunchArm::Lead) != IsSouthpaw();
 	FVector Shoulder;
 	if (!Bone(MM, bAimLeftArm ? TEXT("upperarm_l") : TEXT("upperarm_r"), Shoulder))
 	{
@@ -1354,7 +1388,16 @@ void ABoxerCharacter::KickReaction(EBoxFeelEvent Kind, EBoxPunchType Punch, EBox
 	default: break;
 	}
 	const bool bRear = BoxingBP::ArmOf(Punch) == EBoxPunchArm::Rear;
-	React.Kick(BoxerFeel::ReactionKick(Kind, P, bRear, Target == EBoxPunchTarget::Body, Magnitude, bSlipped));
+	FBoxReactKick K = BoxerFeel::ReactionKick(Kind, P, bRear, Target == EBoxPunchTarget::Body, Magnitude, bSlipped);
+	if (Opponent && Opponent->IsSouthpaw())
+	{
+		// S-62: бьёт левша — его передняя/задняя руки с другой стороны: отдача вбок/поворот — зеркально.
+		for (const EBoxReactChannel C : {EBoxReactChannel::HeadYaw, EBoxReactChannel::HeadRoll, EBoxReactChannel::TorsoRoll, EBoxReactChannel::TorsoYaw, EBoxReactChannel::Side})
+		{
+			K[C] = -K[C];
+		}
+	}
+	React.Kick(K);
 }
 
 void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
@@ -1392,10 +1435,34 @@ void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
 	Feel.Fwd = GetActorForwardVector();
 	Feel.Right = GetActorRightVector();
 	Feel.FistReachCm = FistReachCm;
-	Feel.MaxLungeCm = MaxLungeCm;
+	// S-62: подшаг — в осях своего меша (× свой масштаб облика); против более высокого — длиннее (голова выше и дальше:
+	// раздвижка VisMinSep идёт по среднему росту), иначе низкий бил 198-см «в перчатку».
+	const float HeightRatio = (Opponent && Preset.HeightCm > 0.f && Opponent->Preset.HeightCm > 0.f) ? Opponent->Preset.HeightCm / Preset.HeightCm : 1.f;
+	// Квадрат отношения: голова высокого и выше, и дальше (ядро засчитывает прямые с 1.3–1.4 м и у мухача против тяжа).
+	// Подшаг в осях меша (× масштаб облика): ÷ масштаб — в мире не короче MaxLungeCm у маленьких (дистанция ядра в метрах
+	// одна на всех: мухачи с 1.3–1.5 м не дотягивались).
+	Feel.MaxLungeCm = MaxLungeCm / FMath::Max(0.8f, VisualScale()) * FMath::Clamp(HeightRatio * HeightRatio, 1.f, 1.9f);
 	Feel.bAim = false;
 	Feel.AimWeight = 0.f;
 	Feel.ReachWeight = 0.f;
+	// S-62: удар соперника в голову/корпус мимо блока — моя перчатка на его пути отводится (не проходит сквозь кулак).
+	// В блоке (или он и бьёт в перчатки) — не трогаем: там перчатки и есть цель.
+	Feel.bThreat = false;
+	Feel.ThreatW = 0.f;
+	static const bool bNoGuardPush = FParse::Param(FCommandLine::Get(), TEXT("BoxNoGuardPush")); // A/B
+	if (!bNoGuardPush && Opponent && Opponent->bPunching && Opponent->bAimCaptured && Opponent->AimKind != 2 && !bBlocking && !bKnockedDown)
+	{
+		const FBoxerFeelDebug OD = Opponent->GetFeelDebug();
+		if (OD.AimW > 0.f && !OD.Elbow.IsNearlyZero())
+		{
+			Feel.bThreat = true;
+			Feel.ThreatA = OD.Elbow;
+			// Путь — до точки касания цели (кулак придёт туда в контакте), а не до фронта кулака прошлого кадра анимпотока.
+			Feel.ThreatB = Opponent->Feel.bAim ? Opponent->Feel.AimSurface : OD.FistFront;
+			Feel.ThreatClear = GUARD_GLOVE_R * VisualScale() + GUARD_FIST_R * Opponent->VisualScale() + 3.f;
+			Feel.ThreatW = FMath::Clamp(OD.AimW * 1.3f, 0.f, 1.f);
+		}
+	}
 	if (bAimCaptured && bPunching && !bKnockedDown && Opponent && ActiveMontageSlot == EBoxMontageSlot::Punch)
 	{
 		float Aim = 0.f, Reach = 0.f;
@@ -1412,6 +1479,28 @@ void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
 		Feel.PunchKind = (CurrentPunch == EBoxPunchType::HookL || CurrentPunch == EBoxPunchType::HookR) ? 1 : (Feel.bBentArm ? 2 : 0);
 		Feel.AimApproach = AimApproach;
 		Feel.AimSurface = Center - AimApproach * AimRadius;
+		// S-62: в голову — мимо перчаток защиты (засчитанное попадание не приходит в перчатку и не проходит сквозь неё).
+		// Соперник в блоке на старте удара — цель и так перчатки (AimKind 2).
+		static const bool bNoGuardAim = FParse::Param(FCommandLine::Get(), TEXT("BoxNoGuardAim")); // A/B
+		const FBoxerFeelDebug ORaw = Opponent->GetFeelDebug();
+		const USkeletalMeshComponent* MyMesh = GetFeelMesh();
+		const FName ShoulderBone(bAimLeftArm ? TEXT("upperarm_l") : TEXT("upperarm_r"));
+		if (!bNoGuardAim && AimKind == 0 && ORaw.bRaw && MyMesh && MyMesh->GetBoneIndex(ShoulderBone) != INDEX_NONE)
+		{
+			const FVector OF = Opponent->GetActorForwardVector();
+			const float OS = Opponent->VisualScale();
+			// Центр перчатки — перед костью кисти (кулак в перчатке), радиусы — с масштабом облика.
+			const FVector Gloves[2] = {ORaw.RawHandL + OF * (6.f * OS), ORaw.RawHandR + OF * (6.f * OS)};
+			const float Clear = GUARD_GLOVE_R * OS + GUARD_FIST_R * VisualScale();
+			BoxerFeel::FGuardAim G;
+			const bool bStraight = Feel.PunchKind == 0;
+			BoxerFeel::AimAroundGuard(Center, AimRadius, MyMesh->GetBoneLocation(ShoulderBone), AimApproach, bStraight, 35.f * VisualScale(),
+				Gloves, Clear, bGuardUVValid ? &GuardUV : nullptr, G);
+			GuardUV = G.UV;
+			bGuardUVValid = true;
+			Feel.AimApproach = G.Approach;
+			Feel.AimSurface = G.Surface;
+		}
 		Feel.AimWeight = Aim;
 		Feel.ReachWeight = Reach;
 		static const bool bDraw = FParse::Param(FCommandLine::Get(), TEXT("BoxFeelDraw"));
@@ -1473,11 +1562,297 @@ void ABoxerCharacter::EndReplayDrive()
 	ReplayBones.Reset();
 	// Вернуть живое место/курс сразу («защёлкнуть»), поза — снова из анимации (держит финальный кадр).
 	FVector Loc = GetActorLocation();
-	Loc.X = FightTarget.X;
-	Loc.Y = FightTarget.Y;
-	SetActorLocationAndRotation(Loc, FRotator(0.f, FightYaw, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+	Loc.X = FightTarget.X + FallOffsetNow.X;
+	Loc.Y = FightTarget.Y + FallOffsetNow.Y;
+	SetActorLocationAndRotation(Loc, FRotator(0.f, FightYaw + FallTurnNow, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
 	if (UCharacterMovementComponent* Cmc = GetCharacterMovement())
 	{
 		Cmc->StopMovementImmediately();
 	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Падение внутри канатов (S-62): раскладка тела из клипа + визуальный доворот/сдвиг (BoxerFall.h)
+// ---------------------------------------------------------------------------------------------
+
+float ABoxerCharacter::VisualScale() const
+{
+	return VisualChild ? static_cast<float>(VisualChild->GetRelativeScale3D().X) : 1.f;
+}
+
+const ABoxerCharacter::FFallClip* ABoxerCharacter::FallClipFor(const UAnimMontage* Montage)
+{
+	if (!Montage)
+	{
+		return nullptr;
+	}
+	if (const FFallClip* Found = FallClips.Find(Montage))
+	{
+		return Found->bValid ? Found : nullptr;
+	}
+	FFallClip& Clip = FallClips.Add(Montage);
+	USkeletalMeshComponent* Sk = GetMesh();
+	USkeletalMesh* Asset = Sk ? Sk->GetSkeletalMeshAsset() : nullptr;
+	if (!Asset || Montage->SlotAnimTracks.Num() == 0)
+	{
+		return nullptr;
+	}
+	// Поза клипа по кадрам — сэмпл сегмента трека монтажа на скелете логического меша (как анимпоток).
+	const FReferenceSkeleton& Ref = Asset->GetRefSkeleton();
+	TArray<FBoneIndexType> Req;
+	for (int32 I = 0; I < Ref.GetNum(); ++I)
+	{
+		Req.Add(static_cast<FBoneIndexType>(I));
+	}
+	FBoneContainer Bones(Req, UE::Anim::FCurveFilterSettings(), *Asset);
+	static const TCHAR* Names[] = {TEXT("head"), TEXT("pelvis"), TEXT("hand_l"), TEXT("hand_r"), TEXT("lowerarm_l"), TEXT("lowerarm_r"),
+		TEXT("foot_l"), TEXT("foot_r"), TEXT("calf_l"), TEXT("calf_r"), TEXT("spine_05")};
+	TArray<FCompactPoseBoneIndex> Idx;
+	for (const TCHAR* N : Names)
+	{
+		const int32 Mi = Ref.FindBoneIndex(FName(N));
+		Idx.Add(Mi == INDEX_NONE ? FCompactPoseBoneIndex(INDEX_NONE) : Bones.MakeCompactPoseIndex(FMeshPoseBoneIndex(Mi)));
+	}
+	if (Idx[0].GetInt() == INDEX_NONE || Idx[1].GetInt() == INDEX_NONE)
+	{
+		return nullptr;
+	}
+	const FAnimTrack& Track = Montage->SlotAnimTracks[0].AnimTrack;
+	const float Hold = FMath::Max(0.05f, Montage->GetPlayLength() - Montage->GetDefaultBlendOutTime() - HOLD_MARGIN);
+	for (float T = 0.f; T <= Hold + 1e-3f; T += 0.05f)
+	{
+		const float Tt = FMath::Min(T, Hold);
+		const FAnimSegment* Seg = Track.GetSegmentAtTime(Tt);
+		const UAnimSequenceBase* Seq = Seg ? Seg->GetAnimReference().Get() : nullptr;
+		if (!Seq)
+		{
+			continue;
+		}
+		FCompactPose Pose;
+		Pose.SetBoneContainer(&Bones);
+		FBlendedCurve Curve;
+		Curve.InitFrom(Bones);
+		UE::Anim::FStackAttributeContainer Attr;
+		FAnimationPoseData Data(Pose, Curve, Attr);
+		Seq->GetAnimationPose(Data, FAnimExtractContext(static_cast<double>(Seg->ConvertTrackPosToAnimPos(Tt))));
+		FCSPose<FCompactPose> CSP;
+		CSP.InitPose(Pose);
+		for (int32 K = 0; K < Idx.Num(); ++K)
+		{
+			if (Idx[K].GetInt() != INDEX_NONE)
+			{
+				Clip.Pts.Add(CSP.GetComponentSpaceTransform(Idx[K]).GetLocation());
+			}
+		}
+		const FVector Pelvis = CSP.GetComponentSpaceTransform(Idx[1]).GetLocation();
+		if (Clip.FloorTime < 0.f && Pelvis.Z < 40.f)
+		{
+			Clip.FloorTime = Tt;
+		}
+		Clip.Head = CSP.GetComponentSpaceTransform(Idx[0]).GetLocation();
+		Clip.Pelvis = Pelvis;
+	}
+	Clip.bValid = Clip.Pts.Num() > 0;
+	UE_LOG(LogTemp, Log, TEXT("BOXER %s [%d]: падение %s — %.2f с, таз на настиле с %.2f с, итог: голова (%.0f, %.0f, %.0f), таз (%.0f, %.0f, %.0f) [комп.]"),
+		*GetName(), FighterIndex, *Montage->GetName(), Hold, Clip.FloorTime, Clip.Head.X, Clip.Head.Y, Clip.Head.Z, Clip.Pelvis.X, Clip.Pelvis.Y, Clip.Pelvis.Z);
+	return Clip.bValid ? &Clip : nullptr;
+}
+
+void ABoxerCharacter::StartFall()
+{
+	bFallLogged = false;
+	FallT = 0.f;
+	FallMaxOutCm = -1e6f;
+	FallMontage = (bKO && KnockoutMontage) ? KnockoutMontage.Get() : KnockdownMontage.Get();
+	const FFallClip* Clip = FallClipFor(FallMontage);
+	if (!Clip || !GetMesh())
+	{
+		bFallActive = false;
+		FallLayout = BoxerFall::FLayout();
+		FallSolve = BoxerFall::FPlaceOut();
+		return;
+	}
+	// Компонентное пространство логического меша → оси бойца (видимый MetaHuman — child с масштабом облика).
+	const FTransform MeshRel = GetMesh()->GetRelativeTransform();
+	const float S = VisualScale();
+	const float Side = IsSouthpaw() ? -1.f : 1.f; // левша: поза зеркальна — раскладка тела тоже (вправо ↔ влево)
+	auto Local = [&MeshRel, S, Side](const FVector& P)
+	{
+		const FVector A = MeshRel.TransformPosition(P * S);
+		return FVector2D(A.X, A.Y * Side);
+	};
+	FallLayout = BoxerFall::FLayout();
+	for (const FVector& P : Clip->Pts)
+	{
+		FallLayout.Pts.Add(Local(P));
+	}
+	FallLayout.Head = Local(Clip->Head);
+	FallLayout.Pelvis = Local(Clip->Pelvis);
+	FallLayout.bValid = true;
+	bFallActive = true;
+	// Прежний сдвиг (подъём ещё не отпустил) не обнуляем рывком: новое решение набирается с нуля только если
+	// старого не было.
+	if (FallW <= 0.f)
+	{
+		FallSolve = BoxerFall::FPlaceOut();
+	}
+}
+
+void ABoxerCharacter::SolveFall(const FFightSnapshot& Snapshot)
+{
+	const ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
+	if (!GM || !FallLayout.bValid)
+	{
+		return;
+	}
+	static const bool bOff = FParse::Param(FCommandLine::Get(), TEXT("BoxFallFree")); // отладка: падать как в клипе (A/B)
+	if (bOff)
+	{
+		FallSolve = BoxerFall::FPlaceOut();
+		return;
+	}
+	const FVector RC = GM->GetRingFloorCenter();
+	auto Rel = [&RC](const FVector& P) { return FVector2D(P.X - RC.X, P.Y - RC.Y); };
+	BoxerFall::FPlaceIn In;
+	In.Pos = Rel(FightTarget);
+	In.YawDeg = FightYaw;
+	In.Layout = &FallLayout;
+	// Соперник (и его путь в нейтральный угол), рефери — тело не ложится на них.
+	if (Opponent)
+	{
+		const FVector2D O = Rel(Opponent->GetActorLocation());
+		BoxerFall::FAvoid A{O, O, 55.f};
+		const int32 Oi = 1 - FighterIndex;
+		if (Snapshot.Stage.Kind == ERingStageKind::Neutral && Snapshot.Stage.bHasTarget[Oi])
+		{
+			A.B = Rel(GM->FightToWorld(Snapshot.Stage.TargetX[Oi], Snapshot.Stage.TargetZ[Oi]));
+			A.R = 50.f;
+		}
+		In.Avoid.Add(A);
+	}
+	if (const ABoxingReferee* Ref = ABoxingReferee::Find(GetWorld()))
+	{
+		const FVector2D P = Rel(Ref->GetActorLocation());
+		In.Avoid.Add({P, P, 85.f}); // рефери ~20 см в радиусе + запас: падающая рука не задевает его ног
+	}
+	FallSolve = BoxerFall::Solve(In);
+}
+
+void ABoxerCharacter::UpdateFall(const FFightSnapshot& Snapshot, float DeltaSeconds)
+{
+	if (bKnockedDown && bFallActive)
+	{
+		FallT += DeltaSeconds;
+		// Первые доли секунды решение уточняется (стоящий получает цель в нейтральном углу, рефери смещается),
+		// пока сдвиг почти не набран; дальше — заморожено.
+		if (FallT < 0.3f)
+		{
+			SolveFall(Snapshot);
+		}
+		// Большой сдвиг — набирается дольше (тело не «уезжает» по настилу рывком).
+		const float BlendS = FallBlendSeconds * (1.f + 0.4f * static_cast<float>(FallSolve.Offset.Size()) / 100.f);
+		FallW = FMath::Max(FallW, BoxerFall::Blend(FallT, BlendS));
+		static const bool bLog = FParse::Param(FCommandLine::Get(), TEXT("BoxFallLog"));
+		if (bLog)
+		{
+			// Факт: насколько кости видимого тела выходят за канаты (305 см от центра) за всё падение.
+			const ABoxingFightGameMode* GM = GetWorld()->GetAuthGameMode<ABoxingFightGameMode>();
+			const USkeletalMeshComponent* M = GetFeelMesh();
+			if (GM && M)
+			{
+				const FVector RC = GM->GetRingFloorCenter();
+				static const TCHAR* Bones[] = {TEXT("head"), TEXT("pelvis"), TEXT("hand_l"), TEXT("hand_r"), TEXT("foot_l"), TEXT("foot_r")};
+				for (const TCHAR* B : Bones)
+				{
+					if (M->GetBoneIndex(FName(B)) != INDEX_NONE)
+					{
+						const FVector P = M->GetBoneLocation(FName(B)) - RC;
+						FallMaxOutCm = FMath::Max3(FallMaxOutCm, static_cast<float>(FMath::Abs(P.X)) - 305.f, static_cast<float>(FMath::Abs(P.Y)) - 305.f);
+					}
+				}
+			}
+			if (FallT >= 2.5f && FallT - DeltaSeconds < 2.5f)
+			{
+				UE_LOG(LogTemp, Log, TEXT("FALL [%d]: факт — кости тела за канатами макс. %.0f см (< 0 — внутри), лёг %d"), FighterIndex, FallMaxOutCm, IsFloored() ? 1 : 0);
+			}
+		}
+		if (bLog && !bFallLogged && FallT >= 0.3f)
+		{
+			bFallLogged = true;
+			const ABoxingFightGameMode* GM = GetWorld()->GetAuthGameMode<ABoxingFightGameMode>();
+			const FVector RC = GM ? GM->GetRingFloorCenter() : FVector::ZeroVector;
+			const FVector2D Pos(FightTarget.X - RC.X, FightTarget.Y - RC.Y);
+			UE_LOG(LogTemp, Log, TEXT("FALL [%d]: точка (%.0f, %.0f) курс %.0f, масштаб %.2f; за канатами было %.0f см → доворот %.0f°, сдвиг (%.0f, %.0f), внутри %d"),
+				FighterIndex, Pos.X, Pos.Y, FightYaw, VisualScale(), BoxerFall::Overhang(FallLayout, Pos, FightYaw, BoxerFall::ROPE_LIMIT_CM),
+				FallSolve.TurnDeg, FallSolve.Offset.X, FallSolve.Offset.Y, FallSolve.bInside ? 1 : 0);
+		}
+	}
+	else if (ActiveMontageSlot == EBoxMontageSlot::GetUp && FallW > 0.f)
+	{
+		// Встаёт — клип подъёма начинается с лежачей позы: сдвиг держим до конца подъёма.
+	}
+	else if (FallW > 0.f)
+	{
+		FallW = FMath::Max(0.f, FallW - DeltaSeconds / FMath::Max(0.05f, FallReleaseSeconds));
+		if (FallW <= 0.f)
+		{
+			bFallActive = false;
+			FallSolve = BoxerFall::FPlaceOut();
+		}
+	}
+	FallOffsetNow = FallSolve.Offset * FallW;
+	FallTurnNow = FallSolve.TurnDeg * FallW;
+}
+
+bool ABoxerCharacter::IsFloored() const
+{
+	if (!bKnockedDown)
+	{
+		return false;
+	}
+	const FFallClip* Clip = FallMontage ? FallClips.Find(FallMontage) : nullptr;
+	if (!Clip || !Clip->bValid || Clip->FloorTime <= 0.f)
+	{
+		return true;
+	}
+	const UAnimInstance* Anim = ActiveAnim.IsValid() ? ActiveAnim.Get() : nullptr;
+	if (Anim && ActiveMontage == FallMontage && ActiveMontageSlot == EBoxMontageSlot::Knockdown)
+	{
+		return Anim->Montage_GetPosition(ActiveMontage) >= Clip->FloorTime;
+	}
+	return FallT >= Clip->FloorTime + 0.3f; // монтажа нет — по времени
+}
+
+bool ABoxerCharacter::GetLyingBody(FVector& OutHead, FVector& OutPelvis) const
+{
+	if (!bKnockedDown || !FallLayout.bValid || !bFallActive)
+	{
+		return false;
+	}
+	const FVector2D Pos(FightTarget.X + FallSolve.Offset.X, FightTarget.Y + FallSolve.Offset.Y);
+	const float Yaw = FightYaw + FallSolve.TurnDeg;
+	const FVector2D H = BoxerFall::ToWorld(FallLayout.Head, Pos, Yaw);
+	const FVector2D P = BoxerFall::ToWorld(FallLayout.Pelvis, Pos, Yaw);
+	OutHead = FVector(H.X, H.Y, FightTarget.Z);
+	OutPelvis = FVector(P.X, P.Y, FightTarget.Z);
+	return true;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Левша (S-62): зеркальная стойка — визуал
+// ---------------------------------------------------------------------------------------------
+
+bool ABoxerCharacter::IsSouthpaw() const
+{
+	// -BoxSouthpaw=0 — как раньше (все правши); =red / =blue / =both — принудительно (отладка); иначе — стойка из ростера.
+	static const FString Mode = [] { FString V; FParse::Value(FCommandLine::Get(), TEXT("BoxSouthpaw="), V); return V.ToLower(); }();
+	if (Mode == TEXT("0") || Mode == TEXT("off"))
+	{
+		return false;
+	}
+	if (Mode == TEXT("both") || (Mode == TEXT("red") && FighterIndex == 0) || (Mode == TEXT("blue") && FighterIndex == 1))
+	{
+		return true;
+	}
+	return Preset.bSouthpaw;
 }
