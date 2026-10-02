@@ -80,13 +80,14 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
 	int32 PhysHitsOverride = -1;
 
-	// Своя подмена для красного/синего угла (облик бойца). Пусто — VisualOverridePath.
+	// Своя подмена для красного/синего угла (облик бойца: форма в цвет угла, tech-artist).
+	// Пусто или класса нет на машине (Content/BoxingLocal вне git) — VisualOverridePath.
 	// Командная строка: -BoxVisualRed=<путь класса>|none, -BoxVisualBlue=<путь класса>|none.
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
-	FSoftClassPath VisualOverridePathRed;
+	FSoftClassPath VisualOverridePathRed = FSoftClassPath(TEXT("/Game/BoxingLocal/Characters/BP_BoxerLook_Red.BP_BoxerLook_Red_C"));
 
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
-	FSoftClassPath VisualOverridePathBlue;
+	FSoftClassPath VisualOverridePathBlue = FSoftClassPath(TEXT("/Game/BoxingLocal/Characters/BP_BoxerLook_Blue.BP_BoxerLook_Blue_C"));
 
 	// «Ощущение удара» (слой верха, наведение кулака, реакция): -1 — как в классе бойца; 0/1 — принудительно (-BoxFeel=0|1).
 	UPROPERTY(EditAnywhere, Category = "Boxing|Feel")

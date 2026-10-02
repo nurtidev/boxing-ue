@@ -438,7 +438,15 @@ FSoftClassPath ABoxingFightGameMode::VisualPathFor(int32 Index) const
 	if (Own.IsValid())
 	{
 		// "/Script/None.None" — явное «без подмены» из командной строки (-BoxVisualRed=none).
-		return Own.ToString() == TEXT("/Script/None.None") ? FSoftClassPath() : Own;
+		if (Own.ToString() == TEXT("/Script/None.None"))
+		{
+			return FSoftClassPath();
+		}
+		if (Own.TryLoadClass<AActor>())
+		{
+			return Own;
+		}
+		UE_LOG(LogTemp, Warning, TEXT("BOXER облик %s не найден (Content/BoxingLocal вне git?) — беру %s"), *Own.ToString(), *VisualOverridePath.ToString());
 	}
 	return VisualOverridePath;
 }

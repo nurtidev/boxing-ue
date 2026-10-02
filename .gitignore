@@ -20,3 +20,11 @@ Content/*
 
 # Python (скрипты Tools/EditorScripts)
 __pycache__/
+# Скриншоты облика (S-41, ~100 МБ) — в git только подборка
+Docs/screens/look_*
+!Docs/screens/look_after_01_Punch_Jab_l_blue_side.png
+!Docs/screens/look_after_02_Punch_Cross_r_red_gloves.png
+!Docs/screens/look_after_07_Punch_HookR_r_red_side.png
+!Docs/screens/look_after_12_Punch_HookL_l_blue_front.png
+!Docs/screens/look_after_17_Finale_blue_side.png
+!Docs/screens/look_after_pose_12_Pose_Knockdown_blue_low.png
