@@ -44,6 +44,27 @@ Tools\CoreHarness\build.cmd
 **Сначала** — поставить в Launcher «Editor symbols for debugging» и снять полный стек: он сразу скажет,
 какая из гипотез верна. Запасной путь без компонентной симуляции — узел RigidBody в AnimBP видимого меша.
 
+### Результат (S-41 game feel, 02.10.2026): причина найдена — вариант H1, гонка с параллельной оценкой позы
+
+Без отладочных символов стек разобран так: базы модулей — из потока ModuleList минидампа
+(`Saved/Crashes/*/UEMinidump.dmp`, разбор PowerShell-скриптом), адреса → ближайший экспорт `UnrealEditor-Engine.dll`
+(`dumpbin /exports`). Стек: `UWorld::Tick` → тик компонента → `UPhysicalAnimationComponent::UpdateTargetActors` →
+`FPhysInterface_Chaos::ExecuteWrite` → статическая `ComputeLocalSpaceTargetTM` (рядом с
+`USkeletalMeshComponent::CompleteParallelBlendPhysics`) → assert. По исходнику движка
+(`PhysicalAnimationComponent.cpp`): `UpdateTargetActors` копирует `SkeletalMeshComponent->GetBoneSpaceTransforms()` и
+читает `LocalTransforms[BoneIndex]` — пустой массив. Пустой он, пока идёт **параллельная** оценка позы меша:
+`USkeletalMeshComponent` на время задачи забирает `BoneSpaceTransforms` в контекст оценки (swap буферов), а
+пререквизит PAC → меш ждёт только тика меша, не завершения задачи.
+
+* Проверка: `-ExecCmds="a.ParallelAnimEvaluation 0"` + `-BoxPhysHits=1` — 60 с автобоя, 26 попаданий, без падения
+  (было: падение на ~20-й секунде).
+* H2 (вызовы из тика бойца) — нет: падает тик самого PAC. H3 (LOD) — не нужна.
+* Фикс: при включённой физреакции `ABoxerCharacter::InitPhysics` ставит cvar `a.ParallelAnimEvaluation 0` (вся
+  анимация — на игровом потоке). Проверено: `-BoxPhysHits=1`, 90 с автобоя (2 раунда, перерыв), 37 попаданий — без
+  сбоев. Выключать параллельность только у видимого меша (`UBoxerVisualAnimInstance::CanRunParallelWork`) мало:
+  вместо падения — зависание на том же месте (~22-я с). Цена — анимация на игровом потоке (на двух бойцах не замерено).
+* По умолчанию физреакция всё равно ВЫКЛ.: реакцию дают пружины костей ([FIGHT_FEEL.md](FIGHT_FEEL.md)).
+
 ## 4. Найдено ревью, не исправлено (нужно решение или проверка вживую)
 
 - **`HoldAtEnd` проскакивает окно 0.03 с** (`BoxerCharacter.cpp`, `HoldAt`): при кадре > 33 мс монтаж нокдауна/финала

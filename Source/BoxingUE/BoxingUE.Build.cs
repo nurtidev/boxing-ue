@@ -8,7 +8,7 @@ public class BoxingUE : ModuleRules
 
 		PublicDependencyModuleNames.AddRange(new string[] {
 			"Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput",
-			"PhysicsControl", "AnimGraphRuntime"
+			"PhysicsControl", "AnimGraphRuntime", "AnimationCore", "IKRig"
 		});
 	}
 }

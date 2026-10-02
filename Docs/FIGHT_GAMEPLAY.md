@@ -51,7 +51,10 @@
 Командная строка: `-BoxAutopilot`, `-BoxSeed=N`, `-BoxRoundSec=S`, `-BoxBreakSec=S`, `-BoxQuitAfter=S`,
 `-BoxLogEvery=S` (позиции/состояние в LogTemp), `-BoxLogEvents`, `-BoxShots=6,12` (скриншоты по времени),
 `-BoxHitShots=N` (скриншоты в кадре контакта первых N попаданий/блоков, раз в ≥ 1.5 с), `-BoxShotPrefix=имя`
-(файлы `Docs/screens/<имя>_NN.png`, `<имя>_hitK_<Удар>_<land|block>.png`), `-BoxVisual=<класс>|none`, `-BoxPhysHits=0|1`.
+(файлы `Docs/screens/<имя>_NN.png`, `<имя>_hitK_<Удар>_<land|block>.png`), `-BoxVisual=<класс>|none`, `-BoxPhysHits=0|1`;
+«ощущение удара» и отладка камеры/реакции — `-BoxFeel=0`, `-BoxMinSep=СМ`, `-BoxVisualRed=`/`-BoxVisualBlue=`, `-BoxCamSide`,
+`-BoxFeelDraw`, `-BoxHitShotDelay=…` и др. — [FIGHT_FEEL.md](FIGHT_FEEL.md). Свойства GameMode `VisualOverridePathRed/Blue`
+(своя подмена угла, фолбэк — `VisualOverridePath`), `FeelOverride`, `VisMinSepCm`.|block>.png`), `-BoxVisual=<класс>|none`, `-BoxPhysHits=0|1`.
 
 ## Боец: BP_Boxer, AnimBP GASP, MetaHuman
 
@@ -70,8 +73,10 @@ AnimBP GASP читает пешку через BP-интерфейс `BPI_Sandbo
 
 ## Монтажи (трек C) и стойка
 
-Все монтажи — UEFN-набор `/Game/BoxingLocal/Anim/AM_*` (вне git), **все в `DefaultSlot`** (полное тело; слой UpperBody в
-AnimBP отложен — [ANIM_SETUP.md](ANIM_SETUP.md)). Поиск: `MontageFolders` = `/Game/BoxingLocal/Anim`, затем
+Все монтажи — UEFN-набор `/Game/BoxingLocal/Anim/AM_*` (вне git), все в слоте `DefaultSlot`. **С S-41 feel** удары, блок,
+уклоны, реакции и стойка рук играют на НАТИВНОМ пост-процессе логического меша (`UBoxerLayerAnimInstance`, свой
+`DefaultSlot`, накладывается от `spine_01` вверх), полнотелые (нокдаун/нокаут/подъём/финал, стойка ног) — на AnimBP GASP;
+подробно — [FIGHT_FEEL.md](FIGHT_FEEL.md). С `-BoxFeel=0` — как раньше, всё на всё тело. Поиск: `MontageFolders` = `/Game/BoxingLocal/Anim`, затем
 `/Game/Boxing/Anim`; в логе `монтажей найдено 19 из 19 … контакт джеба 0.433 с`.
 
 | Свойство | Монтаж | Как играется |
@@ -91,8 +96,8 @@ AnimBP отложен — [ANIM_SETUP.md](ANIM_SETUP.md)). Поиск: `MontageF
 время — `GetTriggerTime()`), `GetPunchMontage(Punch, Target)`, `GetPunchContactTime(Punch)` (`PunchContactTimes` →
 Contact → середина). Приоритет: финал > нокдаун > удар > уклон > реакция/блок > стойка.
 
-**Минус полнотелого слота:** во время удара/реакции ноги — из клипа (Root Lock), а капсула продолжает шаг ядра —
-короткое скольжение ступней; на шагах без удара ноги ведёт Motion Matching. Лечится слоем UpperBody в AnimBP.
+**Минус полнотелого слота** (только с `-BoxFeel=0`): во время удара/реакции ноги — из клипа (Root Lock), а капсула
+продолжает шаг ядра — короткое скольжение ступней. Слой верха (по умолчанию) это убрал: ноги всегда — Motion Matching.
 
 ## API для AnimBP
 
@@ -108,7 +113,11 @@ None/Punch/Block/BlockHit/Slip/Hit/Knockdown/GetUp/Finale/Guard); HUD: `Health`,
 `OnBlockedPunch(Punch, Magnitude, Direction)`; `OnKnockdown()` / `OnKnockdownDelegate`; `OnGetUp()` / `OnGetUpDelegate`;
 `HitReaction(Punch, Target, Magnitude, Direction, bBlocked)`.
 
-## Физреакция — ВЫКЛЮЧЕНА (движок падает)
+## Физреакция — ВЫКЛЮЧЕНА (причина падения найдена; реакцию дают пружины костей)
+
+**Обновление S-41 feel:** реакция на попадание — аддитивные пружины костей (порт веба, [FIGHT_FEEL.md](FIGHT_FEEL.md)).
+Причина падения физики — гонка тика `UPhysicalAnimationComponent` с параллельной оценкой позы (VERIFY_ON_PC.md, разд. 3);
+с `-BoxPhysHits=1` код теперь ставит `a.ParallelAnimEvaluation 0`, и падения нет (90 с, 37 попаданий). Ниже — исходное описание.
 
 Реализована по [HIT_REACTION.md](HIT_REACTION.md) (подход 1) на **видимом** меше Kellan (`Body`, 19 тел физассета):
 `UPhysicalAnimationComponent` + строки `DT_HitReaction_PhysAnim` по порядку, тела ниже `spine_01` симулируются без

@@ -134,6 +134,8 @@ private:
 	bool bRopesCollected = false;
 
 	bool bCamInit = false;
+	// Отладка «ощущения удара»: -BoxCamSide — камера строго сбоку от пары, ближе, на высоте голов (видно, доходит ли кулак).
+	bool bSideCam = false;
 	FVector CamMid = FVector::ZeroVector;
 	float CamYaw = 0.f;
 	int32 PrevSlipAxis = 0;

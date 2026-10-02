@@ -138,8 +138,35 @@ void ABoxingFightGameMode::ReadCommandLine()
 	{
 		VisualOverridePath = Visual.Equals(TEXT("none"), ESearchCase::IgnoreCase) ? FSoftClassPath() : FSoftClassPath(Visual);
 	}
+	auto ReadVisual = [Cmd](const TCHAR* Key, FSoftClassPath& Out)
+	{
+		FString V;
+		if (FParse::Value(Cmd, Key, V))
+		{
+			// "none" — явно без подмены (манекен) — помечаем путём-заглушкой "None".
+			Out = V.Equals(TEXT("none"), ESearchCase::IgnoreCase) ? FSoftClassPath(TEXT("/Script/None.None")) : FSoftClassPath(V);
+		}
+	};
+	ReadVisual(TEXT("BoxVisualRed="), VisualOverridePathRed);
+	ReadVisual(TEXT("BoxVisualBlue="), VisualOverridePathBlue);
 	FParse::Value(Cmd, TEXT("BoxPhysHits="), PhysHitsOverride);
+	FParse::Value(Cmd, TEXT("BoxFeel="), FeelOverride);
+	FParse::Value(Cmd, TEXT("BoxMinSep="), VisMinSepCm);
+	if (FeelOverride == 0)
+	{
+		VisMinSepCm = 0.f; // A/B: «как до» — без раздвижки
+	}
 	FParse::Value(Cmd, TEXT("BoxHitShots="), HitShotsLeft);
+	FString Delays;
+	if (FParse::Value(Cmd, TEXT("BoxHitShotDelay="), Delays, false))
+	{
+		TArray<FString> Parts;
+		Delays.ParseIntoArray(Parts, TEXT(","));
+		for (const FString& P : Parts)
+		{
+			HitShotDelays.Add(FCString::Atof(*P));
+		}
+	}
 	FParse::Value(Cmd, TEXT("BoxShotPrefix="), ShotPrefix);
 	FString Shots;
 	if (FParse::Value(Cmd, TEXT("BoxShots="), Shots, false))
@@ -169,7 +196,6 @@ void ABoxingFightGameMode::StartPlay()
 		Cls = ABoxerCharacter::StaticClass();
 	}
 
-	UClass* VisualCls = VisualOverridePath.IsValid() ? VisualOverridePath.TryLoadClass<AActor>() : nullptr;
 	const ABoxerCharacter* Cdo = Cls->GetDefaultObject<ABoxerCharacter>();
 	const float HalfHeight = (Cdo && Cdo->GetCapsuleComponent()) ? Cdo->GetCapsuleComponent()->GetScaledCapsuleHalfHeight() : 90.f;
 
@@ -191,9 +217,18 @@ void ABoxingFightGameMode::StartPlay()
 		}
 		B->FighterIndex = I;
 		B->Preset = I == 0 ? RedPreset : BluePreset;
-		if (VisualCls)
+		const FSoftClassPath VisPath = VisualPathFor(I);
+		if (UClass* VisualCls = VisPath.IsValid() ? VisPath.TryLoadClass<AActor>() : nullptr)
 		{
 			B->VisualOverrideClass = VisualCls;
+		}
+		else if (VisPath.IsValid())
+		{
+			UE_LOG(LogTemp, Warning, TEXT("FIGHT: подмена %s для бойца %d не загрузилась — виден манекен"), *VisPath.ToString(), I);
+		}
+		if (FeelOverride >= 0)
+		{
+			B->bFeel = FeelOverride != 0;
 		}
 		if (PhysHitsOverride >= 0)
 		{
@@ -323,6 +358,7 @@ void ABoxingFightGameMode::Tick(float DeltaSeconds)
 		return;
 	}
 
+	CheckFeelContacts();
 	Accum += DeltaSeconds;
 	int32 Steps = 0;
 	TArray<FFightEvent> Events;
@@ -365,11 +401,27 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 		{
 			--HitShotsLeft;
 			LastHitShotAt = RealTime;
-			TakeShot(FString::Printf(TEXT("%s_hit%d_%s_%s"), *ShotPrefix, ++HitShotIndex, PunchName(E.Punch),
-				E.Kind == EFightEventKind::Hit ? TEXT("land") : TEXT("block")));
+			const FString ShotName = FString::Printf(TEXT("%s_hit%d_%s_%s"), *ShotPrefix, ++HitShotIndex, PunchName(E.Punch),
+				E.Kind == EFightEventKind::Hit ? TEXT("land") : TEXT("block"));
+			if (HitShotDelays.Num() > 0)
+			{
+				for (const float D : HitShotDelays)
+				{
+					DelayedShots.Add({FString::Printf(TEXT("%s_t%03d"), *ShotName, FMath::RoundToInt(D * 1000.f)), RealTime + D});
+				}
+			}
+			else
+			{
+				TakeShot(ShotName);
+			}
 		}
 		const ABoxerCharacter* Att = GetBoxer(E.Attacker);
 		const FVector AttLoc = Att ? Att->GetActorLocation() : FVector::ZeroVector;
+		// Метрика контакта: зазор кулака в кадре контакта — читается в СЛЕДУЮЩЕМ тике (поза этого кадра ещё не посчитана).
+		if (E.Attacker >= 0 && E.Attacker < 2 && (E.Kind == EFightEventKind::Hit || E.Kind == EFightEventKind::Blocked))
+		{
+			PendingFeelCheck[E.Attacker] = E.Kind == EFightEventKind::Hit ? 1 : 2;
+		}
 		for (int32 I = 0; I < 2; ++I)
 		{
 			if (ABoxerCharacter* B = GetBoxer(I))
@@ -380,8 +432,43 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 	}
 }
 
+FSoftClassPath ABoxingFightGameMode::VisualPathFor(int32 Index) const
+{
+	const FSoftClassPath& Own = Index == 0 ? VisualOverridePathRed : VisualOverridePathBlue;
+	if (Own.IsValid())
+	{
+		// "/Script/None.None" — явное «без подмены» из командной строки (-BoxVisualRed=none).
+		return Own.ToString() == TEXT("/Script/None.None") ? FSoftClassPath() : Own;
+	}
+	return VisualOverridePath;
+}
+
 void ABoxingFightGameMode::PushStateToBoxers(float DeltaSeconds)
 {
+	FVector Targets[2];
+	for (int32 I = 0; I < 2; ++I)
+	{
+		Targets[I] = FightToWorld(Snap.Fighters[I].X, Snap.Fighters[I].Z);
+	}
+	// Минимальная визуальная дистанция по росту (VIS_MIN_SEP веба): клипы Mixamo наклоняют корпус вперёд,
+	// и на ближней дистанции ядра (0.9–1.0 м) торсы влезали друг в друга. Раздвигаем точки слежения
+	// симметрично вдоль оси пары — ядро (и исходы) не трогаем, кулак доводит наведение/подшаг.
+	if (VisMinSepCm > 0.f)
+	{
+		FVector D = Targets[1] - Targets[0];
+		D.Z = 0.f;
+		const float Dist = D.Size();
+		const float AvgH = 0.5f * (RedPreset.HeightCm + BluePreset.HeightCm);
+		const float MinSep = VisMinSepCm * (AvgH > 0.f ? AvgH / 178.f : 1.f);
+		if (Dist > 1.f && Dist < MinSep)
+		{
+			const FVector N = D / Dist;
+			const float Push = 0.5f * (MinSep - Dist);
+			Targets[0] -= N * Push;
+			Targets[1] += N * Push;
+			++SepPushes;
+		}
+	}
 	for (int32 I = 0; I < 2; ++I)
 	{
 		ABoxerCharacter* B = GetBoxer(I);
@@ -389,8 +476,7 @@ void ABoxingFightGameMode::PushStateToBoxers(float DeltaSeconds)
 		{
 			continue;
 		}
-		const FFighterState& F = Snap.Fighters[I];
-		B->ApplyFightState(Snap, Core.GetFightTime(), FightToWorld(F.X, F.Z), F.YawDegUE, DeltaSeconds);
+		B->ApplyFightState(Snap, Core.GetFightTime(), Targets[I], Snap.Fighters[I].YawDegUE, DeltaSeconds);
 	}
 }
 
@@ -443,6 +529,26 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 			MaxTrackErrorCm = FMath::Max(MaxTrackErrorCm, FMath::RoundToInt(D.Size2D()));
 		}
 	}
+	// «Слипание»: горизонтальная дистанция торсов и голов видимых мешей (в бою, оба на ногах).
+	if (RedBoxer && BlueBoxer && Snap.Phase == EFightPhase::Fighting && !Snap.Fighters[0].bDown && !Snap.Fighters[1].bDown)
+	{
+		const USkeletalMeshComponent* M0 = RedBoxer->GetFeelMesh();
+		const USkeletalMeshComponent* M1 = BlueBoxer->GetFeelMesh();
+		auto Sep = [M0, M1](const TCHAR* Bone)
+		{
+			const FName N(Bone);
+			if (!M0 || !M1 || M0->GetBoneIndex(N) == INDEX_NONE || M1->GetBoneIndex(N) == INDEX_NONE)
+			{
+				return 1e6f;
+			}
+			return static_cast<float>(FVector::Dist2D(M0->GetBoneLocation(N), M1->GetBoneLocation(N)));
+		};
+		if (RealTime > 2.f)
+		{
+			MinChestSepCm = FMath::Min(MinChestSepCm, Sep(TEXT("spine_05")));
+			MinHeadSepCm = FMath::Min(MinHeadSepCm, Sep(TEXT("head")));
+		}
+	}
 
 	if (LogEvery > 0.f)
 	{
@@ -474,6 +580,12 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 		}
 	}
 
+	// Серия после контакта: один снимок за кадр (запрос скриншота в кадре один), по порядку.
+	if (DelayedShots.Num() > 0 && RealTime >= DelayedShots[0].Value)
+	{
+		TakeShot(DelayedShots[0].Key);
+		DelayedShots.RemoveAt(0);
+	}
 	for (int32 S = ShotTimes.Num() - 1; S >= 0; --S)
 	{
 		if (RealTime >= ShotTimes[S])
@@ -488,7 +600,37 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 		UE_LOG(LogTemp, Log, TEXT("FIGHT СВОДКА: t=%.1f core=%.2f раунд %d, событий: hit %d, block %d, slip %d, miss %d, kd %d; макс. расхождение визуала с ядром %d см; итог: %s"),
 			RealTime, Core.GetFightTime(), Snap.Round, EventCount[0], EventCount[1], EventCount[2], EventCount[3], EventCount[4],
 			MaxTrackErrorCm, Core.IsOver() ? *GetResultText() : TEXT("бой идёт"));
+		UE_LOG(LogTemp, Log, TEXT("FEEL СВОДКА: мин. дистанция торсов (spine_05) %.0f см, голов %.0f см; раздвижек %d кадров (мин. %.0f см); контактов с наведением %d, зазор кулака |ср.| %.1f см, макс. %.1f см; подшаг макс. %.1f см"),
+			MinChestSepCm, MinHeadSepCm, SepPushes, VisMinSepCm, FeelContacts, FeelContacts ? FeelGapAbsSum / FeelContacts : 0.f, FeelGapMaxAbs, FeelLungeMax);
 		QuitAfter = -1.f;
 		FPlatformMisc::RequestExit(false, TEXT("BoxQuitAfter"));
+	}
+}
+
+void ABoxingFightGameMode::CheckFeelContacts()
+{
+	for (int32 I = 0; I < 2; ++I)
+	{
+		const int32 Kind = PendingFeelCheck[I];
+		PendingFeelCheck[I] = 0;
+		const ABoxerCharacter* Att = Kind ? GetBoxer(I) : nullptr;
+		if (!Att)
+		{
+			continue;
+		}
+		const FBoxerFeelDebug Dbg = Att->GetFeelDebug();
+		if (Dbg.FistGapCm < -100.f || Dbg.AimW <= 0.f)
+		{
+			continue;
+		}
+		++FeelContacts;
+		FeelGapAbsSum += FMath::Abs(Dbg.FistGapCm);
+		FeelGapMaxAbs = FMath::Max(FeelGapMaxAbs, FMath::Abs(Dbg.FistGapCm));
+		FeelLungeMax = FMath::Max(FeelLungeMax, Dbg.LungeCm);
+		if (bLogEvents)
+		{
+			UE_LOG(LogTemp, Log, TEXT("FEEL контакт %s [%d]: зазор кулака %.1f см, подшаг %.1f см, aim %.2f reach %.2f, дист. ядра %.2f м"),
+				Kind == 1 ? TEXT("Hit") : TEXT("Blocked"), I, Dbg.FistGapCm, Dbg.LungeCm, Dbg.AimW, Dbg.ReachW, Snap.Distance);
+		}
 	}
 }

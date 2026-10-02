@@ -10,9 +10,15 @@
 #include "GameFramework/CharacterMovementComponent.h"
 #include "GameFramework/Controller.h"
 #include "Misc/PackageName.h"
+#include "Misc/CommandLine.h"
+#include "DrawDebugHelpers.h"
+#include "HAL/IConsoleManager.h"
 #include "PhysicsEngine/PhysicalAnimationComponent.h"
 #include "PhysicsEngine/PhysicsAsset.h"
 #include "UObject/UnrealType.h"
+#include "Retargeter/IKRetargeter.h"
+#include "AnimNodes/AnimNode_RetargetPoseFromMesh.h"
+#include "Engine/SkeletalMesh.h"
 
 namespace
 {
@@ -61,6 +67,14 @@ void ABoxerCharacter::BeginPlay()
 	ApplyVisualOverride();
 	PushGaspInputState();
 	InitPhysics();
+	// Отладка «ощущения»: -BoxReactGain=K (множитель пружин реакции), -BoxHitMontage=0 (без клипов реакции — только пружины).
+	FParse::Value(FCommandLine::Get(), TEXT("BoxReactGain="), ReactionGain);
+	int32 HitClips = 1;
+	if (FParse::Value(FCommandLine::Get(), TEXT("BoxHitMontage="), HitClips) && HitClips == 0)
+	{
+		HitMontageMinMagnitude = 1e6f;
+	}
+	SetupFeel();
 }
 
 void ABoxerCharacter::PossessedBy(AController* NewController)
@@ -162,7 +176,9 @@ float ABoxerCharacter::GetMontageNotifyTime(const UAnimMontage* Montage, FName N
 
 UAnimMontage* ABoxerCharacter::GetPunchMontage(EBoxPunchType Punch, EBoxPunchTarget Target) const
 {
-	if (Target == EBoxPunchTarget::Body && BodyHookMontage && (Punch == EBoxPunchType::HookL || Punch == EBoxPunchType::HookR))
+	// Клип bodyHook бьёт ЛЕВОЙ: правый хук в корпус — клипом hookR, наведение руки опустит его к корпусу (как в вебе).
+	const bool bBodyClipArm = Punch == EBoxPunchType::HookL || (Punch == EBoxPunchType::HookR && !bFeel);
+	if (Target == EBoxPunchTarget::Body && BodyHookMontage && bBodyClipArm)
 	{
 		return BodyHookMontage;
 	}
@@ -208,12 +224,38 @@ UAnimInstance* ABoxerCharacter::GetAnimInst() const
 // Монтажи: проигрывание и синхронизация с ядром
 // ---------------------------------------------------------------------------------------------
 
+bool ABoxerCharacter::IsUpperSlot(EBoxMontageSlot Slot)
+{
+	return Slot == EBoxMontageSlot::Punch || Slot == EBoxMontageSlot::Block || Slot == EBoxMontageSlot::BlockHit ||
+		Slot == EBoxMontageSlot::Slip || Slot == EBoxMontageSlot::Hit;
+}
+
+UAnimInstance* ABoxerCharacter::AnimFor(EBoxMontageSlot Slot) const
+{
+	// Слой верха (пост-процесс логического меша) — удары/блок/уклоны/реакции; полнотелые — AnimBP GASP.
+	if (UpperAnim && IsUpperSlot(Slot))
+	{
+		return UpperAnim;
+	}
+	return GetAnimInst();
+}
+
 bool ABoxerCharacter::PlaySlotMontage(EBoxMontageSlot Slot, UAnimMontage* Montage, float Rate, float StartPos)
 {
-	UAnimInstance* Anim = GetAnimInst();
+	UAnimInstance* Anim = AnimFor(Slot);
 	if (!Anim || !Montage)
 	{
 		return false;
+	}
+	// Действие переезжает на другой экземпляр (верх ↔ всё тело) — прежнее гасим, иначе оно доиграет поверх.
+	if (ActiveMontage && ActiveAnim.IsValid() && ActiveAnim.Get() != Anim)
+	{
+		ActiveAnim->Montage_Stop(0.15f, ActiveMontage);
+	}
+	// Полнотелое (нокдаун, подъём, финал) — слой верха молчит целиком (и стойка рук тоже).
+	if (UpperAnim && !IsUpperSlot(Slot))
+	{
+		UpperAnim->Montage_Stop(0.15f, nullptr);
 	}
 	const float Len = Anim->Montage_Play(Montage, FMath::Clamp(Rate, 0.1f, 6.f), EMontagePlayReturnType::MontageLength,
 		FMath::Clamp(StartPos, 0.f, Montage->GetPlayLength()), true);
@@ -223,17 +265,16 @@ bool ABoxerCharacter::PlaySlotMontage(EBoxMontageSlot Slot, UAnimMontage* Montag
 	}
 	ActiveMontage = Montage;
 	ActiveMontageSlot = Slot;
+	ActiveAnim = Anim;
 	return true;
 }
 
 void ABoxerCharacter::StopSlotMontage(float BlendOut)
 {
-	if (UAnimInstance* Anim = GetAnimInst())
+	UAnimInstance* Anim = ActiveAnim.IsValid() ? ActiveAnim.Get() : GetAnimInst();
+	if (Anim && ActiveMontage)
 	{
-		if (ActiveMontage)
-		{
-			Anim->Montage_Stop(BlendOut, ActiveMontage);
-		}
+		Anim->Montage_Stop(BlendOut, ActiveMontage);
 	}
 	ActiveMontage = nullptr;
 	ActiveMontageSlot = EBoxMontageSlot::None;
@@ -241,7 +282,7 @@ void ABoxerCharacter::StopSlotMontage(float BlendOut)
 
 void ABoxerCharacter::HoldAt(float Time)
 {
-	UAnimInstance* Anim = GetAnimInst();
+	UAnimInstance* Anim = ActiveAnim.IsValid() ? ActiveAnim.Get() : GetAnimInst();
 	if (!Anim || !ActiveMontage)
 	{
 		return;
@@ -263,7 +304,7 @@ void ABoxerCharacter::HoldAtEnd()
 
 void ABoxerCharacter::SyncPeakMontage(float Phase, float PeakFrac, float CycleSeconds, float PeakTime)
 {
-	UAnimInstance* Anim = GetAnimInst();
+	UAnimInstance* Anim = ActiveAnim.IsValid() ? ActiveAnim.Get() : GetAnimInst();
 	if (!Anim || !ActiveMontage || CycleSeconds <= 0.f)
 	{
 		return;
@@ -294,7 +335,7 @@ void ABoxerCharacter::StartBlockMontage(float Lead)
 
 void ABoxerCharacter::UpdateMontages(float DeltaSeconds)
 {
-	UAnimInstance* Anim = GetAnimInst();
+	UAnimInstance* Anim = ActiveAnim.IsValid() ? ActiveAnim.Get() : GetAnimInst();
 	if (!Anim)
 	{
 		return;
@@ -370,6 +411,11 @@ void ABoxerCharacter::UpdateMontages(float DeltaSeconds)
 	if (bBlocking && (ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Guard))
 	{
 		StartBlockMontage(0.05f);
+	}
+	if (UpperAnim)
+	{
+		UpdateGuards(DeltaSeconds);
+		return;
 	}
 	// Боевая стойка: стоит (почти без скорости) дольше GuardSettleSeconds и слот свободен.
 	const bool bStill = GetVelocity().Size2D() < GuardStartSpeed && FightTargetVelocity.Size2D() < GuardStartSpeed;
@@ -549,6 +595,12 @@ void ABoxerCharacter::HandleFightEvent(const FFightEvent& Event, const FVector& 
 	{
 		OnBlockedPunch(BoxingBP::Punch(Event.Punch), Event.Magnitude, Dir);
 	}
+	else if (Event.Kind == EFightEventKind::Miss || Event.Kind == EFightEventKind::Slipped)
+	{
+		// Промах «в лоб» — голова уходит с линии (кулак наводился на прежнее место); нырок уже виден клипом.
+		KickReaction(EBoxFeelEvent::Miss, BoxingBP::Punch(Event.Punch), BoxingBP::Target(Event.Target), 0.f,
+			Event.Kind == EFightEventKind::Slipped);
+	}
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -565,6 +617,7 @@ void ABoxerCharacter::OnPunchStarted_Implementation(EBoxPunchType Punch, EBoxPun
 		return;
 	}
 	ActivePunchTarget = Target;
+	bAimCaptured = bFeel && CaptureAim(Punch, Target);
 	if (PlaySlotMontage(EBoxMontageSlot::Punch, M, 1.f))
 	{
 		// Скорость/позицию сразу ставит синхронизация: кадр «Contact» монтажа = резолюция удара в ядре.
@@ -577,6 +630,7 @@ void ABoxerCharacter::OnHitReceived_Implementation(EBoxPunchType Punch, EBoxPunc
 {
 	OnHitReceivedDelegate.Broadcast(Punch, Target, Magnitude, Direction);
 	HitReaction(Punch, Target, Magnitude, Direction, false);
+	KickReaction(EBoxFeelEvent::Land, Punch, Target, Magnitude, false);
 	// Монтаж реакции не перебивает свой удар, уклон, нокдаун и финал.
 	if (Magnitude < HitMontageMinMagnitude || bKnockedDown ||
 		ActiveMontageSlot == EBoxMontageSlot::Punch || ActiveMontageSlot == EBoxMontageSlot::Slip ||
@@ -592,6 +646,7 @@ void ABoxerCharacter::OnHitReceived_Implementation(EBoxPunchType Punch, EBoxPunc
 void ABoxerCharacter::OnBlockedPunch_Implementation(EBoxPunchType Punch, float Magnitude, FVector Direction)
 {
 	HitReaction(Punch, EBoxPunchTarget::Head, Magnitude, Direction, true);
+	KickReaction(EBoxFeelEvent::Block, Punch, EBoxPunchTarget::Head, Magnitude, false);
 	if (BlockHitMontage && !bKnockedDown &&
 		(ActiveMontageSlot == EBoxMontageSlot::Block || ActiveMontageSlot == EBoxMontageSlot::BlockHit ||
 		 ActiveMontageSlot == EBoxMontageSlot::None || ActiveMontageSlot == EBoxMontageSlot::Guard))
@@ -632,6 +687,13 @@ void ABoxerCharacter::InitPhysics()
 		return;
 	}
 	++PhysInitTries;
+	// Физреакция + ПАРАЛЛЕЛЬНАЯ оценка позы = падение: тик UPhysicalAnimationComponent читает GetBoneSpaceTransforms() меша,
+	// пока задача оценки держит массив у себя (пустой → «1 into 0»; Docs/VERIFY_ON_PC.md, разд. 3). Выключить только
+	// у видимого меша (CanRunParallelWork) мало — вместо падения зависание; глобально — проверено, 60+ с без сбоев.
+	if (IConsoleVariable* Cv = IConsoleManager::Get().FindConsoleVariable(TEXT("a.ParallelAnimEvaluation")))
+	{
+		Cv->Set(0, ECVF_SetByCode);
+	}
 	const AActor* Vis = VisualChild->GetChildActor();
 	if (!Vis)
 	{
@@ -790,6 +852,11 @@ void ABoxerCharacter::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	UpdatePhysics(DeltaSeconds);
+	if (bFeel && !bFeelReady && FeelInitTries < 30)
+	{
+		SetupFeel();
+	}
+	UpdateFeel(DeltaSeconds);
 
 	// GASP может перезаписать входное состояние (смена контроллера и т.п.) — подтверждаем раз в 0.5 с.
 	GaspStateTimer -= DeltaSeconds;
@@ -926,4 +993,403 @@ void ABoxerCharacter::ApplyVisualOverride()
 USkeletalMeshComponent* ABoxerCharacter::GetVisibleMesh() const
 {
 	return PhysMesh.Get();
+}
+
+// ---------------------------------------------------------------------------------------------
+// «Ощущение удара»: слой верха тела, наведение кулака, реакция (Docs/FIGHT_FEEL.md)
+// ---------------------------------------------------------------------------------------------
+
+void ABoxerCharacter::SetupFeel()
+{
+	if (!bFeel || bFeelReady)
+	{
+		return;
+	}
+	++FeelInitTries;
+	USkeletalMeshComponent* Logic = GetMesh();
+	if (!Logic)
+	{
+		return;
+	}
+
+	// 1. Слой верха тела — нативный пост-процесс логического меша (его собственный пост-процесс не нужен: меш скрыт).
+	if (bUpperBodyLayer && !UpperAnim)
+	{
+		Logic->SetOverridePostProcessAnimBP(UBoxerLayerAnimInstance::StaticClass());
+		UpperAnim = Cast<UBoxerLayerAnimInstance>(Logic->GetPostProcessInstance());
+		if (UpperAnim)
+		{
+			UpperAnim->Boxer = this;
+		}
+		UE_LOG(LogTemp, Log, TEXT("BOXER %s [%d]: слой верха тела %s"), *GetName(), FighterIndex,
+			UpperAnim ? TEXT("— пост-процесс UBoxerLayerAnimInstance") : TEXT("НЕ создан (удары на всё тело)"));
+	}
+
+	// 2. Видимый меш: AnimInstance с ретаргетом (как ABP_GenericRetarget) + процедурный слой.
+	if (!VisualChild)
+	{
+		bFeelReady = true; // манекен виден сам: процедурный слой — в пост-процессе (GetLayerParams().bFx)
+		return;
+	}
+	AActor* Vis = VisualChild->GetChildActor();
+	if (!Vis)
+	{
+		if (FeelInitTries >= 30)
+		{
+			bFeelReady = true;
+		}
+		return;
+	}
+	TArray<USkeletalMeshComponent*> Meshes;
+	Vis->GetComponents(Meshes);
+	USkeletalMeshComponent* Best = nullptr;
+	UIKRetargeter* Rtg = nullptr;
+	FRetargetProfile Profile;
+	bool bHasProfile = false;
+	for (USkeletalMeshComponent* M : Meshes)
+	{
+		UAnimInstance* AI = M ? M->GetAnimInstance() : nullptr;
+		if (!AI)
+		{
+			continue;
+		}
+		for (TFieldIterator<FProperty> It(AI->GetClass()); It && !Best; ++It)
+		{
+			if (const FStructProperty* SP = CastField<FStructProperty>(*It))
+			{
+				if (SP->Struct && SP->Struct->IsChildOf(FAnimNode_RetargetPoseFromMesh::StaticStruct()))
+				{
+					const FAnimNode_RetargetPoseFromMesh* N = SP->ContainerPtrToValuePtr<FAnimNode_RetargetPoseFromMesh>(AI);
+					Best = M;
+					Rtg = N->IKRetargeterAsset;
+					Profile = N->CustomRetargetProfile;
+					bHasProfile = true;
+				}
+			}
+		}
+		if (Best && !Rtg)
+		{
+			// Ретаргетер может приходить в узел пином из переменной — ищем объектное свойство экземпляра.
+			for (TFieldIterator<FObjectPropertyBase> It(AI->GetClass()); It; ++It)
+			{
+				if (It->PropertyClass && It->PropertyClass->IsChildOf(UIKRetargeter::StaticClass()))
+				{
+					Rtg = Cast<UIKRetargeter>(It->GetObjectPropertyValue_InContainer(AI));
+					if (Rtg)
+					{
+						break;
+					}
+				}
+			}
+		}
+		if (Best)
+		{
+			break;
+		}
+	}
+	if (!Best)
+	{
+		if (FeelInitTries >= 30)
+		{
+			UE_LOG(LogTemp, Warning, TEXT("BOXER %s: у %s нет меша с ретаргетом позы — процедурный слой выключен"), *GetName(), *Vis->GetName());
+			bFeelReady = true;
+		}
+		return;
+	}
+	if (!Rtg)
+	{
+		Rtg = LoadObject<UIKRetargeter>(nullptr, TEXT("/Game/MetaHumans/Common/Common/Rigs/RTG_UEFN_to_Metahuman_nrw.RTG_UEFN_to_Metahuman_nrw"));
+	}
+	if (!Rtg)
+	{
+		UE_LOG(LogTemp, Warning, TEXT("BOXER %s: ретаргетер %s не найден — процедурный слой выключен"), *GetName(), *Best->GetName());
+		bFeelReady = true;
+		return;
+	}
+	const FString OldClass = GetNameSafe(Best->GetAnimInstance() ? Best->GetAnimInstance()->GetClass() : nullptr);
+	Best->SetAnimInstanceClass(UBoxerVisualAnimInstance::StaticClass());
+	VisualAnim = Cast<UBoxerVisualAnimInstance>(Best->GetAnimInstance());
+	if (VisualAnim)
+	{
+		VisualAnim->Boxer = this;
+		VisualAnim->SetupRetarget(Logic, Rtg, bHasProfile ? &Profile : nullptr);
+		Best->AddTickPrerequisiteComponent(Logic); // поза источника — этого кадра
+		VisualMesh = Best;
+	}
+	bFeelReady = true;
+	UE_LOG(LogTemp, Log, TEXT("BOXER %s [%d]: видимый меш %s.%s: %s → UBoxerVisualAnimInstance (%s), ретаргетер %s"), *GetName(), FighterIndex,
+		*Vis->GetName(), *Best->GetName(), *OldClass, VisualAnim ? TEXT("ok") : TEXT("НЕ создан"), *Rtg->GetName());
+}
+
+FBoxerLayerParams ABoxerCharacter::GetLayerParams() const
+{
+	FBoxerLayerParams P;
+	P.TorsoAlpha = ActiveMontageSlot == EBoxMontageSlot::Hit ? HitMontageTorsoAlpha : 1.f;
+	P.ArmsAlpha = 1.f;
+	P.bFx = bFeel && !VisualAnim;
+	return P;
+}
+
+USkeletalMeshComponent* ABoxerCharacter::GetFeelMesh() const
+{
+	if (VisualMesh)
+	{
+		return VisualMesh;
+	}
+	if (const AActor* Vis = VisualChild ? VisualChild->GetChildActor() : nullptr)
+	{
+		TArray<USkeletalMeshComponent*> Meshes;
+		Vis->GetComponents(Meshes);
+		for (USkeletalMeshComponent* M : Meshes)
+		{
+			if (M && M->GetName().Equals(TEXT("Body"), ESearchCase::IgnoreCase))
+			{
+				return M;
+			}
+		}
+	}
+	return GetMesh();
+}
+
+FBoxerFeelDebug ABoxerCharacter::GetFeelDebug() const
+{
+	if (VisualAnim)
+	{
+		return VisualAnim->PeekDebug();
+	}
+	return UpperAnim ? UpperAnim->PeekDebug() : FBoxerFeelDebug();
+}
+
+void ABoxerCharacter::UpdateGuards(float DeltaSeconds)
+{
+	UAnimInstance* Main = GetAnimInst();
+	const bool bStill = GetVelocity().Size2D() < GuardStartSpeed && FightTargetVelocity.Size2D() < GuardStartSpeed;
+	GuardStill = bStill ? GuardStill + DeltaSeconds : 0.f;
+	const bool bMainBusy = ActiveMontageSlot == EBoxMontageSlot::Knockdown || ActiveMontageSlot == EBoxMontageSlot::GetUp ||
+		ActiveMontageSlot == EBoxMontageSlot::Finale;
+	const bool bAllowed = bPlayGuardMontage && GuardMontage && !bKnockedDown && !bWasFinale && !bMainBusy;
+	auto Live = [this](UAnimInstance* A)
+	{
+		const FAnimMontageInstance* I = A ? A->GetActiveInstanceForMontage(GuardMontage) : nullptr;
+		return I && !I->IsStopped();
+	};
+	// Всё тело (ноги в боевой стойке) — когда стоит; на ходу ноги отдаём Motion Matching.
+	if (Main)
+	{
+		const bool bOn = Live(Main);
+		if (bAllowed && !bOn && GuardStill >= GuardSettleSeconds)
+		{
+			Main->Montage_Play(GuardMontage, 1.f, EMontagePlayReturnType::MontageLength, 0.f, false);
+		}
+		else if (bOn && (!bAllowed || GetVelocity().Size2D() > GuardStopSpeed))
+		{
+			Main->Montage_Stop(GuardBlendSeconds, GuardMontage);
+		}
+	}
+	// Верх (руки у подбородка) — всегда, когда слой верха свободен: и на ходу перчатки не падают.
+	const bool bUpOn = Live(UpperAnim);
+	if (bAllowed && ActiveMontageSlot == EBoxMontageSlot::None && !bUpOn)
+	{
+		UpperAnim->Montage_Play(GuardMontage, 1.f, EMontagePlayReturnType::MontageLength, 0.f, false);
+	}
+	else if (bUpOn && !bAllowed)
+	{
+		UpperAnim->Montage_Stop(GuardBlendSeconds, GuardMontage);
+	}
+}
+
+bool ABoxerCharacter::CaptureAim(EBoxPunchType Punch, EBoxPunchTarget Target)
+{
+	ABoxerCharacter* Opp = Opponent;
+	USkeletalMeshComponent* OM = Opp ? Opp->GetFeelMesh() : nullptr;
+	USkeletalMeshComponent* MM = GetFeelMesh();
+	if (!OM || !MM)
+	{
+		return false;
+	}
+	auto Bone = [](const USkeletalMeshComponent* M, const TCHAR* Name, FVector& Out)
+	{
+		const FName N(Name);
+		if (M->GetBoneIndex(N) == INDEX_NONE)
+		{
+			return false;
+		}
+		Out = M->GetBoneLocation(N, EBoneSpaces::WorldSpace);
+		return true;
+	};
+	const FVector Up = FVector::UpVector;
+	// Цель: голова / корпус / перчатки (блок на старте удара). Дальше центр цели живой — по позе соперника ДО его
+	// процедурного слоя (без его подшага и реакции), а на время его нырка замирает: нырок честно уводит голову
+	// с линии, кулак проходит мимо (как в вебе).
+	AimKind = Target == EBoxPunchTarget::Body ? 1 : (Opp->bBlocking ? 2 : 0);
+	AimRadius = AimKind == 1 ? BodyRadiusCm : (AimKind == 2 ? GuardRadiusCm : HeadRadiusCm);
+	FVector Center;
+	if (!AimCenterNow(Center))
+	{
+		return false;
+	}
+	bAimLeftArm = BoxingBP::ArmOf(Punch) == EBoxPunchArm::Lead;
+	FVector Shoulder;
+	if (!Bone(MM, bAimLeftArm ? TEXT("upperarm_l") : TEXT("upperarm_r"), Shoulder))
+	{
+		Shoulder = GetActorLocation() + Up * 50.f;
+	}
+	const FVector MF = GetActorForwardVector();
+	const FVector MR = GetActorRightVector();
+	switch (Punch)
+	{
+	case EBoxPunchType::HookL:
+	case EBoxPunchType::HookR:
+	{
+		// Хук приходит сбоку: левый идёт слева направо (в правую щёку соперника), правый — наоборот.
+		const float S = bAimLeftArm ? 1.f : -1.f;
+		AimApproach = (MR * (0.65f * S) + MF * 0.35f).GetSafeNormal();
+		break;
+	}
+	case EBoxPunchType::UpperL:
+	case EBoxPunchType::UpperR:
+		AimApproach = (Up * 0.55f + MF * 0.45f).GetSafeNormal();
+		break;
+	default:
+		AimApproach = (Center - Shoulder).GetSafeNormal();
+		break;
+	}
+	AimCenterLocal = Opp->GetActorTransform().InverseTransformPosition(Center);
+	return true;
+}
+
+bool ABoxerCharacter::AimCenterNow(FVector& OutCenter) const
+{
+	const ABoxerCharacter* Opp = Opponent;
+	if (!Opp)
+	{
+		return false;
+	}
+	const FVector OF = Opp->GetActorForwardVector();
+	FVector Head, Chest, HandL, HandR;
+	const FBoxerFeelDebug Raw = Opp->GetFeelDebug();
+	if (Raw.bRaw)
+	{
+		Head = Raw.RawHead;
+		Chest = Raw.RawChest;
+		HandL = Raw.RawHandL;
+		HandR = Raw.RawHandR;
+	}
+	else
+	{
+		const USkeletalMeshComponent* OM = Opp->GetFeelMesh();
+		if (!OM || OM->GetBoneIndex(TEXT("head")) == INDEX_NONE || OM->GetBoneIndex(TEXT("spine_03")) == INDEX_NONE ||
+			OM->GetBoneIndex(TEXT("hand_l")) == INDEX_NONE || OM->GetBoneIndex(TEXT("hand_r")) == INDEX_NONE)
+		{
+			return false;
+		}
+		Head = OM->GetBoneLocation(TEXT("head"));
+		Chest = OM->GetBoneLocation(TEXT("spine_03"));
+		HandL = OM->GetBoneLocation(TEXT("hand_l"));
+		HandR = OM->GetBoneLocation(TEXT("hand_r"));
+	}
+	switch (AimKind)
+	{
+	case 1: OutCenter = Chest + OF * 2.f; break;
+	case 2: OutCenter = (HandL + HandR) * 0.5f + OF * 4.f; break; // перчатки перед лицом
+	default: OutCenter = Head + FVector::UpVector * HeadCenterUpCm + OF * 2.f; break;
+	}
+	return true;
+}
+
+void ABoxerCharacter::KickReaction(EBoxFeelEvent Kind, EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, bool bSlipped)
+{
+	if (!bFeel || bKnockedDown)
+	{
+		return;
+	}
+	EBoxFeelPunch P = EBoxFeelPunch::Straight;
+	switch (Punch)
+	{
+	case EBoxPunchType::Cross: P = EBoxFeelPunch::Cross; break;
+	case EBoxPunchType::HookL:
+	case EBoxPunchType::HookR: P = EBoxFeelPunch::Hook; break;
+	case EBoxPunchType::UpperL:
+	case EBoxPunchType::UpperR: P = EBoxFeelPunch::Uppercut; break;
+	default: break;
+	}
+	const bool bRear = BoxingBP::ArmOf(Punch) == EBoxPunchArm::Rear;
+	React.Kick(BoxerFeel::ReactionKick(Kind, P, bRear, Target == EBoxPunchTarget::Body, Magnitude, bSlipped));
+}
+
+void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
+{
+	if (!bFeel)
+	{
+		Feel = FBoxerFeelFrame();
+		return;
+	}
+	if (bKnockedDown || bWasFinale)
+	{
+		React.Reset();
+	}
+	else
+	{
+		React.Update(DeltaSeconds);
+	}
+	static const bool bFeelLog = FParse::Param(FCommandLine::Get(), TEXT("BoxFeelLog"));
+	if (bFeelLog && React.IsActive())
+	{
+		UE_LOG(LogTemp, Log, TEXT("FEEL react [%d] dt=%.3f head p/y/r %.2f %.2f %.2f torso p/r/y %.2f %.2f %.2f knee %.2f back %.3f side %.3f"), FighterIndex, DeltaSeconds,
+			React.X[0], React.X[1], React.X[2], React.X[3], React.X[4], React.X[5], React.X[6], React.X[7], React.X[8]);
+	}
+	for (int32 C = 0; C < BOX_REACT_NUM; ++C)
+	{
+		Feel.React[C] = React.X[C] * ReactionGain;
+	}
+	static const bool bReactTest = FParse::Param(FCommandLine::Get(), TEXT("BoxReactTest"));
+	if (bReactTest && FighterIndex == 0)
+	{
+		// Отладка: постоянная поза реакции у красного (голова назад 0.6 рад, корпус вправо 0.3 рад) — проверить оси.
+		Feel.React[static_cast<int32>(EBoxReactChannel::HeadPitch)] = 0.6f;
+		Feel.React[static_cast<int32>(EBoxReactChannel::TorsoRoll)] = 0.3f;
+	}
+	Feel.Fwd = GetActorForwardVector();
+	Feel.Right = GetActorRightVector();
+	Feel.FistReachCm = FistReachCm;
+	Feel.MaxLungeCm = MaxLungeCm;
+	Feel.bAim = false;
+	Feel.AimWeight = 0.f;
+	Feel.ReachWeight = 0.f;
+	if (bAimCaptured && bPunching && !bKnockedDown && Opponent && ActiveMontageSlot == EBoxMontageSlot::Punch)
+	{
+		float Aim = 0.f, Reach = 0.f;
+		BoxerFeel::PunchEnvelopes(PunchPhase, PunchContactFraction, Aim, Reach);
+		FVector Live;
+		if (Opponent->SlipSide == 0 && AimCenterNow(Live))
+		{
+			AimCenterLocal = Opponent->GetActorTransform().InverseTransformPosition(Live);
+		}
+		const FVector Center = Opponent->GetActorTransform().TransformPosition(AimCenterLocal);
+		Feel.bAim = true;
+		Feel.bLeftArm = bAimLeftArm;
+		Feel.bBentArm = CurrentPunch != EBoxPunchType::Jab && CurrentPunch != EBoxPunchType::Cross;
+		Feel.PunchKind = (CurrentPunch == EBoxPunchType::HookL || CurrentPunch == EBoxPunchType::HookR) ? 1 : (Feel.bBentArm ? 2 : 0);
+		Feel.AimApproach = AimApproach;
+		Feel.AimSurface = Center - AimApproach * AimRadius;
+		Feel.AimWeight = Aim;
+		Feel.ReachWeight = Reach;
+		static const bool bDraw = FParse::Param(FCommandLine::Get(), TEXT("BoxFeelDraw"));
+		if (bDraw)
+		{
+			// Отладка: красная — поверхность цели (фронт кулака должен коснуться её в контакте), жёлтая — центр.
+			DrawDebugSphere(GetWorld(), Feel.AimSurface, 3.f, 8, FColor::Red, false, -1.f, SDPG_Foreground);
+			DrawDebugSphere(GetWorld(), Center, AimRadius, 12, FColor::Yellow, false, -1.f, SDPG_Foreground);
+			DrawDebugLine(GetWorld(), Feel.AimSurface - AimApproach * 25.f, Feel.AimSurface, FColor::Red, false, -1.f, SDPG_Foreground, 1.f);
+			const FBoxerFeelDebug Last = GetFeelDebug(); // зелёная — фронт кулака (прошлый кадр анимпотока)
+			if (Last.AimW > 0.f)
+			{
+				DrawDebugSphere(GetWorld(), Last.FistFront, 4.f, 8, FColor::Green, false, -1.f, SDPG_Foreground);
+			}
+		}
+	}
+	else if (!bPunching)
+	{
+		bAimCaptured = false;
+	}
 }

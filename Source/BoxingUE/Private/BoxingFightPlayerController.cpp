@@ -15,6 +15,7 @@
 #include "InputAction.h"
 #include "InputMappingContext.h"
 #include "Misc/PackageName.h"
+#include "Misc/CommandLine.h"
 
 namespace
 {
@@ -164,6 +165,7 @@ void ABoxingFightPlayerController::BeginPlay()
 		}
 	}
 	SetInputMode(FInputModeGameOnly());
+	bSideCam = FParse::Param(FCommandLine::Get(), TEXT("BoxCamSide"));
 
 	FActorSpawnParameters P;
 	P.Owner = this;
@@ -326,8 +328,20 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	const double Out = FMath::Max3(0.0, FMath::Abs(Cam.X - Floor.X) - RopeHalf, FMath::Abs(Cam.Y - Floor.Y) - RopeHalf);
 	Cam.Z = Floor.Z + CamHeight + FMath::Min(80.0, Out * 0.35);
 	const FVector Look = CamMid + U * LookAhead + FVector(0.f, 0.f, LookHeight);
-	FightCamera->SetActorLocationAndRotation(Cam, (Look - Cam).Rotation());
-	UpdateRopeVisibility(Cam, Floor);
+	if (bSideCam)
+	{
+		const FVector PairMid((P0.X + P1.X) * 0.5f, (P0.Y + P1.Y) * 0.5f, Floor.Z);
+		const FVector Ax = (P1 - P0).GetSafeNormal2D();
+		const FVector Side(-Ax.Y, Ax.X, 0.f);
+		Cam = PairMid + Side * 260.f + FVector(0.f, 0.f, 150.f);
+		FightCamera->SetActorLocationAndRotation(Cam, (PairMid + FVector(0.f, 0.f, 135.f) - Cam).Rotation());
+		UpdateRopeVisibility(Cam, Floor);
+	}
+	else
+	{
+		FightCamera->SetActorLocationAndRotation(Cam, (Look - Cam).Rotation());
+		UpdateRopeVisibility(Cam, Floor);
+	}
 
 	// Вертикальный FOV веба → горизонтальный FOV UE по аспекту вьюпорта.
 	int32 VX = 16, VY = 9;

@@ -19,6 +19,8 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Character.h"
 #include "BoxingFightBPTypes.h"
+#include "BoxerFeel.h"
+#include "BoxerAnimInstances.h"
 #include "BoxerCharacter.generated.h"
 
 class UAnimMontage;
@@ -374,6 +376,55 @@ public:
 	UFUNCTION(BlueprintPure, Category = "Boxing|Physics")
 	float GetPhysBlend() const { return PhysBlend; }
 
+	// ---------- «Ощущение удара» (Docs/FIGHT_FEEL.md): слой верха тела, наведение кулака, реакция ----------
+
+	// Всё вместе (слой верха, наведение, подшаг, пружины реакции). Командная строка: -BoxFeel=0 — как до S-41 feel.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	bool bFeel = true;
+
+	// Удары/блок/уклоны/реакции — только верх тела (пост-процесс логического меша), ноги — локомоция.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	bool bUpperBodyLayer = true;
+
+	// Кость кисти → фронт кулака (см): у голой руки ≈ 9–10, в перчатке +4–5.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float FistReachCm = 10.f;
+
+	// Подшаг корпуса к цели, если рука не достаёт (см, пик в кадре контакта).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float MaxLungeCm = 30.f;
+
+	// Цели: центр головы над костью head, радиусы «поверхностей» (голова, корпус, перчатки в блоке), см.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float HeadCenterUpCm = 8.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float HeadRadiusCm = 10.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float BodyRadiusCm = 13.f;
+
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float GuardRadiusCm = 5.f;
+
+	// Множитель пружин реакции (1 — как в вебе; 1.4 — камера UE ближе и Kellan крупнее, при 1 откид головы ~13° почти не читался).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float ReactionGain = 1.4f;
+
+	// Доля корпуса/головы из клипа реакции (AM_HitHead/Body) — клип лишь подложка, как в вебе (0.35).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float HitMontageTorsoAlpha = 0.35f;
+
+	// Кадр для анимпотока (наведение + каналы реакции), обновляется в Tick.
+	const FBoxerFeelFrame& GetFeelFrame() const { return Feel; }
+	FBoxerLayerParams GetLayerParams() const;
+
+	// Меш, который виден (MetaHuman Body после подмены; иначе логический манекен).
+	USkeletalMeshComponent* GetFeelMesh() const;
+
+	// Отладка: зазор «фронт кулака → поверхность цели» в последнем кадре наведения (см; −1 — нет наведения).
+	FBoxerFeelDebug GetFeelDebug() const;
+
 	// ---------- Локомоция ----------
 
 	// Шаг GASP «ходьба» (иначе бег) и стрейф (лицом к сопернику) — через Set_CharacterInputState.
@@ -466,4 +517,40 @@ private:
 
 	// Стойка: сколько боец уже стоит (с).
 	float GuardStill = 0.f;
+
+	// ---------- Feel ----------
+	void SetupFeel();
+	void UpdateFeel(float DeltaSeconds);
+	void UpdateGuards(float DeltaSeconds);
+	bool CaptureAim(EBoxPunchType Punch, EBoxPunchTarget Target);
+	bool AimCenterNow(FVector& OutCenter) const;
+	void KickReaction(EBoxFeelEvent Kind, EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, bool bSlipped);
+	UAnimInstance* AnimFor(EBoxMontageSlot Slot) const;
+	static bool IsUpperSlot(EBoxMontageSlot Slot);
+
+	// Пост-процесс логического меша (слой верха) и AnimInstance видимого меша (ретаргет + процедурный слой).
+	UPROPERTY(Transient)
+	TObjectPtr<UBoxerLayerAnimInstance> UpperAnim;
+
+	UPROPERTY(Transient)
+	TObjectPtr<UBoxerVisualAnimInstance> VisualAnim;
+
+	UPROPERTY(Transient)
+	TObjectPtr<USkeletalMeshComponent> VisualMesh;
+
+	// Экземпляр, на котором играет ActiveMontage.
+	TWeakObjectPtr<UAnimInstance> ActiveAnim;
+
+	FBoxerReactionRig React;
+	FBoxerFeelFrame Feel;
+	bool bFeelReady = false;
+	int32 FeelInitTries = 0;
+
+	// Наведение текущего удара: центр цели в системе СОПЕРНИКА (следует за ним, но не за его нырком/реакцией).
+	bool bAimCaptured = false;
+	bool bAimLeftArm = true;
+	FVector AimCenterLocal = FVector::ZeroVector;
+	FVector AimApproach = FVector::ForwardVector;
+	float AimRadius = 10.f;
+	int32 AimKind = 0; // 0 — голова, 1 — корпус, 2 — перчатки (блок)
 };

@@ -13,7 +13,8 @@
 // -BoxLogEvery=S (лог позиций/состояния), -BoxLogEvents (лог всех событий),
 // -BoxShots=5,9,14 (скриншоты в Docs/screens/fight_<сек>.png), -BoxHitShots=N (скриншоты в кадре
 // контакта первых N попаданий/блоков, с интервалом ≥ 1.5 с), -BoxShotPrefix=ring_fight (имя файлов),
-// -BoxVisual=<класс>|none (визуальная подмена), -BoxPhysHits=0|1 (физреакция).
+// -BoxVisual=<класс>|none (визуальная подмена), -BoxVisualRed=/-BoxVisualBlue= (своя подмена угла),
+// -BoxPhysHits=0|1 (физреакция), -BoxFeel=0 (без слоя «ощущения удара»), -BoxMinSep=СМ (мин. дистанция визуала).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -79,6 +80,24 @@ public:
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
 	int32 PhysHitsOverride = -1;
 
+	// Своя подмена для красного/синего угла (облик бойца). Пусто — VisualOverridePath.
+	// Командная строка: -BoxVisualRed=<путь класса>|none, -BoxVisualBlue=<путь класса>|none.
+	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
+	FSoftClassPath VisualOverridePathRed;
+
+	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
+	FSoftClassPath VisualOverridePathBlue;
+
+	// «Ощущение удара» (слой верха, наведение кулака, реакция): -1 — как в классе бойца; 0/1 — принудительно (-BoxFeel=0|1).
+	UPROPERTY(EditAnywhere, Category = "Boxing|Feel")
+	int32 FeelOverride = -1;
+
+	// Минимальная ВИЗУАЛЬНАЯ дистанция между центрами бойцов (см) для пары ростом 178 см; масштабируется
+	// средним ростом пары (как VIS_MIN_SEP веба). Ядро не трогается — раздвигаются только точки слежения.
+	// 0 — выкл. Командная строка: -BoxMinSep=СМ.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
+	float VisMinSepCm = 100.f;
+
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
 	FSoftClassPath BoxerClassPath = FSoftClassPath(TEXT("/Game/Boxing/Blueprints/BP_Boxer.BP_Boxer_C"));
 
@@ -139,6 +158,8 @@ private:
 	void StepCore();
 	void DispatchEvents(TArray<FFightEvent>&& Events);
 	void PushStateToBoxers(float DeltaSeconds);
+	void CheckFeelContacts();
+	int32 PendingFeelCheck[2] = {0, 0};
 	void DebugLog(float DeltaSeconds);
 
 	FBoxingFightCore Core;
@@ -170,6 +191,9 @@ private:
 	TArray<float> ShotTimes;
 	int32 HitShotsLeft = 0;
 	float LastHitShotAt = -100.f;
+	// -BoxHitShotDelay=0,0.06,0.12: серия снимков через эти сек после контакта (видно реакцию); пусто — один снимок в контакте.
+	TArray<float> HitShotDelays;
+	TArray<TPair<FString, float>> DelayedShots;
 	int32 HitShotIndex = 0;
 	FString ShotPrefix = TEXT("fight");
 	void TakeShot(const FString& Name);
@@ -177,4 +201,13 @@ private:
 	float LogTimer = 0.f;
 	int32 EventCount[8] = {0, 0, 0, 0, 0, 0, 0, 0};
 	int32 MaxTrackErrorCm = 0;
+	// Метрики «ощущения»: минимум дистанции торсов (spine_05) и голов видимых мешей, зазор кулака в контакте.
+	float MinChestSepCm = 1e6f;
+	float MinHeadSepCm = 1e6f;
+	int32 FeelContacts = 0;
+	float FeelGapAbsSum = 0.f;
+	float FeelGapMaxAbs = 0.f;
+	float FeelLungeMax = 0.f;
+	int32 SepPushes = 0;
+	FSoftClassPath VisualPathFor(int32 Index) const;
 };
