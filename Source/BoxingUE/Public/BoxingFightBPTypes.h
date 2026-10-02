@@ -67,6 +67,7 @@ enum class EBoxFightPhase : uint8
 	Down,
 	Between,
 	Over,
+	Walkout, // постановка раунда (S-53): идут из угла / к бою после счёта, часы стоят
 };
 
 // Пресет бойца для GameMode: 7 статов 0..100 (как Stats веба) + физика + стиль.
@@ -102,6 +103,12 @@ struct FBoxerPreset
 
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing")
 	EBoxerStyle Style = EBoxerStyle::Balanced;
+
+	// Для облика: любительский шлем — женщины и младше 19 (правила World Boxing, needsHeadgear веба).
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	bool bFemale = false;
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Body")
+	int32 Age = 25;
 
 	// 1 — обстрелян; < 1 — «зелёный» на дистанции (налог в баке и у судей).
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing", meta = (ClampMin = "0", ClampMax = "1"))

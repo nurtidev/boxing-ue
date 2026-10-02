@@ -14,10 +14,10 @@ Matching (GASP), удары Mixamo со слоем «руки бьют — но�
 
 | # | Блок | Источник в web | Задача |
 |---|---|---|---|
-| 1 | Постановка раунда: выход из углов, перерыв в углу, нейтральный угол на нокдауне, счёт | `engine/interactive/corners.ts`, `rounds.ts`, `knockdown.ts` | S-53 |
-| 2 | «Ощущение»: хит-стоп, толчок/наезд камеры, slow-mo, звук (CC0), повтор нокаута | `ui/fightFx.ts`, `ui/audio/`, `public/audio/` | S-54 |
-| 3 | Оболочка игры: меню, Выставка (выбор из реального ростера), итог боя; HUD на UMG | `App.tsx`, `data/*Roster.ts`, `engine/stats.ts`, `boxer.ts` | S-55 |
-| 4 | Рефери, любительская форма (шлем, майка) | `ui/three/refereeBrain.ts`, `Referee.tsx`, `headgear.ts` | S-56 (модели), поведение — следующий спринт |
+| 1 | Постановка раунда: выход из углов, перерыв в углу, нейтральный угол на нокдауне, счёт | `engine/interactive/corners.ts`, `rounds.ts`, `knockdown.ts` | S-53 ✅ |
+| 2 | «Ощущение»: хит-стоп, толчок/наезд камеры, slow-mo, звук (CC0), повтор нокаута | `ui/fightFx.ts`, `ui/audio/`, `public/audio/` | S-54 ✅ |
+| 3 | Оболочка игры: меню, Выставка (выбор из реального ростера), итог боя; HUD на UMG | `App.tsx`, `data/*Roster.ts`, `engine/stats.ts`, `boxer.ts` | S-55 ✅ |
+| 4 | Рефери, любительская форма (шлем, майка) | `ui/three/refereeBrain.ts`, `Referee.tsx`, `headgear.ts` | S-56 ✅ (модели), поведение — следующий спринт |
 | 5 | Свои лица MetaHuman под ростер (нужен вход владельца в Epic для auto-rig) | `data/appearance/` | позже |
 | 6 | Угловые и сцена перерыва, карьера, профи-цепочка | `CornerCrew.tsx`, `career.ts`, `pro.ts` | позже |
 | 7 | Мобильные платформы (iOS требует Mac) | — | решение владельца |

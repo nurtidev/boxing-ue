@@ -91,13 +91,35 @@ enum class EStepKind : uint8
 	PivotR,
 };
 
-// Фаза боя (TS Phase без "walkout": постановка углов в порт не вошла).
+// Фаза боя (TS Phase). Walkout — в конце, чтобы не сдвинуть значения прежних (UENUM-зеркало EBoxFightPhase).
 enum class EFightPhase : uint8
 {
 	Fighting,
-	Down,    // нокдаун, идёт счёт
-	Between, // перерыв между раундами
+	Down,    // нокдаун, идёт счёт (с углами стоящий уходит в нейтральный угол — стадия Neutral)
+	Between, // перерыв между раундами (с углами по гонгу оба идут в свои углы — стадия Rest)
 	Over,
+	Walkout, // по гонгу (или после счёта) бойцы идут к бою: удары/ноги/защита недоступны, часы раунда стоят
+};
+
+// Стадия постановки раунда (corners.ts StageKind). None — постановки нет (идёт бой / бой окончен).
+enum class ERingStageKind : uint8
+{
+	None,
+	Out,     // выход из своих углов к точке встречи по гонгу (Phase == Walkout)
+	Rest,    // гонг конца раунда: оба в свои углы (Phase == Between)
+	Neutral, // нокдаун: стоящий — в нейтральный угол, лежащий на месте (Phase == Down)
+	Resume,  // встал: стоящий из нейтрального угла — назад на дистанцию падения (Phase == Walkout)
+};
+
+// Снимок постановки (RingStage веба). Цели — метры ядра; у бойца без цели bHasTarget = false и bArrived = true.
+struct FRingStage
+{
+	ERingStageKind Kind = ERingStageKind::None;
+	float T = 0.f;                    // сек с начала стадии (идёт и тогда, когда боевое время стоит)
+	bool bHasTarget[2] = {false, false};
+	float TargetX[2] = {0.f, 0.f};
+	float TargetZ[2] = {0.f, 0.f};
+	bool bArrived[2] = {true, true};
 };
 
 enum class EFightEventKind : uint8
@@ -171,6 +193,9 @@ struct FFightConfig
 	float BreakSeconds = 60.f;   // перерыв между раундами
 	bool bAutoProceed = true;    // false — перерыв длится, пока UE-слой не подаст Proceed
 	bool bAllowDraw = false;     // профи: ничья возможна; любители — добивается по очкам
+	// Постановка раунда (corners.ts): старт и перерыв в своих углах, выход по гонгу, нейтральный угол на
+	// нокдауне. false — прежний режим «раунд с центра» (corners:false веба; проверки механики).
+	bool bCorners = true;
 	uint32 Seed = 1;
 };
 
@@ -253,6 +278,11 @@ struct FFighterState
 	bool bGassed = false;             // HUD: мигнуть стаминой (отказ удара на пустом баке)
 	float Victory = 0.f;              // 1 — победил, 0.5 — ничья, 0 — нет/бой идёт
 	bool bDefeated = false;
+	// Постановка (pose.walk веба): идёт по стадии — скорость (м/с, 0 — стоит) и её вектор в осях ядра.
+	// Курс (Yaw/YawDegUE) на ходу в угол — по ходу движения; к бою и стоя — на соперника.
+	float WalkSpeed = 0.f;
+	float WalkVelX = 0.f;
+	float WalkVelZ = 0.f;
 };
 
 struct FFightSnapshot
@@ -269,4 +299,11 @@ struct FFightSnapshot
 	float RiseProgress = 0.f;         // 0..1 набитый тапами подъём (человек)
 	FJudgeCard JudgeTotals[3];        // накопительные суммы судей
 	bool bHasResult = false;          // итог — GetResult()
+	// Постановка раунда (S-53): стадия, цели, кто дошёл. Stage.Kind == None — идёт бой (или бой окончен).
+	FRingStage Stage;
+	// Центр тела лежащего (нокдаун с углами): путь стоящего в нейтральный угол его обходит.
+	bool bHasLyingBody = false;
+	float LyingX = 0.f;
+	float LyingZ = 0.f;
+	bool bCorners = true;             // постановка включена (FFightConfig::bCorners)
 };

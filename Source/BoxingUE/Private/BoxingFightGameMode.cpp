@@ -3,6 +3,8 @@
 #include "BoxerCharacter.h"
 #include "BoxingFightHUD.h"
 #include "BoxingFightPlayerController.h"
+#include "BoxingGameInstanceSubsystem.h"
+#include "FightFx.h"
 #include "Animation/AnimInstance.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -117,6 +119,11 @@ ABoxingFightGameMode::ABoxingFightGameMode()
 void ABoxingFightGameMode::InitGame(const FString& MapName, const FString& Options, FString& ErrorMessage)
 {
 	Super::InitGame(MapName, Options, ErrorMessage);
+	// S-55: пара из Выставки (меню) — пресеты/раунды/сид; без выбора остаются свои пресеты.
+	if (const UBoxingGameInstanceSubsystem* Shell = UBoxingGameInstanceSubsystem::Get(this))
+	{
+		Shell->ApplyToFightMode(*this);
+	}
 	ReadCommandLine();
 }
 
@@ -133,6 +140,12 @@ void ABoxingFightGameMode::ReadCommandLine()
 	FParse::Value(Cmd, TEXT("BoxQuitAfter="), QuitAfter);
 	FParse::Value(Cmd, TEXT("BoxLogEvery="), LogEvery);
 	bLogEvents = FParse::Param(Cmd, TEXT("BoxLogEvents"));
+	if (FParse::Param(Cmd, TEXT("BoxNoCorners")))
+	{
+		bCorners = false;
+	}
+	bStageShots = FParse::Param(Cmd, TEXT("BoxStageShots"));
+	FParse::Value(Cmd, TEXT("BoxPreGong="), PreGongHold);
 	FString Visual;
 	if (FParse::Value(Cmd, TEXT("BoxVisual="), Visual))
 	{
@@ -149,6 +162,11 @@ void ABoxingFightGameMode::ReadCommandLine()
 	};
 	ReadVisual(TEXT("BoxVisualRed="), VisualOverridePathRed);
 	ReadVisual(TEXT("BoxVisualBlue="), VisualOverridePathBlue);
+	// Облик задан руками — авто-выбор любительской формы по типу боя не нужен.
+	if (FString(Cmd).Contains(TEXT("BoxVisualRed=")) || FString(Cmd).Contains(TEXT("BoxVisualBlue=")))
+	{
+		bAutoAmateurLook = false;
+	}
 	FParse::Value(Cmd, TEXT("BoxPhysHits="), PhysHitsOverride);
 	FParse::Value(Cmd, TEXT("BoxFeel="), FeelOverride);
 	FParse::Value(Cmd, TEXT("BoxMinSep="), VisMinSepCm);
@@ -306,12 +324,14 @@ void ABoxingFightGameMode::StartFight()
 	Cfg.BreakSeconds = BreakSeconds;
 	Cfg.bAutoProceed = true;
 	Cfg.bAllowDraw = bAllowDraw;
+	Cfg.bCorners = bCorners;
 	Cfg.Seed = static_cast<uint32>(Seed);
 	Core.Init(Cfg);
 	Snap = Core.GetSnapshot();
 	Accum = 0.0;
 	Pending.Reset();
 	bHasHeldStep = false;
+	PreGongLeft = bCorners ? FMath::Max(0.f, PreGongHold) : 0.f;
 	bStarted = true;
 }
 
@@ -359,7 +379,23 @@ void ABoxingFightGameMode::Tick(float DeltaSeconds)
 	}
 
 	CheckFeelContacts();
-	Accum += DeltaSeconds;
+	// S-54: хит-стоп/повтор нокаута держат ядро (меньше шагов за реальное время — сид и ввод по шагам те же).
+	UBoxingFightFx* Fx = UBoxingFightFx::Get(this);
+	// S-53: до гонга бойцы PreGongHold с стоят в своих углах (уровень догружается, видна расстановка); ядро не шагает.
+	if (PreGongLeft > 0.f)
+	{
+		PreGongLeft -= DeltaSeconds;
+		Snap = Core.GetSnapshot();
+		if (Fx)
+		{
+			Fx->OnSnapshot(Snap, this);
+		}
+		PushStateToBoxers(DeltaSeconds);
+		DebugStage();
+		DebugLog(DeltaSeconds);
+		return;
+	}
+	Accum += DeltaSeconds * (Fx ? Fx->CoreTimeScale() : 1.f);
 	int32 Steps = 0;
 	TArray<FFightEvent> Events;
 	while (Accum >= FixedStep)
@@ -376,7 +412,12 @@ void ABoxingFightGameMode::Tick(float DeltaSeconds)
 	Snap = Core.GetSnapshot();
 	// События раньше состояния: реакция на попадание, а нокдаун (фронт в снимке) её перебивает.
 	DispatchEvents(MoveTemp(Events));
+	if (Fx)
+	{
+		Fx->OnSnapshot(Snap, this); // гонг, фон зала (S-54)
+	}
 	PushStateToBoxers(DeltaSeconds);
+	DebugStage();
 	DebugLog(DeltaSeconds);
 }
 
@@ -422,6 +463,11 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 		{
 			PendingFeelCheck[E.Attacker] = E.Kind == EFightEventKind::Hit ? 1 : 2;
 		}
+		// «Ощущение» (S-54): хит-стоп/slow-mo/камера/звук — ДО раздачи бойцам (заморозка действует в этом же кадре).
+		if (UBoxingFightFx* Fx = UBoxingFightFx::Get(this))
+		{
+			Fx->OnFightEvent(E, this);
+		}
 		for (int32 I = 0; I < 2; ++I)
 		{
 			if (ABoxerCharacter* B = GetBoxer(I))
@@ -441,6 +487,19 @@ FSoftClassPath ABoxingFightGameMode::VisualPathFor(int32 Index) const
 		if (Own.ToString() == TEXT("/Script/None.None"))
 		{
 			return FSoftClassPath();
+		}
+		// Любительский бой (3 раунда, как pro = rounds > 3 в вебе) — любительская форма угла: шлем у женщин
+		// и младше 19, мужчины-элита без шлема. Нет класса на машине — профи-облик угла ниже.
+		if (bAutoAmateurLook && Rounds <= 3)
+		{
+			const FBoxerPreset& P = Index == 0 ? RedPreset : BluePreset;
+			const TCHAR* Corner = Index == 0 ? TEXT("Red") : TEXT("Blue");
+			const TCHAR* Kind = (P.bFemale || P.Age < 19) ? TEXT("Amateur") : TEXT("AmateurElite");
+			const FSoftClassPath Am(FString::Printf(TEXT("/Game/BoxingLocal/Characters/BP_BoxerLook_%s_%s.BP_BoxerLook_%s_%s_C"), Corner, Kind, Corner, Kind));
+			if (Am.TryLoadClass<AActor>())
+			{
+				return Am;
+			}
 		}
 		if (Own.TryLoadClass<AActor>())
 		{
@@ -484,7 +543,8 @@ void ABoxingFightGameMode::PushStateToBoxers(float DeltaSeconds)
 		{
 			continue;
 		}
-		B->ApplyFightState(Snap, Core.GetFightTime(), Targets[I], Snap.Fighters[I].YawDegUE, DeltaSeconds);
+		// × CustomTimeDilation: на хит-стопе (S-54) таймеры бойца стоят вместе с его картинкой.
+		B->ApplyFightState(Snap, Core.GetFightTime(), Targets[I], Snap.Fighters[I].YawDegUE, DeltaSeconds * B->CustomTimeDilation);
 	}
 }
 
@@ -612,6 +672,77 @@ void ABoxingFightGameMode::DebugLog(float DeltaSeconds)
 			MinChestSepCm, MinHeadSepCm, SepPushes, VisMinSepCm, FeelContacts, FeelContacts ? FeelGapAbsSum / FeelContacts : 0.f, FeelGapMaxAbs, FeelLungeMax);
 		QuitAfter = -1.f;
 		FPlatformMisc::RequestExit(false, TEXT("BoxQuitAfter"));
+	}
+}
+
+void ABoxingFightGameMode::DebugStage()
+{
+	// Постановка раунда (S-53): лог смены стадии (цели ядра и где стоят актёры) + скриншоты по стадиям.
+	const ERingStageKind Kind = Snap.Stage.Kind;
+	static const TCHAR* StageNames[] = {TEXT("none"), TEXT("out"), TEXT("rest"), TEXT("neutral"), TEXT("resume")};
+	const int32 K = static_cast<int32>(Kind);
+	if (Kind != LoggedStage)
+	{
+		FString Line = FString::Printf(TEXT("FIGHT STAGE %s -> %s: core=%.2f r%d phase=%d"), StageNames[static_cast<int32>(LoggedStage)], StageNames[K],
+			Core.GetFightTime(), Snap.Round, static_cast<int32>(Snap.Phase));
+		for (int32 I = 0; I < 2; ++I)
+		{
+			const ABoxerCharacter* B = GetBoxer(I);
+			const FVector L = B ? B->GetActorLocation() - RingFloor : FVector::ZeroVector;
+			Line += FString::Printf(TEXT(" | %s core(%.2f,%.2f) act(%.0f,%.0f) yaw=%.0f"), I == 0 ? TEXT("R") : TEXT("B"), Snap.Fighters[I].X, Snap.Fighters[I].Z,
+				L.X, L.Y, B ? B->GetActorRotation().Yaw : 0.f);
+			if (Snap.Stage.bHasTarget[I])
+			{
+				Line += FString::Printf(TEXT(" -> (%.2f,%.2f)"), Snap.Stage.TargetX[I], Snap.Stage.TargetZ[I]);
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("%s"), *Line);
+		LoggedStage = Kind;
+		StageArrivedAt = -1.f;
+	}
+	if (!bStageShots || Kind == ERingStageKind::None)
+	{
+		return;
+	}
+	const bool bAllArrived = Snap.Stage.bArrived[0] && Snap.Stage.bArrived[1];
+	if (bAllArrived && StageArrivedAt < 0.f)
+	{
+		StageArrivedAt = RealTime;
+	}
+	// Кадр стадии: out — до гонга (в углах) и на ходу; rest/neutral — дошли до угла; resume — на ходу назад.
+	FString Shot;
+	if (Kind == ERingStageKind::Out && StageShotsTaken[K] == 0 && Snap.Round == 1 && RealTime >= PreGongHold * 0.8f)
+	{
+		Shot = TEXT("corners");
+	}
+	else if (Kind == ERingStageKind::Out && StageShotsTaken[K] == 1 && Snap.Round == 1 && Snap.Stage.T >= 1.0f)
+	{
+		Shot = TEXT("out");
+	}
+	else if (Kind == ERingStageKind::Rest && StageShotsTaken[K] == 0 && Snap.Stage.T >= 0.9f)
+	{
+		Shot = TEXT("rest_walk");
+	}
+	else if (Kind == ERingStageKind::Rest && StageShotsTaken[K] == 1 && StageArrivedAt >= 0.f && RealTime - StageArrivedAt >= 0.8f)
+	{
+		Shot = TEXT("rest");
+	}
+	else if (Kind == ERingStageKind::Neutral && StageShotsTaken[K] == 0 && Snap.Stage.T >= 0.8f)
+	{
+		Shot = TEXT("neutral_walk");
+	}
+	else if (Kind == ERingStageKind::Neutral && StageShotsTaken[K] == 1 && StageArrivedAt >= 0.f && RealTime - StageArrivedAt >= 0.5f)
+	{
+		Shot = TEXT("neutral");
+	}
+	else if (Kind == ERingStageKind::Resume && StageShotsTaken[K] == 0 && Snap.Stage.T >= 0.6f)
+	{
+		Shot = TEXT("resume");
+	}
+	if (!Shot.IsEmpty())
+	{
+		++StageShotsTaken[K];
+		TakeShot(FString::Printf(TEXT("%s_stage_%s"), *ShotPrefix, *Shot));
 	}
 }
 

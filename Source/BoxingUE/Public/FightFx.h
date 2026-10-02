@@ -1,0 +1,276 @@
+// «Ощущение боя» (S-54, game feel) — порт web/src/ui/fightFx.ts + сцены InteractiveFight.tsx.
+//
+// BoxFx — чистая логика (без мира/акторов, покрыта автотестом BoxingUE.FightFx): длительность хит-стопа,
+// тряска/наезд камеры, slow-mo решающих ударов, вибрация, скорость повтора нокаута.
+//
+// UBoxingFightFx — подсистема мира. ABoxingFightGameMode отдаёт ей события и снимок ядра; она:
+//  * ХИТ-СТОП: замораживает картинку бойцов (CustomTimeDilation ≈ 0 у бойцов и их child actor'ов —
+//    видимых MetaHuman) И тики ядра (CoreTimeScale() = 0: GameMode не копит время в аккумулятор шага).
+//    Почему так: ядро тикает ФИКСИРОВАННЫМ шагом, удар на экране скрабится по фазе ядра — заморозить одну
+//    анимацию нельзя (следующий кадр монтаж догонит фазу ядра рывком), а пауза ядра — это просто «меньше
+//    шагов за реальное время»: последовательность (шаг, ввод) та же, ГСЧ ядра не трогается → бой
+//    воспроизводим по сиду, ввод, нажатый во время стопа, уходит в ядро на ближайшей границе шага
+//    (как в вебе: Scene не тикает движок во время хит-стопа). CustomTimeDilation действует сразу —
+//    бойцы тикают ПОСЛЕ GameMode в том же кадре, поэтому застывает сам кадр контакта, а отдача головы
+//    (пружины реакции) начинается после заморозки. Глобальная TimeDilation для стопа не годится: она
+//    влияет только со следующего кадра (кадр отдачи уже ушёл бы на экран).
+//  * SLOW-MO: глобальная TimeDilation мира (×0.3 → 1 за 0.9 с на нокдауне) — замедляет всё: ядро (меньше
+//    шагов), анимацию, ход; эффекты камеры/звук считаются в реальном времени.
+//  * КАМЕРА: ModifyCamera() (зовёт ABoxingFightPlayerController) — тряска (квадрат силы, мелкие не трясут),
+//    «наезд» (камера ближе к паре и чуть ниже), толчок по вектору тяжёлого удара (CAM_JOLT).
+//  * ЗВУК: UBoxingFightAudio (FightAudio.h) — удары/блок/промах/падение/гонг/зал.
+//  * ПОВТОР НОКАУТА: кольцевой буфер кадров (место/курс бойцов, локальная поза логического меша, кадр
+//    процедурного слоя) → при досрочке отрезок −2.0…+1.2 с вокруг последнего нокдауна проигрывается в
+//    слоу-мо (ReplaySpeed) с низкой боковой камеры.
+//
+// Флаги: -BoxFx=0 (всё выкл.), -BoxFxProfile=classic (стоп 50→110 мс с mag 1.1 и slow-mo на mag ≥ 1.9 —
+// значения веба ДО S-36), -BoxFxLog (лог хит-стопов/slow-mo/камеры/вибрации), -BoxSfxLog (лог звуков),
+// -BoxMute, -BoxNoReplay, -BoxReplayShots=N (скриншоты повтора), -BoxFxShots=N (серии кадров хит-стопа: fx_NN_<вид>_<мс>_tNNN.png), -BoxReplayTest (повтор после каждого нокдауна).
+#pragma once
+
+#include "CoreMinimal.h"
+#include "Subsystems/WorldSubsystem.h"
+#include "FightTypes.h"
+#include "BoxerFeel.h"
+#include "FightFx.generated.h"
+
+class ABoxerCharacter;
+class ABoxingFightGameMode;
+class UBoxingFightAudio;
+class APlayerController;
+
+namespace BoxFx
+{
+	// Вид события для эффектов (как FightEvent.kind веба).
+	enum class EKind : uint8
+	{
+		Land,  // Hit
+		Block, // Blocked
+		Miss,  // Miss / Slipped
+		Kd,    // Knockdown
+		Ko,    // досрочка (FightEnd KO/RSC)
+		Other,
+	};
+
+	EKind KindOf(EFightEventKind K);
+
+	// Порог «тяжёлого» попадания (единицы урона ядра): наезд/толчок камеры, НЧ-слой звука, сильная вибрация.
+	constexpr float HEAVY_MAG = 1.1f;
+	// Толчок камеры по вектору тяжёлого удара (см при PunchIn = 1), CAM_JOLT веба 0.09 м.
+	constexpr float CAM_JOLT_CM = 9.f;
+	// Окно повтора нокаута вокруг падения (сек).
+	constexpr float REPLAY_BEFORE = 2.0f;
+	constexpr float REPLAY_AFTER = 1.2f;
+
+	// Параметры хит-стопа/slow-mo. S36 — текущие веба (после жалобы «подвисание», S-36): стоп-кадр только на
+	// по-настоящему тяжёлом (mag ≥ 1.5) и в 1.5–3 кадра (25→45 мс), нокдаун 70 мс; slow-mo — только нокдаун.
+	// Classic — исходные S-07: стоп 50→110 мс с mag 1.1 (к mag ≈ 2.3), нокдаун 110 мс, slow-mo ещё и на mag ≥ 1.9.
+	struct FProfile
+	{
+		float FreezeMagMin = 1.5f;
+		float StopMinMs = 25.f;
+		float StopMaxMs = 45.f;
+		float StopSpanMag = 0.8f; // от порога до максимума
+		float StopKdMs = 70.f;
+		float SlowHeavyMag = 0.f; // 0 — нет slow-mo на обычных попаданиях
+
+		static FProfile S36() { return FProfile(); }
+		static FProfile Classic()
+		{
+			FProfile P;
+			P.FreezeMagMin = HEAVY_MAG;
+			P.StopMinMs = 50.f;
+			P.StopMaxMs = 110.f;
+			P.StopSpanMag = 1.2f;
+			P.StopKdMs = 110.f;
+			P.SlowHeavyMag = 1.9f;
+			return P;
+		}
+	};
+
+	// Сколько мс заморозить картинку (0 — не замораживать).
+	float HitStopMs(EKind Kind, float Mag, const FProfile& P);
+
+	// Импульс тряски (0..1) и «наезда» (0..1).
+	struct FCamKick
+	{
+		float Shake = 0.f;
+		float PunchIn = 0.f;
+	};
+	FCamKick CameraKick(EKind Kind, float Mag);
+
+	// Провал времени: Scale в начале, Hold сек на полной глубине, Ease сек возврата к 1 (smoothstep).
+	struct FSlowMo
+	{
+		float Scale = 1.f;
+		float Hold = 0.f;
+		float Ease = 0.f;
+		bool IsValid() const { return Scale < 1.f; }
+	};
+	constexpr float SLOWMO_KD = 0.3f;
+	constexpr float SLOWMO_KD_S = 0.9f;
+	FSlowMo SlowMoFor(EKind Kind, float Mag, const FProfile& P);
+	float SlowMoScale(const FSlowMo& S, float T);
+
+	// Скорость повтора от времени относительно удара (Rel < 0 — до): подводка 0.5, удар и падение — 0.28.
+	float ReplaySpeed(float Rel);
+
+	// Вибрация с точки зрения игрока Me (Who — по кому пришлось событие).
+	enum class EHaptic : uint8
+	{
+		None,
+		Light,
+		Medium,
+		Heavy
+	};
+	EHaptic HapticFor(EKind Kind, int32 Who, float Mag, int32 Me);
+
+	// Кадр нокдауна (интерактив): Body — центр тела лежащего, Stand — стоящий, RingCenter — центр ринга на полу (мир, см).
+	// Камера сбоку от линии «лежащий → стоящий» на KD_SHOT_ANGLE: лежащий крупно в нижней части кадра, стоящий
+	// (нейтральный угол) — в стороне от центра кадра, где панель счёта HUD. Side (±1; 0 — выбрать: камера ближе к центру
+	// ринга; хранится как угол + 1000) держится весь нокдаун; камера не дальше края апрона.
+	constexpr float KD_SHOT_ANGLE_DEG = 45.f;   // стартовый угол камеры к линии «лежащий → стоящий»
+	constexpr float KD_SHOT_STAND_DEG = 24.f;   // стоящий — на столько от центра кадра (16:9: пол-кадра ≈ 37°)
+	constexpr float KD_SHOT_DIST = 300.f;   // см от лежащего
+	constexpr float KD_SHOT_HEIGHT = 185.f; // над полом
+	constexpr float KD_SHOT_LIM = 420.f;    // камера не дальше апрона (канаты 305; сторону канатов у камеры прячет контроллер)
+	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook);
+	// Кадр перерыва (restShot + walkToCornerShot веба): Corner 0 — красный (−,−), 1 — синий; At — где сейчас боец (идёт к углу
+	// — кадр едет с ним); Aspect — ширина/высота вьюпорта (портрет — дальше, широкий — угол левее центра).
+	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook);
+
+	float WrapDeg(float A);
+}
+
+// Запись одного бойца в кадре повтора.
+struct FBoxReplayFighter
+{
+	FVector Loc = FVector::ZeroVector;
+	float Yaw = 0.f;
+	TArray<FTransform> Bones; // локальные (bone space) трансформы логического меша
+	FBoxerFeelFrame Feel;     // кадр процедурного слоя (реакция, наведение) — для видимого меша
+};
+
+UCLASS()
+class BOXINGUE_API UBoxingFightFx : public UTickableWorldSubsystem
+{
+	GENERATED_BODY()
+
+public:
+	static UBoxingFightFx* Get(const UObject* WorldContext);
+
+	virtual bool ShouldCreateSubsystem(UObject* Outer) const override;
+	virtual void OnWorldBeginPlay(UWorld& InWorld) override;
+	virtual void Deinitialize() override;
+	virtual void Tick(float DeltaTime) override;
+	virtual TStatId GetStatId() const override;
+	virtual ETickableTickType GetTickableTickType() const override;
+	virtual bool IsTickable() const override;
+
+	// ---------- от GameMode ----------
+	// Событие ядра (до раздачи бойцам). AttLoc/DefLoc — места атакующего/защищающегося (мир).
+	void OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM);
+	// Снимок ядра после шагов кадра: гонг, счёт, итог.
+	void OnSnapshot(const FFightSnapshot& Snap, ABoxingFightGameMode* GM);
+	// Множитель времени ядра: 0 во время хит-стопа и повтора (картинку и ядро держим вместе).
+	float CoreTimeScale() const;
+
+	// ---------- от PlayerController ----------
+	// Тряска/наезд/толчок поверх камеры боя; во время повтора — своя камера (true — кадр задан повтором).
+	bool ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg);
+
+	// ---------- чтение (HUD/BP) ----------
+	UFUNCTION(BlueprintPure, Category = "Boxing|Fx")
+	bool IsReplaying() const { return Replay.bPlaying; }
+	UFUNCTION(BlueprintPure, Category = "Boxing|Fx")
+	bool IsHitStop() const { return Freeze > 0.f; }
+	UFUNCTION(BlueprintPure, Category = "Boxing|Fx")
+	bool IsMuted() const;
+	UFUNCTION(BlueprintCallable, Category = "Boxing|Fx")
+	void SetMuted(bool bMute);
+	// Пропустить повтор (тап/клавиша).
+	UFUNCTION(BlueprintCallable, Category = "Boxing|Fx")
+	void SkipReplay();
+
+	UPROPERTY(Transient)
+	TObjectPtr<UBoxingFightAudio> Audio;
+
+	bool bEnabled = true;
+	BoxFx::FProfile Profile;
+
+private:
+	void SetFightersFrozen(bool bFrozen);
+	void ApplyHaptic(BoxFx::EHaptic H);
+	void UpdateTimeDilation();
+	void UpdateShots(float RealDt);
+	void RecordFrame(float RealDt);
+	void UpdateReplay(float RealDt);
+	void BeginReplay();
+	void EndReplay();
+	void ApplyReplayFrame(float T);
+
+	TWeakObjectPtr<ABoxingFightGameMode> Mode;
+	bool bLog = false;
+	bool bNoReplay = false;
+	bool bReplayTest = false; // -BoxReplayTest: повтор после каждого нокдауна (проверка без KO)
+	int32 ReplayShotsLeft = 0;
+	int32 FxShotsLeft = 0; // -BoxFxShots=N: серии скриншотов на первых N хит-стопах/нокдаунах
+	int32 FxShotIndex = 0;
+	TArray<TPair<double, FString>> PendingShots;
+
+	// хит-стоп
+	float Freeze = 0.f; // сек реального времени
+	bool bFightersFrozen = false;
+	// slow-mo
+	BoxFx::FSlowMo Slow;
+	float SlowT = 0.f;
+	float AppliedDilation = 1.f;
+	// камера
+	float Shake = 0.f;
+	float PunchIn = 0.f;
+	FVector Jolt = FVector::ZeroVector;
+	// кадры нокдауна и перерыва (смешиваются поверх камеры боя)
+	float DownMix = 0.f;
+	float RestMix = 0.f;
+	int32 KdSide = 0;
+	FVector KdCam = FVector::ZeroVector, KdLook = FVector::ZeroVector;
+	FVector RestCam = FVector::ZeroVector, RestLook = FVector::ZeroVector;
+	double Clock = 0.0; // реальное время (с)
+	// вибрация
+	double LastHapticAt = -10.0;
+	// постановка/гонг
+	EFightPhase PrevPhase = EFightPhase::Between;
+	int32 PrevRound = 0;
+	ERingStageKind PrevStage = ERingStageKind::None;
+	double RecT = 0.0; // время записи повтора (игровое, без кадров хит-стопа)
+	double LastRecT = -1.0;
+	bool bFirstSnap = true;
+	TArray<FTransform> ReplayScratch[2];
+	uint64 KdFrame = 0;
+
+	// ---------- повтор нокаута ----------
+	struct FRecFrame
+	{
+		double T = 0.0; // время записи (игровое: с замедлением, без кадров хит-стопа)
+		FBoxReplayFighter F[2];
+	};
+	struct FReplay
+	{
+		TArray<FRecFrame> Ring; // кольцевой буфер
+		int32 Head = 0;
+		int32 Num = 0;
+		double KdAt = -1.0;  // время записи последнего нокдауна (момент удара); −1 — отрезок уже снят
+		TArray<FRecFrame> Clip; // зафиксированный отрезок вокруг нокдауна
+		bool bClipReady = false;
+		bool bWanted = false;      // досрочка — повтор нужен
+		double StartAt = 0.0;      // когда начать (реальное время)
+		bool bPlaying = false;
+		float Cursor = 0.f;        // время внутри клипа (сек записи от начала)
+		bool bImpactFired = false;
+		float Orbit = 0.f;
+		int32 ShotIndex = 0;
+		float ShotTimer = 0.f;
+		double ClipKd = 0.0;        // время нокдауна в клипе
+		int32 CurIdx = 0;
+	} Replay;
+};

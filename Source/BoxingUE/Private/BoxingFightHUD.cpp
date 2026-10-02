@@ -6,6 +6,11 @@
 #include "Engine/Engine.h"
 #include "Engine/Font.h"
 #include "Engine/World.h"
+#include "GameFramework/PlayerController.h"
+#include "InputCoreTypes.h"
+#include "Misc/CommandLine.h"
+#include "UIFightHud.h"
+#include "UIFightResult.h"
 
 namespace
 {
@@ -70,9 +75,79 @@ void ABoxingFightHUD::DrawFighterPanel(int32 Index, float X, float Y, float W, b
 	}
 }
 
+ABoxingFightHUD::ABoxingFightHUD()
+{
+	PrimaryActorTick.bCanEverTick = true;
+	PrimaryActorTick.bTickEvenWhenPaused = true;
+}
+
+void ABoxingFightHUD::BeginPlay()
+{
+	Super::BeginPlay();
+	bCanvasHud = FParse::Param(FCommandLine::Get(), TEXT("BoxCanvasHud"));
+	APlayerController* PC = GetOwningPlayerController();
+	if (!bCanvasHud && PC && PC->IsLocalController())
+	{
+		HudWidget = CreateWidget<UBoxingFightHudWidget>(PC, UBoxingFightHudWidget::StaticClass());
+		if (HudWidget)
+		{
+			HudWidget->AddToViewport(0);
+		}
+	}
+}
+
+void ABoxingFightHUD::Tick(float DeltaSeconds)
+{
+	Super::Tick(DeltaSeconds);
+	APlayerController* PC = GetOwningPlayerController();
+	if (HudWidget && PC && PC->WasInputKeyJustPressed(EKeys::F1))
+	{
+		HudWidget->SetControlsVisible(!HudWidget->AreControlsVisible());
+	}
+	const ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
+	if (!HudWidget || ResultWidget || !GM || !GM->IsFightStarted() || !GM->GetCore().IsOver())
+	{
+		return;
+	}
+	OverTime += DeltaSeconds;
+	if (OverTime >= ResultDelay)
+	{
+		ShowResult();
+	}
+}
+
+void ABoxingFightHUD::ShowResult()
+{
+	APlayerController* PC = GetOwningPlayerController();
+	if (!PC)
+	{
+		return;
+	}
+	ResultWidget = CreateWidget<UBoxingFightResultWidget>(PC, UBoxingFightResultWidget::StaticClass());
+	if (!ResultWidget)
+	{
+		return;
+	}
+	ResultWidget->AddToViewport(10);
+	FInputModeUIOnly Mode;
+	Mode.SetWidgetToFocus(ResultWidget->TakeWidget());
+	Mode.SetLockMouseToViewportBehavior(EMouseLockMode::DoNotLock);
+	PC->SetInputMode(Mode);
+	PC->SetShowMouseCursor(true);
+	ResultWidget->FocusFirst();
+}
+
 void ABoxingFightHUD::DrawHUD()
 {
 	Super::DrawHUD();
+	if (!HudWidget)
+	{
+		DrawCanvasHud();
+	}
+}
+
+void ABoxingFightHUD::DrawCanvasHud()
+{
 	const ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
 	if (!GM || !Canvas || !GM->IsFightStarted())
 	{

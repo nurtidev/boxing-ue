@@ -48,6 +48,9 @@
 `RoundSeconds` (55 — калибровка веба), `BreakSeconds`, `bAllowDraw`, `bAutopilot`, `FixedStep`; `BoxerClass` /
 `BoxerClassPath` (BP_Boxer), `VisualOverridePath` (по умолчанию **MetaHuman Kellan**), `PhysHitsOverride`.
 
+Постановка раунда (S-53, [FIGHT_CORE_PORT.md](FIGHT_CORE_PORT.md) «Постановка раунда»): `-BoxNoCorners` (бой с центра),
+`-BoxPreGong=S` (пауза в углах до первого гонга, 1 с), `-BoxStageShots` (скриншоты стадий `<префикс>_stage_*.png`).
+
 Командная строка: `-BoxAutopilot`, `-BoxSeed=N`, `-BoxRoundSec=S`, `-BoxBreakSec=S`, `-BoxQuitAfter=S`,
 `-BoxLogEvery=S` (позиции/состояние в LogTemp), `-BoxLogEvents`, `-BoxShots=6,12` (скриншоты по времени),
 `-BoxHitShots=N` (скриншоты в кадре контакта первых N попаданий/блоков, раз в ≥ 1.5 с), `-BoxShotPrefix=имя`

@@ -10,5 +10,9 @@ public class BoxingUE : ModuleRules
 			"Core", "CoreUObject", "Engine", "InputCore", "EnhancedInput",
 			"PhysicsControl", "AnimGraphRuntime", "AnimationCore", "IKRig"
 		});
+
+		// Оболочка игры (S-55): UMG-экраны и ростер из JSON.
+		PublicDependencyModuleNames.AddRange(new string[] { "UMG", "Slate", "SlateCore" });
+		PrivateDependencyModuleNames.AddRange(new string[] { "Json" });
 	}
 }

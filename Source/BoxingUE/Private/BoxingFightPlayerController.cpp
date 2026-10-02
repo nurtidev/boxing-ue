@@ -2,6 +2,7 @@
 
 #include "BoxerCharacter.h"
 #include "BoxingFightGameMode.h"
+#include "FightFx.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Engine/LocalPlayer.h"
@@ -202,6 +203,12 @@ void ABoxingFightPlayerController::OnPunch(const FInputActionInstance& Instance,
 	{
 		return;
 	}
+	UBoxingFightFx* Fx = UBoxingFightFx::Get(this);
+	if (Fx && Fx->IsReplaying())
+	{
+		Fx->SkipReplay(); // S-54: любой удар — пропустить повтор нокаута
+		return;
+	}
 	if (IsPlayerDown())
 	{
 		GM->QueueAction(EFightAction::RiseTap);
@@ -315,6 +322,7 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 		bCamInit = true;
 		CamMid = Mid;
 		CamYaw = WantYaw;
+		CamStageMix = FVector::Dist2D(P0, P1) > 500.f ? 1.f : 0.f; // старт в углах — сразу вид постановки (S-53)
 	}
 	const float K = 1.f - FMath::Exp(-MidFollowRate * DeltaSeconds);
 	CamMid += (Mid - CamMid) * K;
@@ -323,23 +331,45 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	// u — ось пары, r = (−u.y, u.x) — вправо от игрока (UE: X вперёд, Y вправо).
 	const FVector U(FMath::Cos(CamYaw), FMath::Sin(CamYaw), 0.f);
 	const FVector R(-U.Y, U.X, 0.f);
-	FVector Cam = CamMid - U * CamBack + R * CamSide;
-	// Пара у канатов → камера за рингом: поднимаем, чтобы смотреть поверх канатов.
+	// Постановка раунда (S-53, stageCamMix/stageCamOffset веба): пара шире боевой дистанции (выход из углов,
+	// уход в угол, нейтральный угол) — камера за спиной игрока вдоль оси и выше, оба в кадре; сошлись — камера боя.
+	const float PairDistM = FVector::Dist2D(P0, P1) / 100.f;
+	const float StageU = FMath::Clamp((PairDistM - 2.1f) / (5.0f - 2.1f), 0.f, 1.f);
+	const float WantStage = StageU * StageU * (3.f - 2.f * StageU);
+	CamStageMix = CamStageMix + (WantStage - CamStageMix) * (1.f - FMath::Exp(-2.2f * DeltaSeconds));
+	const float Sm = CamStageMix;
+	const float StageBack = FMath::Lerp(CamBack, PairDistM * 50.f + 280.f, Sm);
+	const float StageSide = FMath::Lerp(CamSide, 80.f, Sm);
+	FVector Cam = CamMid - U * StageBack + R * StageSide;
+	// Пара у канатов → камера за рингом: поднимаем, чтобы смотреть поверх канатов (на постановке и так высоко).
 	const double Out = FMath::Max3(0.0, FMath::Abs(Cam.X - Floor.X) - RopeHalf, FMath::Abs(Cam.Y - Floor.Y) - RopeHalf);
-	Cam.Z = Floor.Z + CamHeight + FMath::Min(80.0, Out * 0.35);
-	const FVector Look = CamMid + U * LookAhead + FVector(0.f, 0.f, LookHeight);
+	Cam.Z = Floor.Z + CamHeight + 130.f * Sm + FMath::Min(80.0, Out * 0.35) * (1.f - Sm);
+	// Точка взгляда на постановке — к игроку (у своего угла он в кадре целиком).
+	const FVector Look = CamMid + U * (LookAhead * (1.f - Sm) - PairDistM * 50.f * 0.35f * Sm) + FVector(0.f, 0.f, LookHeight - 10.f * Sm);
 	if (bSideCam)
 	{
 		const FVector PairMid((P0.X + P1.X) * 0.5f, (P0.Y + P1.Y) * 0.5f, Floor.Z);
 		const FVector Ax = (P1 - P0).GetSafeNormal2D();
 		const FVector Side(-Ax.Y, Ax.X, 0.f);
 		Cam = PairMid + Side * 260.f + FVector(0.f, 0.f, 150.f);
-		FightCamera->SetActorLocationAndRotation(Cam, (PairMid + FVector(0.f, 0.f, 135.f) - Cam).Rotation());
+		FVector SideLook = PairMid + FVector(0.f, 0.f, 135.f);
+		float FxFov = 0.f;
+		if (UBoxingFightFx* Fx = UBoxingFightFx::Get(this))
+		{
+			Fx->ModifyCamera(Cam, SideLook, FxFov); // S-54: тряска/наезд/толчок, камера повтора нокаута
+		}
+		FightCamera->SetActorLocationAndRotation(Cam, (SideLook - Cam).Rotation());
 		UpdateRopeVisibility(Cam, Floor);
 	}
 	else
 	{
-		FightCamera->SetActorLocationAndRotation(Cam, (Look - Cam).Rotation());
+		FVector FxLook = Look;
+		float FxFov = 0.f;
+		if (UBoxingFightFx* Fx = UBoxingFightFx::Get(this))
+		{
+			Fx->ModifyCamera(Cam, FxLook, FxFov); // S-54: тряска/наезд/толчок, камера повтора нокаута
+		}
+		FightCamera->SetActorLocationAndRotation(Cam, (FxLook - Cam).Rotation());
 		UpdateRopeVisibility(Cam, Floor);
 	}
 

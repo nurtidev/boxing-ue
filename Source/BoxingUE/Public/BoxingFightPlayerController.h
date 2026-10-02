@@ -138,5 +138,7 @@ private:
 	bool bSideCam = false;
 	FVector CamMid = FVector::ZeroVector;
 	float CamYaw = 0.f;
+	// Постановка раунда (S-53): доля вида «из-за спины игрока» (stageCamMix веба), пара шире боевой дистанции.
+	float CamStageMix = 0.f;
 	int32 PrevSlipAxis = 0;
 };

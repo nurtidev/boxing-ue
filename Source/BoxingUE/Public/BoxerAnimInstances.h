@@ -43,6 +43,9 @@ struct FBoxerLayerRootNode : public FAnimNode_Base
 	FBoxerLayerParams Params;
 	FName BlendRoot = TEXT("spine_01");
 	FBoxerFeelDebug Debug;
+	// Повтор нокаута (S-54): записанная локальная поза меша (индексы костей меша) вместо своей.
+	bool bReplay = false;
+	TArray<FTransform> ReplayBones;
 
 	FBoxerLayerRootNode();
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;

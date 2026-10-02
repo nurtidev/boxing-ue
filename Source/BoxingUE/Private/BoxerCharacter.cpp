@@ -26,6 +26,8 @@ namespace
 	constexpr float TRACK_GAIN = 12.f;
 	// Ниже этой ошибки (см) и без упреждения — стоим (Motion Matching видит «стойку»).
 	constexpr float TRACK_DEADBAND = 0.4f;
+	// Доворот курса на постановке раунда (S-53), град/с: разворот к углу ≈ 0.4 с.
+	constexpr float STAGE_TURN_DPS = 420.f;
 	// Запас до конца монтажа, на котором держим «последний кадр» (нокдаун, финал).
 	constexpr float HOLD_MARGIN = 0.03f;
 	// Плавный выход из удара/уклона, когда цикл ядра закончился, — назад в стойку слота UpperBody.
@@ -453,6 +455,10 @@ void ABoxerCharacter::SnapToFightState(const FVector& WorldTarget, float YawDeg)
 
 void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double CoreTime, const FVector& WorldTarget, float YawDeg, float DeltaSeconds)
 {
+	if (bReplayDriven)
+	{
+		return; // повтор нокаута (S-54): бойца ведёт запись, ядро и монтажи не трогаем
+	}
 	const FFighterState& F = Snapshot.Fighters[FighterIndex];
 	CoreNow = CoreTime;
 	if (CoreTime > PrevTargetCoreTime + 1e-6)
@@ -471,6 +477,13 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	if (!bFighting)
 	{
 		FightTargetVelocity = FVector::ZeroVector;
+	}
+	// Постановка раунда (S-53): выход из угла / в угол / в нейтральный угол — ходьба вне боевого времени,
+	// поэтому скорость точки — из ядра (WalkVel, м/с → см/с), а курс доворачивается плавно (TrackFightTarget).
+	bStaging = Snapshot.Stage.Kind != ERingStageKind::None;
+	if (F.WalkSpeed > 0.f)
+	{
+		FightTargetVelocity = FVector(F.WalkVelX * 100.f, F.WalkVelZ * 100.f, 0.f);
 	}
 	FightTarget = WorldTarget;
 	FightYaw = YawDeg;
@@ -886,7 +899,11 @@ void ABoxerCharacter::TrackFightTarget(float DeltaSeconds)
 
 	// Курс — всегда лицом к сопернику (ядро). Контроллер — туда же: в стрейфе GASP крутит
 	// капсулу к ControlRotation (bUseControllerDesiredRotation), так CMC не спорит с ядром.
-	const FRotator Facing(0.f, FightYaw, 0.f);
+	// На постановке (S-53) курс меняется рывками (развернулся к углу / дошёл — к сопернику) — доворот с
+	// постоянной скоростью STAGE_TURN_DPS; в бою — как раньше, сразу.
+	const FRotator Facing = bStaging
+		? FMath::RInterpConstantTo(FRotator(0.f, GetActorRotation().Yaw, 0.f), FRotator(0.f, FightYaw, 0.f), DeltaSeconds, STAGE_TURN_DPS)
+		: FRotator(0.f, FightYaw, 0.f);
 	SetActorRotation(Facing);
 	if (Controller)
 	{
@@ -1391,5 +1408,53 @@ void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
 	else if (!bPunching)
 	{
 		bAimCaptured = false;
+	}
+}
+
+// ---------------------------------------------------------------------------------------------
+// Повтор нокаута (S-54): бойца ведёт запись UBoxingFightFx
+// ---------------------------------------------------------------------------------------------
+
+void ABoxerCharacter::BeginReplayDrive()
+{
+	bReplayDriven = true;
+	ReplayFeel = Feel;
+	if (UCharacterMovementComponent* Cmc = GetCharacterMovement())
+	{
+		Cmc->StopMovementImmediately();
+	}
+}
+
+void ABoxerCharacter::SetReplayFrame(const FVector& Loc, float YawDeg, const TArray<FTransform>& Bones, const FBoxerFeelFrame& InFeel)
+{
+	if (!bReplayDriven)
+	{
+		return;
+	}
+	ReplayBones = Bones;
+	ReplayFeel = InFeel;
+	SetActorLocationAndRotation(Loc, FRotator(0.f, YawDeg, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+	if (UCharacterMovementComponent* Cmc = GetCharacterMovement())
+	{
+		Cmc->StopMovementImmediately();
+	}
+}
+
+void ABoxerCharacter::EndReplayDrive()
+{
+	if (!bReplayDriven)
+	{
+		return;
+	}
+	bReplayDriven = false;
+	ReplayBones.Reset();
+	// Вернуть живое место/курс сразу («защёлкнуть»), поза — снова из анимации (держит финальный кадр).
+	FVector Loc = GetActorLocation();
+	Loc.X = FightTarget.X;
+	Loc.Y = FightTarget.Y;
+	SetActorLocationAndRotation(Loc, FRotator(0.f, FightYaw, 0.f), false, nullptr, ETeleportType::TeleportPhysics);
+	if (UCharacterMovementComponent* Cmc = GetCharacterMovement())
+	{
+		Cmc->StopMovementImmediately();
 	}
 }

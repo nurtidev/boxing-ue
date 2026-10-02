@@ -193,6 +193,10 @@ namespace BoxingFightConst
 
 using namespace BoxingFightConst;
 
+// FightStaging.h дублирует константы ринга (чтобы геометрию углов можно было звать без ядра) — держим в синхроне.
+static_assert(BoxingStaging::ROPE_HALF == ROPE_HALF && BoxingStaging::RING_HALF == RING_HALF, "FightStaging.h: ринг");
+static_assert(BoxingStaging::DIST_MIN == DIST_MIN && BoxingStaging::DIST_START == DIST_START, "FightStaging.h: дистанции");
+
 namespace
 {
 	int32 KindIdx(EPunchKind K) { return static_cast<int32>(K); }
@@ -396,8 +400,23 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	Events.Reset();
 	Result = FFightResult();
 	bHasResult = false;
+	bCorners = Config.bCorners;
+	Stage = FStageState();
+	ResumeGap = DIST_START;
+	bHasLying = false;
+	RestT = 0;
 
-	PlaceFighters();
+	// С постановкой — в своих углах, по гонгу выход к центру (state.ts); без — сразу в центре.
+	// Постановка ГСЧ не трогает: броски ниже — те же при любом bCorners.
+	if (bCorners)
+	{
+		PlaceInCorners();
+		BeginWalkout();
+	}
+	else
+	{
+		PlaceFighters();
+	}
 	// Порядок бросков — как в state.ts: сначала синий (ИИ), затем красный (если ИИ), затем форма дня.
 	if (bAi[1]) Rt[1].NextAiAt = 0.8 + Rng.Range(0, AiInterval(StyleIdx(Rt[1].Prof.Style)));
 	if (bAi[0]) Rt[0].NextAiAt = 0.8 + Rng.Range(0, AiInterval(StyleIdx(Rt[0].Prof.Style)));
@@ -413,13 +432,23 @@ void FBoxingFightCore::Tick(float DtRaw)
 	if (Phase == EFightPhase::Over) return;
 	const double Dt = ClampD(static_cast<double>(DtRaw), 0, 0.05);
 
-	// Перерыв: в вебе ждёт proceed() от UI; здесь — таймер (или явный Proceed).
+	// Постановка (выход из углов / возврат после счёта): только ходьба — боевое время, часы раунда,
+	// ИИ и ГСЧ стоят (corners.ts), поэтому бой после выхода — тот же, что без углов.
+	if (Phase == EFightPhase::Walkout)
+	{
+		UpdateStage(Dt);
+		return;
+	}
+	// Перерыв: в вебе ждёт proceed() от UI; здесь — таймер (или явный Proceed). Отдых в углу виден
+	// сразу (S-43); с углами авто-переход ждёт ещё и того, что оба дошли до своих углов.
 	if (Phase == EFightPhase::Between)
 	{
+		CornerRecover(Dt);
+		UpdateStage(Dt);
 		if (bAutoProceed)
 		{
 			BreakLeft -= Dt;
-			if (BreakLeft <= 0) Proceed();
+			if (BreakLeft <= 0 && StageAllArrived()) Proceed();
 		}
 		return;
 	}
@@ -427,6 +456,7 @@ void FBoxingFightCore::Tick(float DtRaw)
 
 	if (Phase == EFightPhase::Down)
 	{
+		UpdateStage(Dt); // стоящий уходит в нейтральный угол
 		UpdateCount(Dt);
 		return;
 	}
@@ -820,6 +850,8 @@ void FBoxingFightCore::TryKnockdown(int32 AttIdx, int32 DefIdx, EPunchKind Kind,
 void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 {
 	FRuntime& Def = Rt[DefIdx];
+	Def.FrozenYaw = YawOf(DefIdx); // только снимок: курс лежащего не следит за обходящим его соперником
+	Def.bYawFrozen = true;
 	Def.Kd += 1;
 	RKd[DefIdx] += 1;
 	Def.Accumulated += 12;
@@ -843,6 +875,7 @@ void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 	Down = FDownState();
 	Down.Who = DefIdx;
 	Down.KoChance = KoChance;
+	if (bCorners) BeginNeutral(DefIdx); // правило: стоящий — в дальний нейтральный угол
 }
 
 void FBoxingFightCore::UpdateCount(double Dt)
@@ -892,6 +925,8 @@ void FBoxingFightCore::RiseUp()
 	R.HurtMag = 0.8;
 	R.StaggerUntil = T + 0.7;
 	R.Stamina = FMath::Max(0.0, R.Stamina - R.MaxStam * 0.12);
+	R.bYawFrozen = false;
+	const int32 Rose = Down.Who;
 	bHasDown = false;
 	Down = FDownState();
 	Phase = EFightPhase::Fighting;
@@ -899,6 +934,9 @@ void FBoxingFightCore::RiseUp()
 	{
 		if (bAi[I]) Rt[I].NextAiAt = T + 0.6;
 	}
+	// Стоящий возвращается из нейтрального угла; бой — когда подойдёт (боевое время стоит, так что
+	// стан вставшего и пауза ИИ дождутся команды «Бокс!»).
+	if (bCorners) BeginResume(Rose);
 }
 
 // ======================================================================
@@ -918,10 +956,13 @@ bool FBoxingFightCore::Proceed()
 		RPress[I] = 0;
 		RKdSpent[I] = 0;
 		RPressKd[I] = false;
+	}
+	// Угол: довести восстановление до итога (BeginCornerRest), сколько бы ни шёл перерыв.
+	CornerRecover(1e9);
+	for (int32 I = 0; I < 2; ++I)
+	{
 		FRuntime& R = Rt[I];
-		// Угол: часть износа спадает, стамина назад (не выше потолка «бака»).
-		R.Accumulated *= 0.72;
-		R.Stamina = FMath::Min(R.StamCap(), R.Stamina + R.MaxStam * 0.28);
+		R.bHasRest = false;
 		R.bHasPunch = false;
 		R.bBlocking = false;
 		R.SlipUntil = 0;
@@ -939,8 +980,16 @@ bool FBoxingFightCore::Proceed()
 		R.StepReadyAt = 0;
 		R.AngleUntil = 0;
 	}
-	PlaceFighters(); // постановки углов нет — сразу на стартовую дистанцию
-	Phase = EFightPhase::Fighting;
+	// Гонг: из углов к центру (бой — когда сойдутся); без постановки — сразу на стартовую дистанцию.
+	if (bCorners)
+	{
+		BeginWalkout();
+	}
+	else
+	{
+		PlaceFighters();
+		Phase = EFightPhase::Fighting;
+	}
 	if (bAi[1]) Rt[1].NextAiAt = T + 0.7 + Rng.Range(0, 0.6);
 	if (bAi[0]) Rt[0].NextAiAt = T + 0.7 + Rng.Range(0, 0.6);
 	return true;
@@ -977,6 +1026,8 @@ void FBoxingFightCore::EndRound()
 	{
 		Phase = EFightPhase::Between;
 		BreakLeft = BreakSeconds;
+		BeginCornerRest();         // отдых в углу идёт с гонга (CornerRecover на тиках перерыва)
+		if (bCorners) BeginRest(); // по гонгу — в свои углы
 	}
 }
 
@@ -1119,6 +1170,7 @@ void FBoxingFightCore::BuildResult(int32 WinnerIndex, EFightMethod Method, EDeci
 	Result.Rounds = PerRound;
 	bHasResult = true;
 	Phase = EFightPhase::Over;
+	EndStage(); // KO на счёте: стоящий остаётся, где был, — лицом к лежащему
 	PushEvent(EFightEventKind::FightEnd, WinnerIndex, WinnerIndex < 0 ? -1 : 1 - WinnerIndex, 0);
 }
 
@@ -1288,6 +1340,8 @@ double FBoxingFightCore::Distance() const
 
 double FBoxingFightCore::YawOf(int32 I) const
 {
+	if (Rt[I].bYawFrozen) return Rt[I].FrozenYaw;  // лежит (нокдаун/нокаут)
+	if (Rt[I].bHasFaceYaw) return Rt[I].FaceYaw; // постановка: идёт в угол лицом по ходу
 	const FVec2 U = Axis(I);
 	return FMath::Atan2(-U.Z, U.X);
 }
@@ -1586,6 +1640,19 @@ FFightSnapshot FBoxingFightCore::GetSnapshot() const
 	S.Distance = static_cast<float>(Distance());
 	for (int32 Jd = 0; Jd < 3; ++Jd) S.JudgeTotals[Jd] = JudgeCards[Jd];
 	S.bHasResult = bHasResult;
+	S.bCorners = bCorners;
+	S.Stage.Kind = Stage.Kind;
+	S.Stage.T = static_cast<float>(Stage.T);
+	for (int32 I = 0; I < 2; ++I)
+	{
+		S.Stage.bHasTarget[I] = Stage.bHasTarget[I];
+		S.Stage.TargetX[I] = static_cast<float>(Stage.Target[I].X);
+		S.Stage.TargetZ[I] = static_cast<float>(Stage.Target[I].Z);
+		S.Stage.bArrived[I] = Stage.bArrived[I];
+	}
+	S.bHasLyingBody = bHasLying && Phase == EFightPhase::Down;
+	S.LyingX = static_cast<float>(Lying.X);
+	S.LyingZ = static_cast<float>(Lying.Z);
 	if (bHasDown)
 	{
 		S.DownWho = Down.Who;
@@ -1608,6 +1675,9 @@ FFightSnapshot FBoxingFightCore::GetSnapshot() const
 		F.bAngle = AngleOf(I) > 0;
 		F.bGassed = T < R.GassedUntil;
 		F.Step = R.Step;
+		F.WalkSpeed = static_cast<float>(R.WalkSpeed);
+		F.WalkVelX = static_cast<float>(R.WalkVX);
+		F.WalkVelZ = static_cast<float>(R.WalkVZ);
 
 		const bool bDownNow = bHasDown && Down.Who == I;
 		const bool bLostEarly = bHasResult && Result.WinnerIndex >= 0 && Result.WinnerIndex != I &&

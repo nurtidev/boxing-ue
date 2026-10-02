@@ -14,6 +14,7 @@
 
 #include "CoreMinimal.h"
 #include "FightTypes.h"
+#include "FightStaging.h"
 
 // mulberry32 — побитово как web/src/engine/rng.ts.
 struct FBoxingRng
@@ -46,7 +47,8 @@ struct FBoxingRng
 class BOXINGUE_API FBoxingFightCore
 {
 public:
-	// Старт боя: расстановка по центру на DIST_START, первые броски ГСЧ (темп ИИ, «форма дня»).
+	// Старт боя: в своих углах и выход по гонгу (bCorners) или сразу по центру на DIST_START;
+	// затем первые броски ГСЧ (темп ИИ, «форма дня») — их порядок от постановки не зависит.
 	void Init(const FFightConfig& Config);
 
 	// Шаг времени. Как loop.ts: Dt зажимается в [0, 0.05] — при больших кадрах время боя
@@ -64,6 +66,7 @@ public:
 	const FFightResult& GetResult() const { return Result; }
 	bool IsOver() const { return Phase == EFightPhase::Over; }
 	EFightPhase GetPhase() const { return Phase; }
+	ERingStageKind GetStageKind() const { return Stage.Kind; }
 	double GetFightTime() const { return T; }
 
 	// Эффективность удара Kind на дистанции Dist (м) для размаха ReachCm: 0 — не достаёт,
@@ -132,6 +135,16 @@ private:
 		EPunchTarget HurtTarget = EPunchTarget::Head;
 		double GassedUntil = 0;
 		int32 SlipDir = 1;
+		// Постановка (corners.ts): идёт по стадии — скорость (0 — стоит), вектор хода; курс «по ходу».
+		double WalkSpeed = 0, WalkVX = 0, WalkVZ = 0;
+		bool bHasFaceYaw = false;
+		double FaceYaw = 0;
+		// Лежит: курс замёрз на миг падения (стоящий обходит его по пути в нейтральный угол — тело не крутится).
+		bool bYawFrozen = false;
+		double FrozenYaw = 0;
+		// Отдых в углу (rounds.ts beginCornerRest/cornerRecover): итог считается по гонгу, набирается за перерыв.
+		bool bHasRest = false;
+		double RestStam0 = 0, RestStam1 = 0, RestWear0 = 0, RestWear1 = 0;
 		TArray<int32> Recent;     // последние удары человека «вид*2+цель» (чтение ИИ)
 		TArray<double> SlipTimes; // моменты последних уклонов человека
 
@@ -181,6 +194,29 @@ private:
 	void DecideByCards();
 	void Finish(int32 Winner, EFightMethod Method);
 	void BuildResult(int32 WinnerIndex, EFightMethod Method, EDecisionKind Decision, int32 StoppedRound);
+
+	// --- постановка раунда (corners.ts → FightStaging.cpp) ---
+	struct FStageState
+	{
+		ERingStageKind Kind = ERingStageKind::None;
+		double T = 0;
+		bool bHasTarget[2] = {false, false};
+		FVec2 Target[2];
+		bool bArrived[2] = {true, true};
+	};
+	void PlaceInCorners();
+	void BeginStage(ERingStageKind Kind, const FVec2* Target0, const FVec2* Target1);
+	void BeginWalkout();
+	void BeginRest();
+	void BeginNeutral(int32 DownIdx);
+	void BeginResume(int32 RoseIdx);
+	void StartFighting();
+	void EndStage();
+	void UpdateStage(double Dt);
+	void Arrive(int32 I);
+	bool StageAllArrived() const;
+	void BeginCornerRest();
+	void CornerRecover(double Dt);
 
 	// --- ноги (footwork.ts) ---
 	void PlaceFighters();
@@ -236,6 +272,13 @@ private:
 	double RKdSpent[2] = {0, 0};
 	bool RPressKd[2] = {false, false};
 	double TotLanded[2] = {0, 0};
+	// постановка (state.ts corners/stage/resumeGap/lyingAt/restT)
+	bool bCorners = true;
+	FStageState Stage;
+	double ResumeGap = 1.15;
+	bool bHasLying = false;
+	FVec2 Lying;
+	double RestT = 0;
 	double LastMissAt[2] = {-1, -1};
 	double Form[2] = {1, 1};
 

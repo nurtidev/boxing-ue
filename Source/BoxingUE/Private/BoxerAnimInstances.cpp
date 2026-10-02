@@ -88,6 +88,17 @@ void FBoxerLayerRootNode::Update_AnyThread(const FAnimationUpdateContext& Contex
 
 void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
 {
+	if (bReplay && ReplayBones.Num() > 0)
+	{
+		// Повтор нокаута: поза из записи (уже с процедурным слоем, если он был здесь) — ни входа, ни Fx.
+		const FBoneContainer& BC = Output.Pose.GetBoneContainer();
+		for (const FCompactPoseBoneIndex I : Output.Pose.ForEachBoneIndex())
+		{
+			const int32 M = BC.MakeMeshPoseIndex(I).GetInt();
+			Output.Pose[I] = ReplayBones.IsValidIndex(M) ? ReplayBones[M] : Output.Pose.GetRefPose(I);
+		}
+		return;
+	}
 	// База — поза AnimBP GASP (вход пост-процесса), верх — она же с монтажом слота этого экземпляра.
 	FPoseContext Base(Output);
 	Input.Evaluate_AnyThread(Base);
@@ -160,6 +171,11 @@ void FBoxerLayerProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSecon
 		{
 			Root.Frame = B->GetFeelFrame();
 			Root.Params = B->GetLayerParams();
+			Root.bReplay = B->IsReplayDriven();
+			if (Root.bReplay)
+			{
+				Root.ReplayBones = B->GetReplayBones();
+			}
 		}
 	}
 }

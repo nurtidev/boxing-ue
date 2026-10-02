@@ -415,8 +415,17 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Feel")
 	float HitMontageTorsoAlpha = 0.35f;
 
-	// Кадр для анимпотока (наведение + каналы реакции), обновляется в Tick.
-	const FBoxerFeelFrame& GetFeelFrame() const { return Feel; }
+	// Кадр для анимпотока (наведение + каналы реакции), обновляется в Tick; в повторе нокаута — записанный.
+	const FBoxerFeelFrame& GetFeelFrame() const { return bReplayDriven ? ReplayFeel : Feel; }
+
+	// ---------- Повтор нокаута (S-54, UBoxingFightFx) ----------
+	// Пока идёт повтор, бойца ведёт запись: место/курс, локальная поза логического меша (слой верха отдаёт её
+	// вместо своей), кадр процедурного слоя. Ядро, монтажи и ход стоят; после — снова живое состояние.
+	void BeginReplayDrive();
+	void SetReplayFrame(const FVector& Loc, float YawDeg, const TArray<FTransform>& Bones, const FBoxerFeelFrame& InFeel);
+	void EndReplayDrive();
+	bool IsReplayDriven() const { return bReplayDriven; }
+	const TArray<FTransform>& GetReplayBones() const { return ReplayBones; }
 	FBoxerLayerParams GetLayerParams() const;
 
 	// Меш, который виден (MetaHuman Body после подмены; иначе логический манекен).
@@ -457,6 +466,10 @@ public:
 	// Скорость точки ядра (см/с), оценка по двум последним снимкам — упреждение слежения.
 	UPROPERTY(BlueprintReadOnly, Category = "Boxing")
 	FVector FightTargetVelocity = FVector::ZeroVector;
+
+	// Идёт постановка раунда (S-53): выход из угла, перерыв в углу, нейтральный угол, возврат после счёта.
+	UPROPERTY(BlueprintReadOnly, Category = "Boxing|Anim")
+	bool bStaging = false;
 
 protected:
 	virtual void BeginPlay() override;
@@ -543,6 +556,10 @@ private:
 
 	FBoxerReactionRig React;
 	FBoxerFeelFrame Feel;
+	// Повтор нокаута (S-54).
+	bool bReplayDriven = false;
+	TArray<FTransform> ReplayBones;
+	FBoxerFeelFrame ReplayFeel;
 	bool bFeelReady = false;
 	int32 FeelInitTries = 0;
 

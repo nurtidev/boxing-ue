@@ -3,9 +3,9 @@ name: core-harness
 
 on:
   push:
-    paths: ['Source/BoxingUE/**/BoxingFightCore.*', 'Source/BoxingUE/Public/FightTypes.h', 'Tools/CoreHarness/**', '.github/workflows/core-harness.yml']
+    paths: ['Source/BoxingUE/**/BoxingFightCore.*', 'Source/BoxingUE/**/FightStaging.*', 'Source/BoxingUE/Public/FightTypes.h', 'Tools/CoreHarness/**', '.github/workflows/core-harness.yml']
   pull_request:
-    paths: ['Source/BoxingUE/**/BoxingFightCore.*', 'Source/BoxingUE/Public/FightTypes.h', 'Tools/CoreHarness/**', '.github/workflows/core-harness.yml']
+    paths: ['Source/BoxingUE/**/BoxingFightCore.*', 'Source/BoxingUE/**/FightStaging.*', 'Source/BoxingUE/Public/FightTypes.h', 'Tools/CoreHarness/**', '.github/workflows/core-harness.yml']
 
 jobs:
   harness:

@@ -14,7 +14,8 @@
 // -BoxShots=5,9,14 (скриншоты в Docs/screens/fight_<сек>.png), -BoxHitShots=N (скриншоты в кадре
 // контакта первых N попаданий/блоков, с интервалом ≥ 1.5 с), -BoxShotPrefix=ring_fight (имя файлов),
 // -BoxVisual=<класс>|none (визуальная подмена), -BoxVisualRed=/-BoxVisualBlue= (своя подмена угла),
-// -BoxPhysHits=0|1 (физреакция), -BoxFeel=0 (без слоя «ощущения удара»), -BoxMinSep=СМ (мин. дистанция визуала).
+// -BoxPhysHits=0|1 (физреакция), -BoxFeel=0 (без слоя «ощущения удара»), -BoxMinSep=СМ (мин. дистанция визуала),
+// -BoxNoCorners (бой без постановки углов, S-53), -BoxStageShots (скриншоты стадий постановки: <префикс>_stage_*.png).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -57,6 +58,15 @@ public:
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fight")
 	bool bAllowDraw = false;
 
+	// Постановка раунда (S-53): старт и перерыв в своих углах, выход по гонгу, нейтральный угол на нокдауне.
+	// false — раунд сразу с центра (прежний режим). Командная строка: -BoxNoCorners.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fight")
+	bool bCorners = true;
+
+	// Пауза до первого гонга (с): бойцы стоят в своих углах, ядро не шагает (сид и бой те же). -BoxPreGong=S.
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fight")
+	float PreGongHold = 1.0f;
+
 	// Оба бойца под ИИ (ввод игрока игнорируется) — демо/проверка.
 	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category = "Boxing|Fight")
 	bool bAutopilot = false;
@@ -79,6 +89,11 @@ public:
 	// Физреакция на попадание (на видимом меше подмены). -1 — как в классе бойца; 0/1 — принудительно.
 	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
 	int32 PhysHitsOverride = -1;
+
+	// Любительский бой (Rounds <= 3) — любительская форма угла (BP_BoxerLook_<угол>_Amateur[Elite]);
+	// выключается, если облик угла задан в командной строке (-BoxVisualRed= / -BoxVisualBlue=).
+	UPROPERTY(EditAnywhere, Category = "Boxing|Ring")
+	bool bAutoAmateurLook = true;
 
 	// Своя подмена для красного/синего угла (облик бойца: форма в цвет угла, tech-artist).
 	// Пусто или класса нет на машине (Content/BoxingLocal вне git) — VisualOverridePath.
@@ -211,4 +226,11 @@ private:
 	float FeelLungeMax = 0.f;
 	int32 SepPushes = 0;
 	FSoftClassPath VisualPathFor(int32 Index) const;
+	// Постановка (S-53): лог смены стадий и скриншоты стадий (-BoxStageShots).
+	void DebugStage();
+	bool bStageShots = false;
+	ERingStageKind LoggedStage = ERingStageKind::None;
+	float StageArrivedAt = -1.f;
+	int32 StageShotsTaken[5] = {0, 0, 0, 0, 0};
+	float PreGongLeft = 0.f; // осталось паузы до первого гонга (PreGongHold, только с углами)
 };
