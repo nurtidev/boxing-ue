@@ -716,6 +716,25 @@ void UBoxingExhibitionWidget::NativeTick(const FGeometry& MyGeometry, float InDe
 	else if (AutoStep == 2 && AutoTime > 2.4f)
 	{
 		AutoStep = 3;
+		// QA S-71: пол — по найденному бойцу, если -BoxUiGender не задан, а на этом поле его нет («Балкибекова» без -BoxUiGender=F
+		// уходила в «нет в ростере — беру сильнейшего»). Пара — одного пола, поэтому решает первый найденный.
+		if (S->AutoGender.IsEmpty())
+		{
+			for (int32 I = 0; I < 2 && S->AutoPick.IsValidIndex(I); ++I)
+			{
+				if (S->FindByName(S->AutoPick[I], -1, bFemale ? 1 : 0))
+				{
+					break;
+				}
+				if (const FRosterBoxer* Other = S->FindByName(S->AutoPick[I], -1, bFemale ? 0 : 1))
+				{
+					UE_LOG(LogTemp, Log, TEXT("UI: сценарий — «%s» найден(а) среди %s, переключаю пол"), *S->AutoPick[I],
+						Other->bFemale ? TEXT("женщин") : TEXT("мужчин"));
+					SetFemale(Other->bFemale);
+					break;
+				}
+			}
+		}
 		for (int32 I = 0; I < 2; ++I)
 		{
 			const FRosterBoxer* B = S->AutoPick.IsValidIndex(I) ? S->FindByName(S->AutoPick[I], static_cast<int32>(Tab), bFemale ? 1 : 0) : nullptr;

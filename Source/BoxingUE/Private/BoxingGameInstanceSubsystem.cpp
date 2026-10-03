@@ -226,6 +226,22 @@ void UBoxingGameInstanceSubsystem::Deinitialize()
 	Super::Deinitialize();
 }
 
+namespace
+{
+	// S-71 r2 (QA): диагностика разрешения рендера — значение и приоритет (кто ставил) cvar'ов экранного процента.
+	FString RenderScaleCVarState()
+	{
+		auto One = [](const TCHAR* Name) -> FString
+		{
+			IConsoleVariable* V = IConsoleManager::Get().FindConsoleVariable(Name);
+			if (!V) return FString::Printf(TEXT("%s=нет"), Name);
+			return FString::Printf(TEXT("%s=%s(%s)"), Name, *V->GetString(), GetConsoleVariableSetByName((EConsoleVariableFlags)(V->GetFlags() & ECVF_SetByMask)));
+		};
+		return One(TEXT("r.ScreenPercentage")) + TEXT(" ") + One(TEXT("sg.ResolutionQuality")) + TEXT(" ") + One(TEXT("r.ScreenPercentage.Default")) + TEXT(" ")
+			+ One(TEXT("r.ScreenPercentage.Default.Desktop.Mode"));
+	}
+}
+
 void UBoxingGameInstanceSubsystem::ApplyDefaultRenderScale()
 {
 	// S-67: у нового игрока sg.ResolutionQuality = 0 («по умолчанию движка») → r.ScreenPercentage.Default = 72.9 % на 1080p
@@ -239,6 +255,7 @@ void UBoxingGameInstanceSubsystem::ApplyDefaultRenderScale()
 	}
 	float Norm = 0.f, Value = 0.f, Min = 0.f, Max = 0.f;
 	G->GetResolutionScaleInformationEx(Norm, Value, Min, Max);
+	UE_LOG(LogTemp, Log, TEXT("RES: до — ini %.1f; %s"), Value, *RenderScaleCVarState());
 	if (Value > 0.f)
 	{
 		return; // выбрано игроком (или пресетом в настройках) — не трогаем
@@ -246,7 +263,21 @@ void UBoxingGameInstanceSubsystem::ApplyDefaultRenderScale()
 	const float Scale = DefaultRenderScaleFor(G);
 	G->SetResolutionScaleValueEx(Scale);
 	G->ApplyNonResolutionSettings();
+	// QA S-71: ApplyNonResolutionSettings зовёт Scalability::SetQualityLevels только при GEngine->IsInitialized(), а подсистема
+	// GameInstance стартует внутри UGameEngine::Init — уровни не применялись: в настройках «100 %», на деле sg.ResolutionQuality=0 и
+	// r.ScreenPercentage.Default (авто движка «по разрешению дисплея», 72.9 % на 1080p). Через sg.ResolutionQuality нельзя: UGameEngine::PreExit
+	// сохраняет sg.* в общий ini, и «по умолчанию» стало бы выбором игрока. Поэтому меняем именно ДЕФОЛТ движка (он в ini не пишется):
+	// r.ScreenPercentage.Default = Scale в ручном режиме. Выбор игрока (sg.ResolutionQuality > 0 → r.ScreenPercentage) его перекрывает.
+	if (IConsoleVariable* Def = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage.Default")))
+	{
+		Def->Set(Scale, ECVF_SetByGameSetting);
+	}
+	if (IConsoleVariable* Mode = IConsoleManager::Get().FindConsoleVariable(TEXT("r.ScreenPercentage.Default.Desktop.Mode")))
+	{
+		Mode->Set(0, ECVF_SetByGameSetting); // EScreenPercentageMode::Manual
+	}
 	UE_LOG(LogTemp, Log, TEXT("UI: разрешение рендера по умолчанию → %.0f%% (было «авто движка»)"), Scale);
+	UE_LOG(LogTemp, Log, TEXT("RES: после — %s"), *RenderScaleCVarState());
 }
 
 float UBoxingGameInstanceSubsystem::DefaultRenderScaleFor(const UGameUserSettings* G)
@@ -1076,6 +1107,7 @@ void UBoxingGameInstanceSubsystem::OnPreLoadMap(const FString& MapName)
 void UBoxingGameInstanceSubsystem::OnPostLoadMap(UWorld* World)
 {
 	SetWorldRendering(World, true);
+	UE_LOG(LogTemp, Log, TEXT("RES: карта %s — %s"), World ? *World->GetMapName() : TEXT("?"), *RenderScaleCVarState());
 	const double Now = FPlatformTime::Seconds();
 	const FString Map = World ? World->GetMapName() : FString();
 	{

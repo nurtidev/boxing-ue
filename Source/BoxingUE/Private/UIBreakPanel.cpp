@@ -32,17 +32,21 @@ namespace
 		}
 	}
 
-	FLinearColor BpCardColor(int32 Mine, int32 His)
+	// Цвет карты/вердикта — УГОЛ, чей раунд (красный / синий, светлее для тёмной панели); равный — приглушённый. Хорошо ли это
+	// для игрока — словами вердикта («Раунд твой» / «за ним»), не цветом: красный «плохо» читался как «красный взял» (QA S-71).
+	FLinearColor BpCardColor(int32 RedPts, int32 BluePts)
 	{
-		return Mine > His ? BoxUi::Good : (His > Mine ? BoxUi::Bad : BoxUi::Muted);
+		return RedPts > BluePts ? FMath::Lerp(BoxUi::Red, BoxUi::Text, 0.2f) : (BluePts > RedPts ? FMath::Lerp(BoxUi::Blue, BoxUi::Text, 0.3f) : BoxUi::Muted);
 	}
 
+	// Подпись столбца: фамилия; пресеты карты без Выставки («Красный угол» / «Синий угол») — «Красный» / «Синий».
 	FString BpSurname(const FString& Name)
 	{
 		FString L, R;
 		if (Name.EndsWith(TEXT("угол")))
 		{
-			return TEXT("Соперник"); // пресеты карты без Выставки: «Синий угол»
+			FString First, Rest;
+			return Name.Split(TEXT(" "), &First, &Rest) ? First : Name;
 		}
 		return Name.TrimStartAndEnd().Split(TEXT(" "), &L, &R, ESearchCase::IgnoreCase, ESearchDir::FromEnd) ? R : Name;
 	}
@@ -207,7 +211,9 @@ void UBoxingBreakPanelWidget::EnterBreak(ABoxingFightGameMode& GM, bool bHuman)
 
 	SetText(RoundText, FString::Printf(TEXT("РАУНД %d / %d · ПЕРЕРЫВ"), S.Round, S.TotalRounds));
 	SetText(VerdictText, V.bValid ? V.Text : TEXT("Раунд не судили"));
-	VerdictText->SetColorAndOpacity(FSlateColor(V.bValid ? (bHuman ? BpToneColor(V.Tone) : BoxUi::Text) : BoxUi::Muted));
+	int32 RedWins = 0, BlueWins = 0;
+	for (int32 J = 0; J < N; ++J) { RedWins += Cards[J].Red > Cards[J].Blue; BlueWins += Cards[J].Blue > Cards[J].Red; }
+	VerdictText->SetColorAndOpacity(FSlateColor(V.bValid ? BpCardColor(RedWins, BlueWins) : BoxUi::Muted));
 
 	// Карты судей.
 	const float ColW = (BpPanelW - 2.f * BpPadX - 24.f - BpJudgeLabelW) / N;
@@ -224,9 +230,9 @@ void UBoxingBreakPanelWidget::EnterBreak(ABoxingFightGameMode& GM, bool bHuman)
 		UTextBlock* H = Txt(FString::FromInt(J + 1), 14, BoxUi::Muted, true);
 		H->SetJustification(ETextJustify::Center);
 		AddH(JudgeHead, Sized(H, ColW));
-		// Автопилот: цвет — чей раунд по углам (красный/синий); игрок — его/не его.
-		const FLinearColor RC = bHuman ? BpCardColor(MineR, HisR) : (MineR > HisR ? BoxUi::Red : (HisR > MineR ? BoxUi::Blue : BoxUi::Muted));
-		const FLinearColor TC = bHuman ? BpCardColor(MineT, HisT) : (MineT > HisT ? BoxUi::Red : (HisT > MineT ? BoxUi::Blue : BoxUi::Muted));
+		// Цвет — чей раунд по углам (и у игрока, и в автопилоте).
+		const FLinearColor RC = BpCardColor(Cards[J].Red, Cards[J].Blue);
+		const FLinearColor TC = BpCardColor(S.JudgeTotals[J].Red, S.JudgeTotals[J].Blue);
 		UTextBlock* R = Txt(V.bValid ? FString::Printf(TEXT("%d–%d"), MineR, HisR) : TEXT("—"), 18, RC, true);
 		R->SetJustification(ETextJustify::Center);
 		AddH(JudgeRound, Sized(R, ColW));
