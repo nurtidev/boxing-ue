@@ -10,6 +10,10 @@
 #include "Engine/World.h"
 #include "GameFramework/PlayerController.h"
 #include "GameFramework/WorldSettings.h"
+#include "Engine/TextRenderActor.h"
+#include "Components/TextRenderComponent.h"
+#include "EngineUtils.h"
+#include "InputKeyEventArgs.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
@@ -116,7 +120,12 @@ namespace BoxFx
 		{
 			return 0.5f - ((Rel + 0.7f) / 0.4f) * 0.22f; // 0.5 → 0.28
 		}
-		return 0.28f;
+		if (Rel < 1.2f)
+		{
+			return 0.28f;
+		}
+		// S-66: тело легло — досматриваем «лежит» быстрее (повтор не затягивается от длинного хвоста).
+		return FMath::Min(0.6f, 0.28f + (Rel - 1.2f) * 0.8f);
 	}
 
 	EHaptic HapticFor(EKind Kind, int32 Who, float Mag, int32 Me)
@@ -348,6 +357,7 @@ void UBoxingFightFx::OnWorldBeginPlay(UWorld& InWorld)
 	bNoReplay = FParse::Param(Cmd, TEXT("BoxNoReplay"));
 	bReplayTest = FParse::Param(Cmd, TEXT("BoxReplayTest"));
 	FParse::Value(Cmd, TEXT("BoxReplayShots="), ReplayShotsLeft);
+	FParse::Value(Cmd, TEXT("BoxReplaySkipAt="), ReplaySkipAt);
 	FParse::Value(Cmd, TEXT("BoxFxShots="), FxShotsLeft);
 	GStats = FFxStats();
 	if (bEnabled)
@@ -616,9 +626,66 @@ void UBoxingFightFx::OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM
 	}
 }
 
+void UBoxingFightFx::UpdateScoreboard(const FFightSnapshot& Snap)
+{
+	UWorld* W = GetWorld();
+	if (!W)
+	{
+		return;
+	}
+	if (!bBoardsFound)
+	{
+		// Уровень строит tech-artist скриптом (build_ring.py: Arena_ScreenRound_±1). Табло — актор с тегом BoxScoreRound;
+		// без тега (уровень ещё не пересобран) — TextRender, чей текст начинается с «РАУНД».
+		bBoardsFound = true;
+		for (TActorIterator<ATextRenderActor> It(W); It; ++It)
+		{
+			const UTextRenderComponent* T = It->GetTextRender();
+			const bool bTag = It->ActorHasTag(TEXT("BoxScoreRound"));
+			if (bTag || (T && T->Text.ToString().StartsWith(TEXT("РАУНД"))))
+			{
+				Boards.Add(*It);
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("FX табло арены: %d"), Boards.Num());
+	}
+	if (Boards.Num() == 0)
+	{
+		return;
+	}
+	const float Left = Snap.Phase == EFightPhase::Between ? Snap.BreakLeft : Snap.TimeLeft;
+	const int32 Sec = FMath::Max(0, FMath::CeilToInt(Left));
+	FString Txt;
+	if (Snap.Phase == EFightPhase::Over)
+	{
+		Txt = TEXT("БОЙ ОКОНЧЕН");
+	}
+	else if (Snap.Phase == EFightPhase::Between)
+	{
+		Txt = FString::Printf(TEXT("ПЕРЕРЫВ   %d:%02d"), Sec / 60, Sec % 60);
+	}
+	else
+	{
+		Txt = FString::Printf(TEXT("РАУНД %d   %d:%02d"), Snap.Round, Sec / 60, Sec % 60);
+	}
+	if (Txt == BoardText)
+	{
+		return;
+	}
+	BoardText = Txt;
+	for (const TWeakObjectPtr<ATextRenderActor>& B : Boards)
+	{
+		if (B.IsValid() && B->GetTextRender())
+		{
+			B->GetTextRender()->SetText(FText::FromString(Txt));
+		}
+	}
+}
+
 void UBoxingFightFx::OnSnapshot(const FFightSnapshot& Snap, ABoxingFightGameMode* GM)
 {
 	Mode = GM;
+	UpdateScoreboard(Snap);
 	if (!bEnabled)
 	{
 		return;
@@ -669,11 +736,24 @@ bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 	{
 		// Драматичный ракурс повтора: низко (чуть выше верхнего каната), сбоку от оси пары, медленный облёт.
 		const FRecFrame& F = Replay.Clip[FMath::Clamp(Replay.CurIdx, 0, Replay.Clip.Num() - 1)];
-		const FVector Mid = 0.5f * (F.F[0].Loc + F.F[1].Loc);
+		// S-66: центр — по местам И тазам обоих (падающее тело уходит на 1.5 м за точку бойца — иначе падение уходило из
+		// кадра), сглажен; разошлись — камера отъезжает.
+		const FVector Mid = 0.25f * (F.F[0].Loc + F.F[1].Loc + F.F[0].Pelvis + F.F[1].Pelvis);
 		const float Floor = Mode.IsValid() ? Mode->GetRingFloorCenter().Z : Mid.Z - 90.f;
+		const float Span = FMath::Max(FVector::Dist2D(F.F[0].Loc, F.F[1].Loc), FMath::Max(FVector::Dist2D(F.F[0].Pelvis, F.F[1].Loc), FVector::Dist2D(F.F[1].Pelvis, F.F[0].Loc)));
+		if (!bReplayCamInit)
+		{
+			bReplayCamInit = true;
+			ReplayMid = Mid;
+			ReplaySpan = Span;
+		}
+		const float K = 1.f - FMath::Exp(-3.f * FMath::Min(0.05f, Mode.IsValid() ? Mode->GetWorld()->DeltaRealTimeSeconds : 0.016f));
+		ReplayMid += (Mid - ReplayMid) * K;
+		ReplaySpan += (Span - ReplaySpan) * K;
+		const float Dist = 255.f + FMath::Max(0.f, ReplaySpan - 130.f) * 0.7f;
 		const float Ax = FMath::Atan2(F.F[1].Loc.Y - F.F[0].Loc.Y, F.F[1].Loc.X - F.F[0].Loc.X) + HALF_PI - 0.25f + Replay.Orbit;
-		Cam = FVector(Mid.X + FMath::Cos(Ax) * 255.f, Mid.Y + FMath::Sin(Ax) * 255.f, Floor + 142.f);
-		Look = FVector(Mid.X, Mid.Y, Floor + 95.f);
+		Cam = FVector(ReplayMid.X + FMath::Cos(Ax) * Dist, ReplayMid.Y + FMath::Sin(Ax) * Dist, Floor + 142.f);
+		Look = FVector(ReplayMid.X, ReplayMid.Y, Floor + 80.f);
 		bOverride = true;
 	}
 	else
@@ -820,6 +900,8 @@ void UBoxingFightFx::RecordFrame(float GameDt)
 			R.Yaw = B[I]->GetActorRotation().Yaw;
 			R.Bones = B[I]->GetMesh()->GetBoneSpaceTransforms();
 			R.Feel = B[I]->GetFeelFrame();
+			const USkeletalMeshComponent* Vm = B[I]->GetFeelMesh();
+			R.Pelvis = (Vm && Vm->GetBoneIndex(TEXT("pelvis")) != INDEX_NONE) ? Vm->GetBoneLocation(TEXT("pelvis")) : R.Loc;
 		}
 		Replay.Head = (Replay.Head + 1) % Cap;
 		Replay.Num = FMath::Min(Replay.Num + 1, Cap);
@@ -878,6 +960,8 @@ void UBoxingFightFx::BeginReplay()
 	Replay.bImpactFired = false;
 	Replay.Orbit = 0.f;
 	Replay.ShotTimer = 0.f;
+	bReplayCamInit = false;
+	ReplayPlayedReal = 0.f;
 	++GStats.Replays;
 	GStats.ReplayFrames = Replay.Clip.Num();
 	for (int32 I = 0; I < 2; ++I)
@@ -905,6 +989,12 @@ void UBoxingFightFx::EndReplay()
 		}
 	}
 	UE_LOG(LogTemp, Log, TEXT("FX повтор окончен"));
+	if (SkipKeyStage == 1 && GEngine && GEngine->GameViewport)
+	{
+		SkipKeyStage = 2; // отпустить отладочную клавишу
+		UGameViewportClient* Vc = GEngine->GameViewport;
+		Vc->InputKey(FInputKeyEventArgs(Vc->Viewport, FInputDeviceId::CreateFromInternalId(0), EKeys::J, IE_Released, FPlatformTime::Cycles64()));
+	}
 }
 
 void UBoxingFightFx::SkipReplay()
@@ -922,6 +1012,16 @@ void UBoxingFightFx::UpdateReplay(float RealDt)
 	{
 		EndReplay();
 		return;
+	}
+	// Отладка (-BoxReplaySkipAt=С): через С с показа «нажать» J настоящим событием вьюпорта — путь клавиатуры целиком
+	// (HUD ловит любую клавишу), а не прямой вызов SkipReplay.
+	ReplayPlayedReal += RealDt;
+	if (ReplaySkipAt >= 0.f && SkipKeyStage == 0 && ReplayPlayedReal >= ReplaySkipAt && GEngine && GEngine->GameViewport)
+	{
+		SkipKeyStage = 1;
+		UGameViewportClient* Vc = GEngine->GameViewport;
+		UE_LOG(LogTemp, Log, TEXT("FX отладка: клавиша J посреди повтора (%.2f с показа, t=%+.2f с от удара)"), ReplayPlayedReal, Replay.Cursor - Replay.ClipKd);
+		Vc->InputKey(FInputKeyEventArgs(Vc->Viewport, FInputDeviceId::CreateFromInternalId(0), EKeys::J, IE_Pressed, FPlatformTime::Cycles64()));
 	}
 	const float Speed = BoxFx::ReplaySpeed(Replay.Cursor - static_cast<float>(Replay.ClipKd));
 	Replay.Cursor += FMath::Min(0.05f, RealDt) * Speed;
@@ -944,7 +1044,8 @@ void UBoxingFightFx::UpdateReplay(float RealDt)
 		Replay.ShotTimer -= RealDt;
 		if (Replay.ShotTimer <= 0.f)
 		{
-			Replay.ShotTimer = 1.0f;
+			static const float Every = [] { float V = 1.f; FParse::Value(FCommandLine::Get(), TEXT("BoxReplayShotEvery="), V); return FMath::Max(0.1f, V); }();
+			Replay.ShotTimer = Every; // -BoxReplayShotEvery=С (S-66: QA снимал раз в 1 с — 6 кадров кончались до падения)
 			--ReplayShotsLeft;
 			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") /
 				FString::Printf(TEXT("fx_replay_%02d.png"), ++Replay.ShotIndex));

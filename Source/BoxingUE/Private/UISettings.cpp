@@ -141,8 +141,9 @@ namespace
 		return Q >= 2 ? 100.f : (Q == 1 ? 85.f : 70.f);
 	}
 
-	// Шаги ползунка «Разрешение рендера»: 0 — авто (по умолчанию движка), дальше проценты.
-	const float RenderScales[] = {0.f, 50.f, 60.f, 67.f, 70.f, 75.f, 80.f, 85.f, 90.f, 100.f};
+	// Шаги ползунка «Разрешение рендера», %. S-67: «Авто (движок)» убрано — это 72.9 % на 1080p; пока игрок не выбрал своё,
+	// подсистема ставит значение по пресету качества (UBoxingGameInstanceSubsystem::DefaultRenderScaleFor).
+	const float RenderScales[] = {50.f, 60.f, 67.f, 70.f, 75.f, 80.f, 85.f, 90.f, 100.f};
 
 	float CurrentRenderScale(const UGameUserSettings* G)
 	{

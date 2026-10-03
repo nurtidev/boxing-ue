@@ -14,6 +14,7 @@
 
 #include "CoreMinimal.h"
 #include "FightTypes.h"
+#include "FightBot.h"
 
 namespace BoxingFightProfile
 {
@@ -50,4 +51,25 @@ namespace BoxingFightProfile
 	};
 	BOXINGUE_API FOutcomeOdds PredictOutcome(FFighterSetup Red, FFighterSetup Blue, int32 Rounds, bool bProRules, int32 Fights = 60,
 		uint32 Seed = 0x5eedu);
+
+	// «Шансы при твоей игре» (S-65): красного ведёт бот «человека» (FFightBot — тот же, что в автоплейтестах -BoxBot), синего —
+	// ИИ, как в настоящем бою Выставки (игрок всегда красный, углы НЕ меняются). PredictOutcome (ИИ против ИИ) — «кто сильнее
+	// по ядру»; живой игрок выигрывает заметно реже (QA: Алимханулы–Нурсултанов 62% против 36% у бота average): ИИ за красного
+	// играет свой стиль ровно, с реакцией на каждый замах, человек — нет. Раунд 55 с (бой Выставки), шаг 1/60 с (как GameMode:
+	// реакции бота квантуются шагом), без постановки, сиды фиксированы — детерминировано. Цена (харнесс /O2) — ≈ 1 мс на бой
+	// 3 р., ≈ 3 мс на 10 р.: звать вне кадра (UBoxingGameInstanceSubsystem::PlayerForecast считает в фоне и кэширует).
+	BOXINGUE_API FOutcomeOdds PredictWithBot(FFighterSetup Red, FFighterSetup Blue, int32 Rounds, bool bProRules, EFightBotSkill Skill,
+		int32 Fights = 60, uint32 Seed = 0x5eedu);
+
+	// Диапазон «при твоей игре»: новичок / обычная игра (average) / сильный игрок — три серии PredictWithBot на одних сидах.
+	// Главной цифре (average) — 150 боёв (95% ДИ ≈ ±8 п.), краям диапазона — по 60 (±12 п.): 60 боёв на average давали
+	// промах до 13 п. против серии 200 боёв (Усик–Дюбуа). Цена всего: ≈ 0.35 с на 3 р., ≈ 1 с на 10 р. (харнесс /O2).
+	struct FPlayerOdds
+	{
+		FOutcomeOdds Novice;
+		FOutcomeOdds Average; // «обычная игра» — главная цифра карточки
+		FOutcomeOdds Strong;
+	};
+	BOXINGUE_API FPlayerOdds PredictForPlayer(const FFighterSetup& Red, const FFighterSetup& Blue, int32 Rounds, bool bProRules,
+		int32 AverageFights = 150, int32 EdgeFights = 60, uint32 Seed = 0x5eedu);
 }

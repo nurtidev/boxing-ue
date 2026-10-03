@@ -645,7 +645,7 @@ FString ABoxingFightGameMode::GetResultText() const
 	}
 	const FFightResult& R = Core.GetResult();
 	FString Cards;
-	for (int32 J = 0; J < 3; ++J)
+	for (int32 J = 0; J < R.NumJudges; ++J) // S-65: любители — 5 судей
 	{
 		Cards += FString::Printf(TEXT("%s%d-%d"), J ? TEXT("  ") : TEXT(""), R.JudgeTotals[J].Red, R.JudgeTotals[J].Blue);
 	}
@@ -947,11 +947,16 @@ void ABoxingFightGameMode::RunBotBatch()
 		else if (R.WinnerIndex < 0) { ++Draws; }
 		else { ++Losses; ++LossBy[M]; }
 		HitsFor += F[0]; HitsAgainst += F[1]; KdFor += Kd[0]; KdAgainst += Kd[1]; Gassed += Gs; Pressed += Bot.PunchesPressed;
-		int32 Cards[3][2];
-		for (int32 J = 0; J < 3; ++J) { Cards[J][0] = R.JudgeTotals[J].Red; Cards[J][1] = R.JudgeTotals[J].Blue; }
-		UE_LOG(LogTemp, Log, TEXT("BOT бой %d (сид %u): %s %s%s, судьи %d-%d %d-%d %d-%d, нокдауны %d-%d, попадания %d-%d, нажато ударов %d, блоков %d, уклонов %d, «нет сил» %d"),
+		FString Cards; // S-65: все судьи (любители — 5); ровная карта, где судья назвал победителя, — «*к»/«*с»
+		for (int32 J = 0; J < R.NumJudges; ++J)
+		{
+			Cards += FString::Printf(TEXT("%s%d-%d%s"), J ? TEXT(" ") : TEXT(""), R.JudgeTotals[J].Red, R.JudgeTotals[J].Blue,
+				R.TieNominee[J] < 0 ? TEXT("") : (R.TieNominee[J] == 0 ? TEXT("*к") : TEXT("*с")));
+		}
+		UE_LOG(LogTemp, Log, TEXT("BOT бой %d (сид %u): %s %s%s%s, судьи %s, нокдауны %d-%d, попадания %d-%d, нажато ударов %d, блоков %d, уклонов %d, «нет сил» %d"),
 			BotFrom + K, FightSeed, Verdict, MethodShort[M], R.StoppedRound > 0 ? *FString::Printf(TEXT(" в %d р."), R.StoppedRound) : TEXT(""),
-			Cards[0][0], Cards[0][1], Cards[1][0], Cards[1][1], Cards[2][0], Cards[2][1], Kd[0], Kd[1], F[0], F[1], Bot.PunchesPressed, Bot.Blocks, Bot.Slips, Gs);
+			R.Method == EFightMethod::Decision || R.Method == EFightMethod::Draw ? *FString::Printf(TEXT(" (%s)"), DecisionText(R.Decision)) : TEXT(""),
+			*Cards, Kd[0], Kd[1], F[0], F[1], Bot.PunchesPressed, Bot.Blocks, Bot.Slips, Gs);
 	}
 	const double N = FMath::Max(1, BotFights);
 	UE_LOG(LogTemp, Log, TEXT("BOT СВОДКА: %s, %d боёв: побед %d (%.0f%%), поражений %d, ничьих %d; победы: решением %d, KO %d, RSC %d; поражения: решением %d, KO %d, RSC %d"),

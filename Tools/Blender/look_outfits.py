@@ -210,7 +210,7 @@ def smooth(bm, iters, factor=0.5, pin_boundary=True):
 
 
 def region_shell(src, name, coarse, cuts, keep, offset_fn, thick, smooth_iters=8, horiz=1.0, drop_w=None,
-                 rim_iters=0, post=None):
+                 rim_iters=0, post=None, pre=None, even=True):
     """Оболочка по участку кожи: грубый отбор → ровные разрезы плоскостями → точный отбор по центрам граней →
     сглаживание (складки ткани не повторяют мышцы) → отступ по нормали → толщина внутрь с кромкой.
     drop_w — веса вершин исходника: грани со средним весом > 0.5 отбрасываются (руки у майки)."""
@@ -259,6 +259,8 @@ def region_shell(src, name, coarse, cuts, keep, offset_fn, thick, smooth_iters=8
                     new[v] = co
             for v, co in new.items():
                 v.co = co
+    if pre:
+        pre(bm)       # S-68: до сглаживания (разметка материалов по ровным разрезам)
     smooth(bm, smooth_iters, 0.5)
     # сглаживание «усаживает» поверхность внутрь тела — возвращаем на кожу (иначе push_out потом выдавливает
     # отдельные вершины и у края появляются ступеньки)
@@ -286,7 +288,7 @@ def region_shell(src, name, coarse, cuts, keep, offset_fn, thick, smooth_iters=8
         m.thickness = thick
         m.offset = -1.0
         m.use_rim = True
-        m.use_even_offset = True
+        m.use_even_offset = even     # S-68: у мелких клиньев после разрезов «ровная толщина» стреляет шипом
         apply_mod(o, m)
     for p in o.data.polygons:
         p.use_smooth = True

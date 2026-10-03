@@ -275,7 +275,13 @@ private:
 	bool bHasDown = false;
 	FDownState Down;
 
-	FJudgeCard JudgeCards[3];
+	FJudgeCard JudgeCards[MAX_JUDGES];
+	// Любители (S-65, World Boxing): 5 судей, раунд без ничьих. Судьи 1–3 бросают разброс восприятия из Rng в те же моменты, что
+	// и раньше (поток боя бит-в-бит прежний), судьи 4–5 и разрешение «ровных» раундов — из своего JudgeRng.
+	int32 NumJudges = 3;
+	FBoxingRng JudgeRng;
+	double JudgeView[MAX_JUDGES] = {0, 0, 0, 0, 0}; // сумма восприятий раундов судьёй (+ — красный): кого он назовёт при равной карте
+	int32 TieNominee[MAX_JUDGES] = {-1, -1, -1, -1, -1};
 	TArray<FRoundResult> PerRound;
 	bool bRoundScored = false;
 	double RLanded[2] = {0, 0};

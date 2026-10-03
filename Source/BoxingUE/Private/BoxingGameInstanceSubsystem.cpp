@@ -1,6 +1,7 @@
 #include "BoxingGameInstanceSubsystem.h"
 
 #include "BoxingFightGameMode.h"
+#include "Async/Async.h"
 #include "Dom/JsonObject.h"
 #include "Engine/GameInstance.h"
 #include "Engine/World.h"
@@ -28,6 +29,11 @@
 #include "GameFramework/PlayerController.h"
 #include "MoviePlayer.h"
 #include "HAL/IConsoleManager.h"
+#include "BoxerLook.h"
+#include "Engine/Engine.h"
+#include "Engine/LevelStreaming.h"
+#include "Engine/GameViewportClient.h"
+#include "GameFramework/GameUserSettings.h"
 
 const TCHAR* BoxStat::Label(int32 I)
 {
@@ -169,6 +175,15 @@ void UBoxingGameInstanceSubsystem::Initialize(FSubsystemCollectionBase& Collecti
 	}
 	ReadPickFromCommandLine();
 
+	// S-67: служебные надписи движка поверх UI («Preparing Textures (1)», «Preparing Animation Sequences (6)» — фоновая
+	// компиляция ассетов редакторной сборки, плюс прочие map warnings) рисует UEngine::DrawMapWarnings; в Shipping их нет.
+	// AddOnScreenDebugMessage (отладка ролей) не трогаем. -BoxMapWarnings — показать.
+	if (GEngine && !FParse::Param(Cmd, TEXT("BoxMapWarnings")))
+	{
+		GEngine->bSuppressMapWarnings = true;
+	}
+	ApplyDefaultRenderScale();
+
 	PreLoadMapHandle = FCoreUObjectDelegates::PreLoadMap.AddUObject(this, &UBoxingGameInstanceSubsystem::OnPreLoadMap);
 	PostLoadMapHandle = FCoreUObjectDelegates::PostLoadMapWithWorld.AddUObject(this, &UBoxingGameInstanceSubsystem::OnPostLoadMap);
 
@@ -189,7 +204,7 @@ void UBoxingGameInstanceSubsystem::Deinitialize()
 		FTSTicker::GetCoreTicker().RemoveTicker(ScriptTicker);
 		ScriptTicker.Reset();
 	}
-	for (FTSTicker::FDelegateHandle* H : {&TransitionTicker, &FirstFrameTicker, &RingCoverTicker})
+	for (FTSTicker::FDelegateHandle* H : {&TransitionTicker, &FirstFrameTicker, &RingCoverTicker, &PreloadTicker, &MenuBgTicker})
 	{
 		if (H->IsValid())
 		{
@@ -204,8 +219,50 @@ void UBoxingGameInstanceSubsystem::Deinitialize()
 		PreloadHandle->CancelHandle();
 		PreloadHandle.Reset();
 	}
+	PairHandle.Reset();
+	PreloadKeep.Empty();
+	PreloadQueue.Empty();
 	Resident.Empty();
 	Super::Deinitialize();
+}
+
+void UBoxingGameInstanceSubsystem::ApplyDefaultRenderScale()
+{
+	// S-67: у нового игрока sg.ResolutionQuality = 0 («по умолчанию движка») → r.ScreenPercentage.Default = 72.9 % на 1080p
+	// (1400×788) — мыло без захода в настройки. Пока игрок сам не выбрал разрешение рендера, ставим его по пресету качества:
+	// высокое/эпик — 100 % (tech-artist: ~62 FPS на RTX 5060 1080p эпик при 100 %), но не больше 1440p внутренних пикселей
+	// (на 4K — 67 %), среднее — 85 %, низкое — 70 %. Только в памяти: общий ini не пишется, пока игрок не сохранит настройки.
+	UGameUserSettings* G = GEngine ? GEngine->GetGameUserSettings() : nullptr;
+	if (!G || FParse::Param(FCommandLine::Get(), TEXT("BoxEngineRenderScale")))
+	{
+		return;
+	}
+	float Norm = 0.f, Value = 0.f, Min = 0.f, Max = 0.f;
+	G->GetResolutionScaleInformationEx(Norm, Value, Min, Max);
+	if (Value > 0.f)
+	{
+		return; // выбрано игроком (или пресетом в настройках) — не трогаем
+	}
+	const float Scale = DefaultRenderScaleFor(G);
+	G->SetResolutionScaleValueEx(Scale);
+	G->ApplyNonResolutionSettings();
+	UE_LOG(LogTemp, Log, TEXT("UI: разрешение рендера по умолчанию → %.0f%% (было «авто движка»)"), Scale);
+}
+
+float UBoxingGameInstanceSubsystem::DefaultRenderScaleFor(const UGameUserSettings* G)
+{
+	if (!G)
+	{
+		return 100.f;
+	}
+	const int32 Q = FMath::Min3(FMath::Min(G->GetShadowQuality(), G->GetGlobalIlluminationQuality()),
+		FMath::Min(G->GetReflectionQuality(), G->GetPostProcessingQuality()), G->GetShadingQuality());
+	if (Q <= 0) return 70.f;
+	if (Q == 1) return 85.f;
+	const FIntPoint Res = G->GetScreenResolution();
+	const int32 H = G->GetFullscreenMode() == EWindowMode::WindowedFullscreen ? G->GetDesktopResolution().Y : Res.Y;
+	// Выше 1440p — держим ≈ 2560×1440 внутренних пикселей (шагами ползунка настроек).
+	return H > 1600 ? FMath::Max(67.f, FMath::RoundToFloat(1440.f / H * 100.f)) : 100.f;
 }
 
 void UBoxingGameInstanceSubsystem::LoadRoster()
@@ -329,15 +386,41 @@ const FRosterBoxer* UBoxingGameInstanceSubsystem::FindByName(const FString& Part
 	{
 		return nullptr;
 	}
+	// S-67: лучшее совпадение, а не первое: полное имя > целое слово (фамилия) > начало слова > подстрока. Было: первое по
+	// подстроке — и «Головкин» мимо вкладки давал чужого бойца (фолбэк сценария брал сильнейшего из списка).
+	const FRosterBoxer* Best = nullptr;
+	int32 BestRank = 0;
 	for (const FRosterBoxer& B : Roster)
 	{
-		if ((Kind < 0 || static_cast<int32>(B.Kind) == Kind) && (Female < 0 || B.bFemale == (Female != 0))
-			&& B.Name.Contains(P, ESearchCase::IgnoreCase))
+		if ((Kind >= 0 && static_cast<int32>(B.Kind) != Kind) || (Female >= 0 && B.bFemale != (Female != 0)))
 		{
-			return &B;
+			continue;
+		}
+		int32 Rank = 0;
+		if (B.Name.Equals(P, ESearchCase::IgnoreCase))
+		{
+			Rank = 4;
+		}
+		else
+		{
+			TArray<FString> Words;
+			B.Name.Replace(TEXT("«"), TEXT(" ")).Replace(TEXT("»"), TEXT(" ")).ParseIntoArrayWS(Words);
+			for (const FString& W : Words)
+			{
+				Rank = FMath::Max(Rank, W.Equals(P, ESearchCase::IgnoreCase) ? 3 : (W.StartsWith(P, ESearchCase::IgnoreCase) ? 2 : 0));
+			}
+			if (Rank == 0 && B.Name.Contains(P, ESearchCase::IgnoreCase))
+			{
+				Rank = 1;
+			}
+		}
+		if (Rank > BestRank)
+		{
+			Best = &B;
+			BestRank = Rank;
 		}
 	}
-	return nullptr;
+	return Best;
 }
 
 float UBoxingGameInstanceSubsystem::RingWeightKg(const FRosterBoxer& Red, const FRosterBoxer& Blue, bool bProFight) const
@@ -374,6 +457,37 @@ const FPairForecast& UBoxingGameInstanceSubsystem::ForecastPair(const FRosterBox
 	UE_LOG(LogTemp, Log, TEXT("UI: прогноз %s vs %s (%d р., вес %.1f) — %.0f%% / %.0f%% / ничья %.0f%%, %d боёв за %.0f мс"), *Red.Name, *Blue.Name,
 		Rounds, F.RingKg, F.Odds.RedWin * 100.f, F.Odds.BlueWin * 100.f, F.Odds.Draw * 100.f, F.Odds.Fights, (FPlatformTime::Seconds() - T0) * 1000.0);
 	return ForecastCache.Add(Key, F);
+}
+
+const FPlayerForecast* UBoxingGameInstanceSubsystem::PlayerForecast(const FRosterBoxer& Red, const FRosterBoxer& Blue, int32 Rounds, bool bProRules) const
+{
+	const FString Key = FString::Printf(TEXT("%s|%s|%d|%d"), *Red.Id, *Blue.Id, Rounds, bProRules ? 1 : 0);
+	if (const TSharedPtr<FPlayerForecastJob, ESPMode::ThreadSafe>* Hit = PlayerForecastJobs.Find(Key))
+	{
+		return (*Hit)->bDone.load(std::memory_order_acquire) ? &(*Hit)->Result : nullptr;
+	}
+	// Тот же вес боя и та же проекция, что в ForecastPair/ApplyToFightMode.
+	const bool bProFight = Rounds > 3;
+	const float RingKg = RingWeightKg(Red, Blue, bProFight);
+	const FFighterSetup R = BoxingFightProfile::ProjectToWeight(Red.ToPreset(bProFight).ToSetup(true), RingKg);
+	const FFighterSetup B = BoxingFightProfile::ProjectToWeight(Blue.ToPreset(bProFight).ToSetup(true), RingKg);
+	TSharedPtr<FPlayerForecastJob, ESPMode::ThreadSafe> Job = MakeShared<FPlayerForecastJob, ESPMode::ThreadSafe>();
+	PlayerForecastJobs.Add(Key, Job);
+	const FString Names = FString::Printf(TEXT("%s vs %s (%d р., вес %.1f)"), *Red.Name, *Blue.Name, Rounds, RingKg);
+	// Ядро и бот — plain C++ без глобального состояния: в пуле потоков безопасно. Job держит общий указатель — переживёт подсистему.
+	Async(EAsyncExecution::ThreadPool, [Job, R, B, Rounds, bProRules, Names]()
+	{
+		const double T0 = FPlatformTime::Seconds();
+		FPlayerForecast F;
+		F.Odds = BoxingFightProfile::PredictForPlayer(R, B, Rounds, bProRules);
+		F.bValid = F.Odds.Average.Fights > 0;
+		F.Ms = static_cast<float>((FPlatformTime::Seconds() - T0) * 1000.0);
+		Job->Result = F;
+		Job->bDone.store(true, std::memory_order_release);
+		UE_LOG(LogTemp, Log, TEXT("UI: шансы при твоей игре %s — новичок %.0f%%, обычная игра %.0f%% (ничья %.0f%%), сильный %.0f%%; %.0f мс в фоне"),
+			*Names, F.Odds.Novice.RedWin * 100.f, F.Odds.Average.RedWin * 100.f, F.Odds.Average.Draw * 100.f, F.Odds.Strong.RedWin * 100.f, F.Ms);
+	});
+	return nullptr;
 }
 
 int32 UBoxingGameInstanceSubsystem::AutoProRounds(const FRosterBoxer& A, const FRosterBoxer& B)
@@ -445,46 +559,270 @@ void UBoxingGameInstanceSubsystem::Rematch(const UObject* WorldContext)
 // ======================================================================
 // Загрузка боя (S-63)
 // ======================================================================
+void UBoxingGameInstanceSubsystem::StartFightPreloadAfter(ULevelStreaming* Bg)
+{
+	MenuBgAt = FPlatformTime::Seconds();
+	if (!Bg || PreloadStartAt > 0.0 || FParse::Param(FCommandLine::Get(), TEXT("BoxPreloadEarly"))) // A/B: как в S-63 — сразу
+	{
+		StartFightPreload();
+		return;
+	}
+	MenuBg = Bg;
+	// Фону — вся очередь асинхронной загрузки и бюджет побольше: меню на старте статично, а арена за ним важнее плавности.
+	SetAsyncBudget(60.f);
+	if (MenuBgTicker.IsValid())
+	{
+		FTSTicker::GetCoreTicker().RemoveTicker(MenuBgTicker);
+	}
+	MenuBgTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateWeakLambda(this, [this](float)
+	{
+		ULevelStreaming* L = MenuBg.Get();
+		const double Waited = FPlatformTime::Seconds() - MenuBgAt;
+		const bool bShown = L && L->IsLevelVisible();
+		if (!bShown && L && Waited < 8.0 && PreloadStartAt <= 0.0)
+		{
+			return true;
+		}
+		UE_LOG(LogTemp, Log, TEXT("LOAD: фон меню %s через %.2f с (от старта процесса %.2f с)"), bShown ? TEXT("показан") : TEXT("не дождались"),
+			Waited, FPlatformTime::Seconds() - GStartTime);
+		MenuBgTicker.Reset();
+		StartFightPreload();
+		if (IsFightPreloadDone())
+		{
+			SetAsyncBudget(DefaultAsyncBudget); // грузить нечего — бюджет фона вернуть
+		}
+		return false;
+	}));
+}
+
 void UBoxingGameInstanceSubsystem::StartFightPreload()
 {
-	if (PreloadHandle.IsValid() || FParse::Param(FCommandLine::Get(), TEXT("BoxNoPreload")))
+	if (PreloadStartAt > 0.0 && (!IsFightPreloadDone() || !bPreloadPartial))
+	{
+		return; // уже идёт или всё загружено (недогруженное после «только пары» — доберём ниже)
+	}
+	bPreloadPartial = false;
+	if (FParse::Param(FCommandLine::Get(), TEXT("BoxNoPreload")))
 	{
 		return;
 	}
 	PreloadStartAt = FPlatformTime::Seconds();
+	PreloadDoneAt = 0.0;
 	// Что грузит бой: класс бойца (BP_Boxer → AnimBP GASP → базы Motion Matching, манекен), рефери, облики углов и
 	// рефери (+ грумы), монтажи ударов, звук, ввод, ретаргетер. Папки — через реестр ассетов: новое в них (облики
-	// tech-artist, клипы game-feel) подхватится само.
-	TArray<FSoftObjectPath> Paths = {
-		FSoftObjectPath(TEXT("/Game/Boxing/Blueprints/BP_Boxer.BP_Boxer_C")),
-		FSoftObjectPath(TEXT("/Game/Boxing/Blueprints/BP_Referee.BP_Referee_C")),
-		FSoftObjectPath(TEXT("/Game/MetaHumans/Common/Common/Rigs/RTG_UEFN_to_Metahuman_nrw.RTG_UEFN_to_Metahuman_nrw")),
-	};
-	const TArray<FString> Folders = {TEXT("/Game/BoxingLocal/Characters"), TEXT("/Game/BoxingLocal/Anim"), TEXT("/Game/Boxing/Anim"),
-		TEXT("/Game/Boxing/Audio"), TEXT("/Game/Boxing/Input"), TEXT("/Game/Boxing/Characters")};
+	// tech-artist, клипы game-feel) подхватится само. S-67: кусками — сначала общее для любого боя, потом облики по одному,
+	// в конце прочее (грумы, кожа): по «В бой» до конца очереди догружается только своё для пары.
 	IAssetRegistry& AR = FModuleManager::LoadModuleChecked<FAssetRegistryModule>(TEXT("AssetRegistry")).Get();
-	AR.ScanPathsSynchronous(Folders, false);
-	for (const FString& F : Folders)
+	auto Folder = [&AR](const TCHAR* F, TArray<FSoftObjectPath>& Out)
 	{
+		AR.ScanPathsSynchronous({FString(F)}, false);
 		TArray<FAssetData> Assets;
-		AR.GetAssetsByPath(FName(*F), Assets, true);
+		AR.GetAssetsByPath(FName(F), Assets, true);
+		Assets.Sort([](const FAssetData& A, const FAssetData& B) { return A.PackageName.LexicalLess(B.PackageName); });
 		for (const FAssetData& A : Assets)
 		{
 			if (!A.IsRedirector())
 			{
-				Paths.AddUnique(A.GetSoftObjectPath());
+				Out.AddUnique(A.GetSoftObjectPath());
 			}
 		}
+	};
+	auto NotLoaded = [](TArray<FSoftObjectPath>& Paths)
+	{
+		Paths.RemoveAll([](const FSoftObjectPath& P) { return P.ResolveObject() != nullptr; });
+	};
+
+	TArray<FPreloadChunk> Q;
+	// Ядро — несколькими кусками (нужно любому бою, «В бой» их не отбрасывает): по логу видно, что сколько стоит.
+	Q.Add({TEXT("BP_Boxer (AnimBP, Motion Matching)"), {FSoftObjectPath(TEXT("/Game/Boxing/Blueprints/BP_Boxer.BP_Boxer_C"))}, true});
+	Q.Add({TEXT("ретаргетер"), {FSoftObjectPath(TEXT("/Game/MetaHumans/Common/Common/Rigs/RTG_UEFN_to_Metahuman_nrw.RTG_UEFN_to_Metahuman_nrw"))}, true});
+	for (const TCHAR* F : {TEXT("/Game/BoxingLocal/Anim"), TEXT("/Game/Boxing/Anim"), TEXT("/Game/Boxing/Input"), TEXT("/Game/Boxing/Audio"),
+		TEXT("/Game/Boxing/Characters")})
+	{
+		FPreloadChunk C{FString(F), {}, true};
+		Folder(F, C.Paths);
+		Q.Add(MoveTemp(C));
 	}
-	PreloadRequested = Paths.Num();
-	SetAsyncBudget(25.f);
-	PreloadHandle = Streamable.RequestAsyncLoad(Paths, FStreamableDelegate::CreateWeakLambda(this, [this]()
+	Q.Add({TEXT("рефери"), {FSoftObjectPath(TEXT("/Game/Boxing/Blueprints/BP_Referee.BP_Referee_C"))}});
+	TArray<FSoftObjectPath> Chars;
+	Folder(TEXT("/Game/BoxingLocal/Characters"), Chars);
+	FPreloadChunk Rest{TEXT("грумы и кожа")};
+	// Облики — каждый своим куском (общие зависимости грузит первый, остальные — быстро); профи-облики первыми.
+	TArray<FSoftObjectPath> Looks;
+	for (const FSoftObjectPath& P : Chars)
+	{
+		(P.GetAssetName().StartsWith(TEXT("BP_")) ? Looks : Rest.Paths).Add(P);
+	}
+	Looks.StableSort([](const FSoftObjectPath& A, const FSoftObjectPath& B)
+	{
+		auto Rank = [](const FString& N) { return N.Contains(TEXT("Referee")) ? 2 : (N.Contains(TEXT("_Amateur")) || N.Contains(TEXT("_Female")) ? 1 : 0); };
+		return Rank(A.GetAssetName()) < Rank(B.GetAssetName());
+	});
+	for (const FSoftObjectPath& P : Looks)
+	{
+		Q.Add({P.GetAssetName(), {P}});
+	}
+	Q.Add(MoveTemp(Rest));
+
+	PreloadQueue.Reset();
+	PreloadQueueTotal = 0;
+	PreloadQueueDone = 0;
+	PreloadRequested = 0;
+	for (FPreloadChunk& C : Q)
+	{
+		PreloadRequested += C.Paths.Num();
+		NotLoaded(C.Paths); // второй вход в меню: удержанное не грузим
+		if (C.Paths.Num() > 0)
+		{
+			PreloadQueueTotal += C.Paths.Num();
+			PreloadQueue.Add(MoveTemp(C));
+		}
+	}
+	{
+		float MenuMs = 25.f; // меню живое; -BoxMenuBudget=<мс> — замеры
+		FParse::Value(FCommandLine::Get(), TEXT("BoxMenuBudget="), MenuMs);
+		SetAsyncBudget(MenuMs);
+	}
+	UE_LOG(LogTemp, Log, TEXT("LOAD: предзагрузка боя — %d ассетов, к загрузке %d в %d кусках (асинхронно)"), PreloadRequested,
+		PreloadQueueTotal, PreloadQueue.Num());
+	StartNextPreloadChunk();
+	if (!PreloadTicker.IsValid())
+	{
+		PreloadTicker = FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateUObject(this, &UBoxingGameInstanceSubsystem::TickPreload));
+	}
+}
+
+void UBoxingGameInstanceSubsystem::StartNextPreloadChunk()
+{
+	PreloadHandle.Reset();
+	if (PreloadQueue.Num() == 0)
+	{
+		return;
+	}
+	FPreloadChunk C = MoveTemp(PreloadQueue[0]);
+	PreloadQueue.RemoveAt(0);
+	PreloadChunkName = C.Name;
+	PreloadChunkAt = FPlatformTime::Seconds();
+	PreloadChunkSize = C.Paths.Num();
+	// Обычный приоритет (не High): фон меню и то, что грузит сама игра, — не в очереди за предзагрузкой.
+	PreloadHandle = Streamable.RequestAsyncLoad(C.Paths, FStreamableDelegate(), FStreamableManager::DefaultAsyncLoadPriority, true);
+	if (PreloadHandle.IsValid())
+	{
+		PreloadKeep.Add(PreloadHandle);
+	}
+}
+
+bool UBoxingGameInstanceSubsystem::TickPreload(float Dt)
+{
+	auto Done = [](const TSharedPtr<FStreamableHandle>& H) { return !H.IsValid() || H->HasLoadCompleted() || H->WasCanceled(); };
+	if (PreloadHandle.IsValid() && Done(PreloadHandle))
+	{
+		const double Now = FPlatformTime::Seconds();
+		UE_LOG(LogTemp, Log, TEXT("LOAD: кусок «%s» (%d) — %.2f с"), *PreloadChunkName, PreloadChunkSize, Now - PreloadChunkAt);
+		PreloadQueueDone += PreloadChunkSize;
+		StartNextPreloadChunk();
+	}
+	if (Done(PreloadHandle) && PreloadQueue.Num() == 0 && Done(PairHandle))
 	{
 		PreloadDoneAt = FPlatformTime::Seconds();
 		SetAsyncBudget(DefaultAsyncBudget);
-		UE_LOG(LogTemp, Log, TEXT("LOAD: предзагрузка боя готова — %d ассетов за %.2f с"), PreloadRequested, PreloadDoneAt - PreloadStartAt);
-	}), FStreamableManager::AsyncLoadHighPriority, true);
-	UE_LOG(LogTemp, Log, TEXT("LOAD: предзагрузка боя — %d ассетов (асинхронно)"), PreloadRequested);
+		UE_LOG(LogTemp, Log, TEXT("LOAD: предзагрузка боя готова — %d из %d ассетов за %.2f с (от старта процесса %.2f с)"), PreloadQueueDone + PairRequested,
+			PreloadRequested, PreloadDoneAt - PreloadStartAt, PreloadDoneAt - GStartTime);
+		PreloadTicker.Reset();
+		return false;
+	}
+	return true;
+}
+
+TArray<FSoftObjectPath> UBoxingGameInstanceSubsystem::PairAssetPaths() const
+{
+	// То же, что выберут ABoxingFightGameMode::VisualPathFor / FightReferee / UBoxerLookLibrary для этой пары.
+	TArray<FSoftObjectPath> Out;
+	const bool bAmateur = Exhibition.Rounds <= 3;
+	Out.Add(FSoftObjectPath(TEXT("/Game/Boxing/Blueprints/BP_Referee.BP_Referee_C")));
+	Out.Add(FSoftObjectPath(bAmateur ? TEXT("/Game/BoxingLocal/Characters/BP_RefereeLook_Amateur.BP_RefereeLook_Amateur_C")
+		: TEXT("/Game/BoxingLocal/Characters/BP_RefereeLook_Pro.BP_RefereeLook_Pro_C")));
+	for (int32 I = 0; I < 2; ++I)
+	{
+		const FRosterBoxer* B = FindById(I == 0 ? Exhibition.RedId : Exhibition.BlueId);
+		if (!B)
+		{
+			continue;
+		}
+		const TCHAR* Corner = I == 0 ? TEXT("Red") : TEXT("Blue");
+		FString Kind;
+		if (bAmateur)
+		{
+			Kind = (B->bFemale || B->Age < 19) ? TEXT("_Amateur") : TEXT("_AmateurElite");
+		}
+		else if (B->bFemale)
+		{
+			Kind = TEXT("_Female");
+		}
+		const FString Name = FString::Printf(TEXT("BP_BoxerLook_%s%s"), Corner, *Kind);
+		Out.Add(FSoftObjectPath(FString::Printf(TEXT("/Game/BoxingLocal/Characters/%s.%s_C"), *Name, *Name)));
+		FBoxerLook Look;
+		if (UBoxerLookLibrary::FindLook(B->Id, B->Name, Look))
+		{
+			for (const FBoxerHairLook* H : {&Look.Hair, &Look.Brows, &Look.Facial})
+			{
+				for (const FString* P : {&H->Groom, &H->Binding, &H->StubbleGroom, &H->StubbleBinding})
+				{
+					if (!P->IsEmpty())
+					{
+						Out.AddUnique(FSoftObjectPath(*P));
+					}
+				}
+			}
+			for (const TMap<FString, FString>* M : {&Look.SkinFaceTex, &Look.SkinBodyTex})
+			{
+				for (const TPair<FString, FString>& T : *M)
+				{
+					Out.AddUnique(FSoftObjectPath(T.Value));
+				}
+			}
+		}
+	}
+	Out.RemoveAll([](const FSoftObjectPath& P) { return !P.IsValid() || P.ResolveObject() != nullptr; });
+	return Out;
+}
+
+void UBoxingGameInstanceSubsystem::RequestPairOnly()
+{
+	if (PreloadQueue.Num() == 0 || FParse::Param(FCommandLine::Get(), TEXT("BoxPreloadAll")))
+	{
+		return; // очередь и так кончается на куске в полёте
+	}
+	int32 Dropped = 0;
+	for (const FPreloadChunk& C : PreloadQueue)
+	{
+		Dropped += C.bCore ? 0 : C.Paths.Num();
+	}
+	PreloadQueue.RemoveAll([](const FPreloadChunk& C) { return !C.bCore; }); // ядро нужно любому бою — оставляем
+	bPreloadPartial = Dropped > 0;
+	const TArray<FSoftObjectPath> Pair = PairAssetPaths();
+	PairRequested = Pair.Num();
+	if (Pair.Num() > 0)
+	{
+		PairHandle = Streamable.RequestAsyncLoad(Pair, FStreamableDelegate(), FStreamableManager::AsyncLoadHighPriority, true);
+		if (PairHandle.IsValid())
+		{
+			PreloadKeep.Add(PairHandle);
+		}
+	}
+	UE_LOG(LogTemp, Log, TEXT("LOAD: «В бой» до конца предзагрузки — догружаю только пару (%d ассетов), отложено %d (догрузятся в меню)"),
+		PairRequested, Dropped);
+}
+
+void UBoxingGameInstanceSubsystem::SetWorldRendering(UWorld* W, bool bOn)
+{
+	UGameViewportClient* V = W ? W->GetGameViewport() : nullptr;
+	V = V ? V : (GEngine ? GEngine->GameViewport.Get() : nullptr);
+	if (V && V->bDisableWorldRendering == bOn)
+	{
+		V->bDisableWorldRendering = !bOn;
+		UE_LOG(LogTemp, Log, TEXT("LOAD: рендер мира %s"), bOn ? TEXT("включён") : TEXT("выключен под экраном загрузки"));
+	}
 }
 
 void UBoxingGameInstanceSubsystem::SetAsyncBudget(float Ms)
@@ -503,12 +841,24 @@ void UBoxingGameInstanceSubsystem::SetAsyncBudget(float Ms)
 
 bool UBoxingGameInstanceSubsystem::IsFightPreloadDone() const
 {
-	return !PreloadHandle.IsValid() || PreloadHandle->HasLoadCompleted() || PreloadHandle->WasCanceled();
+	auto Done = [](const TSharedPtr<FStreamableHandle>& H) { return !H.IsValid() || H->HasLoadCompleted() || H->WasCanceled(); };
+	return Done(PreloadHandle) && PreloadQueue.Num() == 0 && Done(PairHandle);
 }
 
 float UBoxingGameInstanceSubsystem::GetFightPreloadProgress() const
 {
-	return PreloadHandle.IsValid() ? PreloadHandle->GetProgress() : 1.f;
+	if (IsFightPreloadDone())
+	{
+		return 1.f;
+	}
+	const float Cur = PreloadHandle.IsValid() ? PreloadHandle->GetProgress() * PreloadChunkSize : 0.f;
+	if (PairHandle.IsValid())
+	{
+		// Пара: остаток куска в полёте + пара.
+		const float Left = (PreloadHandle.IsValid() ? PreloadChunkSize : 0) + PairRequested;
+		return Left > 0.f ? (Cur + PairHandle->GetProgress() * PairRequested) / Left : 1.f;
+	}
+	return PreloadQueueTotal > 0 ? FMath::Clamp((PreloadQueueDone + Cur) / PreloadQueueTotal, 0.f, 1.f) : 1.f;
 }
 
 FString UBoxingGameInstanceSubsystem::LoadingRedName() const
@@ -581,10 +931,21 @@ void UBoxingGameInstanceSubsystem::BeginRingTransition(const UObject* WorldConte
 	TransitionWhat = What;
 	TransitionWorld = W;
 	TipIndex = FMath::RandRange(0, 1000);
-	StartFightPreload();
+	// Не начата (L_Ring из меню сразу после старта) — начать. Отложенное после «только пары» здесь НЕ добираем: реванш грузил бы
+	// по куску за бой (+1 облик и ~250 UObject на реванш, похоже на утечку) — доберёт следующий вход в меню.
+	if (PreloadStartAt <= 0.0)
+	{
+		StartFightPreload();
+	}
 	if (!IsFightPreloadDone())
 	{
-		SetAsyncBudget(150.f); // экран загрузки: грузим почти на полной скорости (полоса всё равно обновляется)
+		RequestPairOnly(); // S-67: холодный «В бой» — ждём ядро и свою пару, а не все облики
+		float LoadMs = 150.f; // экран загрузки: грузим почти на полной скорости (полоса всё равно обновляется); -BoxLoadBudget=<мс>
+		FParse::Value(FCommandLine::Get(), TEXT("BoxLoadBudget="), LoadMs);
+		SetAsyncBudget(LoadMs);
+		// S-67: экран загрузки непрозрачный, а арена меню под ним рендерилась (~60 мс кадра из ~210 при 150 мс загрузки):
+		// мир не рисуем, пока он закрыт, — весь кадр уходит на загрузку. Снова рисуем в OnPostLoadMap (прогрев PSO боя).
+		SetWorldRendering(W, FParse::Param(FCommandLine::Get(), TEXT("BoxLoadRenderWorld")));
 	}
 	// Экран загрузки — сразу (он же последний кадр перед LoadMap, если ассеты уже в памяти).
 	if (APlayerController* PC = W->GetFirstPlayerController())
@@ -714,8 +1075,38 @@ void UBoxingGameInstanceSubsystem::OnPreLoadMap(const FString& MapName)
 
 void UBoxingGameInstanceSubsystem::OnPostLoadMap(UWorld* World)
 {
+	SetWorldRendering(World, true);
 	const double Now = FPlatformTime::Seconds();
 	const FString Map = World ? World->GetMapName() : FString();
+	{
+		// S-67: контроль роста памяти между боями (плейтест: +15–20 МБ за реванш) — память процесса и число UObject.
+		const FPlatformMemoryStats M = FPlatformMemory::GetStats();
+		UE_LOG(LogTemp, Log, TEXT("MEM: карта %s — %.0f МБ (пик %.0f), UObject %d, удержано %d"), *Map, M.UsedPhysical / 1048576.0,
+			M.PeakUsedPhysical / 1048576.0, GUObjectArray.GetObjectArrayNumMinusAvailable(), Resident.Num());
+		// -BoxObjDiff: какие классы UObject прибавились с прошлой карты (поиск удержания между боями).
+		static const bool bDiff = FParse::Param(FCommandLine::Get(), TEXT("BoxObjDiff"));
+		if (bDiff)
+		{
+			static TMap<FName, int32> Prev;
+			TMap<FName, int32> Cur;
+			for (FThreadSafeObjectIterator It; It; ++It)
+			{
+				Cur.FindOrAdd(It->GetClass()->GetFName())++;
+			}
+			if (Prev.Num() > 0)
+			{
+				for (const TPair<FName, int32>& P : Cur)
+				{
+					const int32 D = P.Value - Prev.FindRef(P.Key);
+					if (D > 0)
+					{
+						UE_LOG(LogTemp, Log, TEXT("MEM: +%d %s (всего %d)"), D, *P.Key.ToString(), P.Value);
+					}
+				}
+			}
+			Prev = MoveTemp(Cur);
+		}
+	}
 	if (bTransitionPending)
 	{
 		UE_LOG(LogTemp, Log, TEXT("LOAD: %s — карта %s: LoadMap %.2f с, от нажатия %.2f с"), *TransitionWhat, *Map,

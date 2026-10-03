@@ -445,6 +445,9 @@ public:
 	// Где ляжет тело (мир, пол ринга): голова и таз ИТОГОВОЙ позы клипа с доворотом/сдвигом падения — известно с первого
 	// кадра нокдауна (рефери обходит, камера нокдауна наводится). false — не лежит / раскладки нет.
 	bool GetLyingBody(FVector& OutHead, FVector& OutPelvis) const;
+	// S-66: то же целиком — стопы (середина) и конечности (кисти, колени) итоговой позы: рефери обходит тело капсулой
+	// «стопы → таз → голова», а не двумя точками (в KO вставал ногой между бёдрами лежащего). false — как GetLyingBody.
+	bool GetLyingLayout(FVector& OutHead, FVector& OutPelvis, FVector& OutFeet, TArray<FVector>& OutLimbs) const;
 	// Текущий визуальный сдвиг точки (см) и доворот курса (град) падения — отладка/метрики.
 	FVector2D GetFallOffset() const { return FallOffsetNow; }
 	float GetFallTurn() const { return FallTurnNow; }
@@ -505,8 +508,25 @@ protected:
 	virtual void BeginPlay() override;
 	virtual void Tick(float DeltaSeconds) override;
 	virtual void PossessedBy(AController* NewController) override;
+	virtual void EndPlay(const EEndPlayReason::Type Reason) override;
 
 private:
+	// S-66 (-BoxFootLog): скольжение ступней видимого меша в опоре (ступня у настила), отдельно на боковом ходу —
+	// проверка левшей (зеркало позы GASP меняет сторону шага). Сводка FEET в конце.
+	void UpdateFootProbe(float DeltaSeconds);
+	void LogFootProbe();
+	struct FFootProbe
+	{
+		FVector Prev[2] = {FVector::ZeroVector, FVector::ZeroVector};
+		bool bPrev = false;
+		float MinZ = 1e9f;
+		double SlideSum[2] = {0, 0};   // см пути в опоре: [0] прочее, [1] боковой ход
+		double PlantT[2] = {0, 0};     // с в опоре
+		double MoveT[2] = {0, 0};      // с хода (всего), по видам
+		int32 Fast[2] = {0, 0};        // кадров опоры со скольжением > 20 см/с
+		int32 Frames[2] = {0, 0};
+		TArray<float> Speeds[2];       // см/с каждого кадра опоры (медиана — устойчиво к ошибкам классификации)
+	} FootProbe;
 	void LoadDefaultMontages();
 	UAnimMontage* FindMontage(const TCHAR* Name) const;
 	UAnimInstance* GetAnimInst() const;
@@ -612,6 +632,9 @@ private:
 		TArray<FVector> Pts; // точки тела по кадрам клипа (компонентное пространство логического меша, без масштаба облика)
 		FVector Head = FVector::ZeroVector;   // итоговая поза
 		FVector Pelvis = FVector::ZeroVector;
+		FVector Feet = FVector::ZeroVector; // S-66: середина стоп итоговой позы
+		bool bHasFeet = false;
+		TArray<FVector> Limbs;              // S-66: кисти и колени итоговой позы
 		float FloorTime = -1.f; // с от начала монтажа: таз опустился на настил
 		bool bValid = false;
 	};

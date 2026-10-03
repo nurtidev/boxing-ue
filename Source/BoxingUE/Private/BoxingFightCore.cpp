@@ -421,7 +421,15 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	Phase = EFightPhase::Fighting;
 	bHasDown = false;
 	Down = FDownState();
-	for (int32 K = 0; K < 3; ++K) JudgeCards[K] = FJudgeCard();
+	for (int32 K = 0; K < MAX_JUDGES; ++K)
+	{
+		JudgeCards[K] = FJudgeCard();
+		JudgeView[K] = 0;
+		TieNominee[K] = -1;
+	}
+	// Любители — 5 судей (WB), профи — 3. Отдельный ГСЧ судей: основной поток боя не меняется (S-65).
+	NumJudges = (Config.bAllowDraw || Config.bProRules) ? 3 : MAX_JUDGES;
+	JudgeRng.Seed((Config.Seed != 0 ? Config.Seed : 1u) ^ 0x6a09e667u);
 	PerRound.Reset();
 	bRoundScored = false;
 	for (int32 I = 0; I < 2; ++I)
@@ -1177,11 +1185,41 @@ void FBoxingFightCore::ScoreRound()
 
 	FRoundResult RR;
 	RR.Round = Round;
-	for (int32 Jd = 0; Jd < 3; ++Jd)
+	for (int32 Jd = 0; Jd < NumJudges; ++Jd)
 	{
 		int32 Ca = 10;
 		int32 Cb = 10;
-		if (RoundKd[0] || RoundKd[1])
+		if (!bPro && !bAllowDraw)
+		{
+			// Любители — World Boxing Competition Rules (ноябрь 2024), п. 7.4: «Every round must have a declared winner and no round
+			// can be scored as a draw» — победителю 10, проигравшему 9…7; п. 7.3: 10-8 — явный победитель (может включать нокдаун).
+			// Судьи 1–3 тянут разброс из Rng ровно там же, где раньше (поток боя прежний), судьи 4–5 и «ровные» раунды — из JudgeRng.
+			FBoxingRng& JR = Jd < 3 ? Rng : JudgeRng;
+			double View;    // восприятие раунда судьёй: + — за красного
+			int32 Loser = 9;
+			if (RoundKd[0] != RoundKd[1])
+			{
+				// Больше нокдаунов — проиграл раунд: 10-8, второй лишний нокдаун — 10-7 (как прежде у веба: 8 − (kd − 1)).
+				const int32 Diff = FMath::Abs(RoundKd[0] - RoundKd[1]);
+				Loser = FMath::Max(7, 9 - Diff);
+				View = (RoundKd[1] > RoundKd[0] ? 1.0 : -1.0) * (CLEAR_MARGIN + Diff * 4.0) + Margin;
+			}
+			else if (RoundKd[0] > 0 || FMath::Abs(Margin) >= CLEAR_MARGIN)
+			{
+				// Явный раунд (или равные нокдауны) — все видят одинаково; почти ровный при равных нокдаунах — каждый по-своему.
+				View = FMath::Abs(Margin) >= 0.5 ? Margin : Margin + JudgeRng.Range(-1.6, 1.6) + SeasonBias;
+			}
+			else
+			{
+				// Близкий раунд — каждый судья видит чуть по-своему; ничьей нет — кто хоть чуть лучше, тот и взял.
+				View = Margin + JR.Range(-1.6, 1.6) + SeasonBias;
+			}
+			if (View == 0) View = TotLanded[0] >= TotLanded[1] ? 1e-6 : -1e-6;
+			JudgeView[Jd] += View;
+			if (View > 0) Cb = Loser;
+			else Ca = Loser;
+		}
+		else if (RoundKd[0] || RoundKd[1])
 		{
 			if (RoundKd[1]) Cb = 8 - (RoundKd[1] - 1);
 			if (RoundKd[0]) Ca = 8 - (RoundKd[0] - 1);
@@ -1209,7 +1247,7 @@ void FBoxingFightCore::ScoreRound()
 		}
 		else
 		{
-			// Близкий раунд — каждый судья видит чуть по-своему.
+			// Ничья возможна, но не профи-правила (сверка зеркала веба: bAllowDraw без bProRules) — судейство веба.
 			const double Perceived = Margin + Rng.Range(-1.6, 1.6) + SeasonBias;
 			if (FMath::Abs(Perceived) < 0.5)
 			{
@@ -1237,13 +1275,37 @@ void FBoxingFightCore::DecideByCards()
 {
 	int32 RedJ = 0;
 	int32 BlueJ = 0;
-	for (int32 Jd = 0; Jd < 3; ++Jd)
+	for (int32 Jd = 0; Jd < NumJudges; ++Jd)
 	{
 		if (JudgeCards[Jd].Red > JudgeCards[Jd].Blue) ++RedJ;
 		else if (JudgeCards[Jd].Blue > JudgeCards[Jd].Red) ++BlueJ;
 	}
-	const int32 EvenJ = 3 - RedJ - BlueJ;
+	const int32 EvenJ = NumJudges - RedJ - BlueJ;
 
+	if (!bAllowDraw)
+	{
+		// Любители — World Boxing п. 9.1: каждый судья называет победителя по своей сумме. Равная сумма (возможна только при 10-8)
+		// — судья по требованию называет победителя сам (п. 9.1.5), если без этого решения нет: 1 ровная карта и остальные 2–2;
+		// 2 ровные и остальные не единогласны; 3 и больше ровных. Его выбор — по своему восприятию боя (JudgeView).
+		const bool bNominate = (EvenJ == 1 && RedJ == BlueJ) || (EvenJ == 2 && RedJ != 3 && BlueJ != 3) || EvenJ >= 3;
+		if (bNominate)
+		{
+			for (int32 Jd = 0; Jd < NumJudges; ++Jd)
+			{
+				if (JudgeCards[Jd].Red != JudgeCards[Jd].Blue) continue;
+				const double V = JudgeView[Jd];
+				const int32 Pick = V != 0 ? (V > 0 ? 0 : 1) : (TotLanded[0] != TotLanded[1] ? (TotLanded[0] > TotLanded[1] ? 0 : 1)
+					: (JudgeRng.Next() < 0.5 ? 0 : 1));
+				TieNominee[Jd] = Pick;
+				++(Pick == 0 ? RedJ : BlueJ);
+			}
+		}
+		const int32 Winner = RedJ > BlueJ ? 0 : 1; // после п. 9.1.5 равенства голосов не бывает (5 судей)
+		const int32 WJ = Winner == 0 ? RedJ : BlueJ;
+		// п. 9.1.3: единогласно — все пятеро назвали одного; иначе раздельное (3–2, 4–1, 4 + ничья, 3 + две ничьи).
+		BuildResult(Winner, EFightMethod::Decision, WJ == NumJudges ? EDecisionKind::Unanimous : EDecisionKind::Split, 0);
+		return;
+	}
 	if (RedJ >= 2 || BlueJ >= 2)
 	{
 		const int32 Winner = RedJ >= 2 ? 0 : 1;
@@ -1252,30 +1314,11 @@ void FBoxingFightCore::DecideByCards()
 		const EDecisionKind Dk = WJ == 3 ? EDecisionKind::Unanimous : (LJ == 0 ? EDecisionKind::Majority : EDecisionKind::Split);
 		BuildResult(Winner, EFightMethod::Decision, Dk, 0);
 	}
-	else if (bAllowDraw)
+	else
 	{
 		const EDecisionKind Dk = EvenJ == 3 ? EDecisionKind::DrawUnanimous
 			: (RedJ == BlueJ ? EDecisionKind::DrawSplit : EDecisionKind::DrawMajority);
 		BuildResult(-1, EFightMethod::Draw, Dk, 0);
-	}
-	else
-	{
-		// Любители: ничьей нет — по суммам карт, затем по попаданиям.
-		int32 TotRed = 0;
-		int32 TotBlue = 0;
-		for (int32 Jd = 0; Jd < 3; ++Jd)
-		{
-			TotRed += JudgeCards[Jd].Red;
-			TotBlue += JudgeCards[Jd].Blue;
-		}
-		int32 Winner;
-		if (TotRed != TotBlue) Winner = TotRed > TotBlue ? 0 : 1;
-		else Winner = TotLanded[0] >= TotLanded[1] ? 0 : 1;
-		const int32 WJ = Winner == 0 ? RedJ : BlueJ;
-		const int32 LJ = Winner == 0 ? BlueJ : RedJ;
-		const EDecisionKind Dk = WJ == 3 ? EDecisionKind::Unanimous
-			: (WJ > LJ ? (LJ == 0 ? EDecisionKind::Majority : EDecisionKind::Split) : EDecisionKind::TieBreak);
-		BuildResult(Winner, EFightMethod::Decision, Dk, 0);
 	}
 }
 
@@ -1295,7 +1338,12 @@ void FBoxingFightCore::BuildResult(int32 WinnerIndex, EFightMethod Method, EDeci
 	Result.Method = Method;
 	Result.Decision = Decision;
 	Result.StoppedRound = StoppedRound;
-	for (int32 Jd = 0; Jd < 3; ++Jd) Result.JudgeTotals[Jd] = JudgeCards[Jd];
+	for (int32 Jd = 0; Jd < MAX_JUDGES; ++Jd)
+	{
+		Result.JudgeTotals[Jd] = JudgeCards[Jd];
+		Result.TieNominee[Jd] = TieNominee[Jd];
+	}
+	Result.NumJudges = NumJudges;
 	for (int32 I = 0; I < 2; ++I)
 	{
 		Result.Knockdowns[I] = Rt[I].Kd;
@@ -1772,7 +1820,8 @@ FFightSnapshot FBoxingFightCore::GetSnapshot() const
 	S.TimeLeft = static_cast<float>(FMath::Max(0.0, TimeLeft));
 	S.BreakLeft = static_cast<float>(Phase == EFightPhase::Between ? FMath::Max(0.0, BreakLeft) : 0.0);
 	S.Distance = static_cast<float>(Distance());
-	for (int32 Jd = 0; Jd < 3; ++Jd) S.JudgeTotals[Jd] = JudgeCards[Jd];
+	for (int32 Jd = 0; Jd < MAX_JUDGES; ++Jd) S.JudgeTotals[Jd] = JudgeCards[Jd];
+	S.NumJudges = NumJudges;
 	S.bHasResult = bHasResult;
 	S.bCorners = bCorners;
 	S.Stage.Kind = Stage.Kind;

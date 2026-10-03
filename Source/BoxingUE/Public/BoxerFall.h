@@ -26,6 +26,11 @@ namespace BoxerFall
 		TArray<FVector2D> Pts;
 		FVector2D Head = FVector2D::ZeroVector;
 		FVector2D Pelvis = FVector2D::ZeroVector;
+		// S-66: итоговая поза — середина стоп и конечности (кисти, колени): тело лежащего для рефери — капсула
+		// «стопы → таз → голова» плюс конечности.
+		FVector2D Feet = FVector2D::ZeroVector;
+		bool bHasFeet = false;
+		TArray<FVector2D> Limbs;
 		bool bValid = false;
 	};
 

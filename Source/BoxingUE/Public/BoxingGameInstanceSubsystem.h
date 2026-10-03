@@ -19,6 +19,7 @@
 #include "InputCoreTypes.h"
 #include "Engine/StreamableManager.h"
 #include "FightProfile.h"
+#include <atomic>
 #include "BoxingGameInstanceSubsystem.generated.h"
 
 class ABoxingFightGameMode;
@@ -87,7 +88,21 @@ struct FPairForecast
 	float RedDelta = 0.f;    // натуральный − вес боя: > 0 сгонка, < 0 переход вверх
 	float BlueDelta = 0.f;
 	float Stretch = 0.f;     // WeightStretch: ≤ 4 реальный бой, ≤ 8 кэтчвейт, ≤ 14 бой мечты, дальше — фэнтези
-	BoxingFightProfile::FOutcomeOdds Odds;
+	BoxingFightProfile::FOutcomeOdds Odds;   // ИИ против ИИ — «кто сильнее по ядру» (нейтральный взгляд)
+};
+
+// «Шансы при твоей игре» (S-65): красного (игрока) ведёт бот «человека» трёх уровней — см. BoxingFightProfile::PredictForPlayer.
+struct FPlayerForecast
+{
+	bool bValid = false;
+	BoxingFightProfile::FPlayerOdds Odds;    // Novice / Average («обычная игра») / Strong; RedWin — шанс игрока
+	float Ms = 0.f;                          // сколько считалось (фон)
+};
+// Фоновый расчёт FPlayerForecast (внутреннее: поток пула пишет Result, затем bDone).
+struct FPlayerForecastJob
+{
+	std::atomic<bool> bDone{false};
+	FPlayerForecast Result;
 };
 
 // Что выбрано в Выставке.
@@ -141,6 +156,9 @@ public:
 	float RingWeightKg(const FRosterBoxer& Red, const FRosterBoxer& Blue, bool bProFight) const;
 	// Прогноз пары (кэш по паре/раундам; первый расчёт ≈ 50–70 мс — 60 боёв ядра, BoxingFightProfile::PredictOutcome).
 	const FPairForecast& ForecastPair(const FRosterBoxer& Red, const FRosterBoxer& Blue, int32 Rounds, bool bProRules) const;
+	// «Шансы при твоей игре» (S-65): готовый прогноз из кэша или nullptr — тогда (один раз на ключ) запускает расчёт в пуле
+	// потоков (≈ 0.3 с на 3 р., ≈ 1 с на 10 р.) и вернёт результат на следующих вызовах. Звать можно каждый тик UI.
+	const FPlayerForecast* PlayerForecast(const FRosterBoxer& Red, const FRosterBoxer& Blue, int32 Rounds, bool bProRules) const;
 	// Пресеты/раунды/сид выбранной пары → GameMode (зовётся из InitGame). Нет выбора — ничего не меняет.
 	bool ApplyToFightMode(ABoxingFightGameMode& Mode) const;
 
@@ -159,7 +177,13 @@ public:
 	// повторный бой не грузят заново; (3) экран загрузки: UMG-виджет поверх меню/итога, пока догружается, и Slate-экран
 	// MoviePlayer на сам LoadMap (рисуется своим потоком — кадр не замирает).
 	void StartFightPreload();
+	// S-67: холодный старт — сначала арена меню (фон), потом предзагрузка боя: оба шли одной очередью асинхронной загрузки
+	// (предзагрузка — с высоким приоритетом), и арена появлялась за меню лишь через ~18 с. Предзагрузка стартует, когда
+	// фон показан (не позже 8 с). Bg == nullptr — сразу.
+	void StartFightPreloadAfter(class ULevelStreaming* Bg);
 	bool IsFightPreloadDone() const;
+	// S-67: разрешение рендера по умолчанию (пока игрок не выбрал своё): высокое/эпик — 100 % (≤ 1440p внутренних), среднее 85, низкое 70.
+	static float DefaultRenderScaleFor(const class UGameUserSettings* G);
 	float GetFightPreloadProgress() const;
 	bool IsTransitionPending() const { return bTransitionPending; }
 	// Тексты экрана загрузки: имена углов, детали боя, подсказка управления, стадия.
@@ -209,7 +233,34 @@ private:
 	FTSTicker::FDelegateHandle RingCoverTicker;
 
 	FStreamableManager Streamable;
-	TSharedPtr<FStreamableHandle> PreloadHandle;
+	// S-67: предзагрузка — очередь кусков (ядро боя → облики по одному → прочее), в полёте один кусок. По «В бой» до конца
+	// очереди догружается только пара (её облики, рефери, грумы и кожа по Appearance.json), остаток очереди отбрасывается
+	// (LoadMap ждёт лишь кусок в полёте); недогруженное доберёт следующий вход в меню.
+	struct FPreloadChunk
+	{
+		FString Name;
+		TArray<FSoftObjectPath> Paths;
+		bool bCore = false; // нужен любому бою: «В бой» его не отбрасывает
+	};
+	TArray<FPreloadChunk> PreloadQueue;
+	int32 PreloadQueueTotal = 0;   // ассетов в очереди при старте (для прогресса)
+	int32 PreloadQueueDone = 0;    // из них — в завершённых кусках
+	FString PreloadChunkName;
+	double PreloadChunkAt = 0.0;
+	int32 PreloadChunkSize = 0;
+	void StartNextPreloadChunk();
+	void RequestPairOnly();
+	TArray<FSoftObjectPath> PairAssetPaths() const;
+	TSharedPtr<FStreamableHandle> PairHandle;
+	int32 PairRequested = 0;
+	TWeakObjectPtr<class ULevelStreaming> MenuBg;
+	double MenuBgAt = 0.0;
+	FTSTicker::FDelegateHandle MenuBgTicker;
+	TSharedPtr<FStreamableHandle> PreloadHandle;   // кусок в полёте
+	TArray<TSharedPtr<FStreamableHandle>> PreloadKeep; // все запрошенные куски: держат загруженное от сборки мусора в меню
+	FTSTicker::FDelegateHandle PreloadTicker;
+	bool bPreloadPartial = false;  // «В бой» отложил часть очереди — следующий StartFightPreload её доберёт
+	bool TickPreload(float Dt);
 	int32 PreloadRequested = 0;
 	double PreloadStartAt = 0.0;
 	double PreloadDoneAt = 0.0;
@@ -229,6 +280,8 @@ private:
 	FDelegateHandle PreLoadMapHandle;
 	FDelegateHandle PostLoadMapHandle;
 
+	void ApplyDefaultRenderScale();
+	void SetWorldRendering(UWorld* W, bool bOn);
 	void LoadRoster();
 	void ReadPickFromCommandLine();
 	bool TickScript(float Dt);
@@ -244,6 +297,7 @@ private:
 
 	TArray<FRosterBoxer> Roster;
 	mutable TMap<FString, FPairForecast> ForecastCache;
+	mutable TMap<FString, TSharedPtr<FPlayerForecastJob, ESPMode::ThreadSafe>> PlayerForecastJobs; // S-65
 	TArray<double> ProClassesM;
 	TArray<double> ProClassesF;
 	TMap<FString, int32> ById;

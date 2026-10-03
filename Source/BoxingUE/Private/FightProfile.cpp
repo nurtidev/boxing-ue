@@ -106,3 +106,67 @@ BoxingFightProfile::FOutcomeOdds BoxingFightProfile::PredictOutcome(FFighterSetu
 	O.KnockdownsPerFight = static_cast<float>(Kd) / N;
 	return O;
 }
+
+BoxingFightProfile::FOutcomeOdds BoxingFightProfile::PredictWithBot(FFighterSetup Red, FFighterSetup Blue, int32 Rounds, bool bProRules,
+	EFightBotSkill Skill, int32 Fights, uint32 Seed)
+{
+	FOutcomeOdds O;
+	Red.bAiControlled = false; // красный — «человек» (бот жмёт через ApplyAction, как клавиатура)
+	Blue.bAiControlled = true;
+	const int32 N = FMath::Max(1, Fights);
+	const float Dt = 1.f / 60.f; // шаг GameMode (FixedStep)
+	int32 RedW = 0, BlueW = 0, Draws = 0, RedStop = 0, BlueStop = 0, Kd = 0;
+	TArray<FFightBotCmd> Cmds;
+	for (int32 K = 0; K < N; ++K)
+	{
+		FFightConfig C;
+		C.Fighters[0] = Red;
+		C.Fighters[1] = Blue;
+		C.Rounds = FMath::Max(1, Rounds);
+		C.RoundSeconds = 55.f;
+		C.BreakSeconds = 0.f;
+		C.bAllowDraw = bProRules;
+		C.bProRules = bProRules;
+		C.bCorners = false;
+		C.Seed = (static_cast<uint32>(K) * 2654435761u + 17u) ^ Seed;
+		FBoxingFightCore Core;
+		Core.Init(C);
+		FFightBot Bot;
+		Bot.Reset(Skill, C.Seed, 0);
+		for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+		{
+			Cmds.Reset();
+			bool bHeld = false;
+			EFightAction Held = EFightAction::StepBack;
+			Bot.Think(Core.GetSnapshot(), Dt, Cmds, bHeld, Held);
+			for (const FFightBotCmd& Cmd : Cmds) Core.ApplyAction(0, Cmd.Action, Cmd.Target);
+			if (bHeld) Core.ApplyAction(0, Held);
+			Core.Tick(Dt);
+			Core.PollEvents();
+		}
+		const FFightResult& R = Core.GetResult();
+		const bool bStop = R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC;
+		if (R.WinnerIndex == 0) { ++RedW; RedStop += bStop ? 1 : 0; }
+		else if (R.WinnerIndex == 1) { ++BlueW; BlueStop += bStop ? 1 : 0; }
+		else ++Draws;
+		Kd += R.Knockdowns[0] + R.Knockdowns[1];
+	}
+	O.Fights = N;
+	O.RedWin = static_cast<float>(RedW) / N;
+	O.BlueWin = static_cast<float>(BlueW) / N;
+	O.Draw = static_cast<float>(Draws) / N;
+	O.RedStoppage = static_cast<float>(RedStop) / N;
+	O.BlueStoppage = static_cast<float>(BlueStop) / N;
+	O.KnockdownsPerFight = static_cast<float>(Kd) / N;
+	return O;
+}
+
+BoxingFightProfile::FPlayerOdds BoxingFightProfile::PredictForPlayer(const FFighterSetup& Red, const FFighterSetup& Blue, int32 Rounds,
+	bool bProRules, int32 AverageFights, int32 EdgeFights, uint32 Seed)
+{
+	FPlayerOdds P;
+	P.Novice = PredictWithBot(Red, Blue, Rounds, bProRules, EFightBotSkill::Novice, EdgeFights, Seed);
+	P.Average = PredictWithBot(Red, Blue, Rounds, bProRules, EFightBotSkill::Average, AverageFights, Seed);
+	P.Strong = PredictWithBot(Red, Blue, Rounds, bProRules, EFightBotSkill::Strong, EdgeFights, Seed);
+	return P;
+}

@@ -23,6 +23,7 @@ NOSHADOW = [x for x in os.environ.get("PERF_NOSHADOW", "").split(",") if x]   # 
 OFF = [x for x in os.environ.get("PERF_OFF", "").split(",") if x]           # подстроки имён — выключить свет
 FG = os.environ.get("PERF_FG", "")                                              # Lumen final gather quality в PPV
 PRO = os.environ.get("PERF_PRO", "") == "1"
+CREW = os.environ.get("PERF_CREW", "")   # S-68: fight|rest — угловые по маркерам (уровень L_RingCrewLook, look_crew_shots.py)
 CONTACT = os.environ.get("PERF_CONTACT", "").split(":") if os.environ.get("PERF_CONTACT") else None  # подстрока:длина                                     # оформление профи (как сделает GameMode)
 st = {"t0": time.time(), "step": 0, "h": None, "frames": 0, "acc": 0.0, "worst": 0.0}
 
@@ -83,6 +84,15 @@ def tick(dt):
                 a.set_actor_hidden_in_game(False)
                 n += 1
             log("оформление профи: акторов %d" % n)
+        if CREW:
+            import sys
+            d = os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), "Tools", "EditorScripts")
+            if d not in sys.path:
+                sys.path.insert(0, d)
+            import look_crew_shots
+            crew = look_crew_shots.place_crew(w, CREW)
+            look_crew_shots.apply_looks(w, crew)
+            log("угловые: %d, режим %s" % (len(crew), CREW))
         st["step"] = 1
     elif st["step"] == 1 and t >= T0:
         cmd("csvprofile start")

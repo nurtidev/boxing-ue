@@ -192,7 +192,7 @@ void UBoxingFightHudWidget::UpdatePanel(int32 Index, const ABoxingFightGameMode&
 	FString Info;
 	if (F.Knockdowns > 0)
 	{
-		Info = FString::Printf(TEXT("нокдаунов: %d"), F.Knockdowns);
+		Info = FString::Printf(TEXT("был в нокдауне: %d"), F.Knockdowns); // S-67: о себе — не «нокдаунов» (кто кого?)
 	}
 	if (F.bGassed)
 	{

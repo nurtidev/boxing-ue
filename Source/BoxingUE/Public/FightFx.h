@@ -60,7 +60,9 @@ namespace BoxFx
 	constexpr float CAM_JOLT_CM = 9.f;
 	// Окно повтора нокаута вокруг падения (сек).
 	constexpr float REPLAY_BEFORE = 2.0f;
-	constexpr float REPLAY_AFTER = 1.2f;
+	// S-66: после удара — всё падение (клип нокдауна 1.8 с, таз на настиле с 0.8 с; в slow-mo нокдауна игровое время
+	// идёт медленнее) и полсекунды «лежит»: при 1.2 с QA видел в повторе только обмен до падения.
+	constexpr float REPLAY_AFTER = 2.2f;
 
 	// Параметры хит-стопа/slow-mo. S36 — текущие веба (после жалобы «подвисание», S-36): стоп-кадр только на
 	// по-настоящему тяжёлом (mag ≥ 1.5) и в 1.5–3 кадра (25→45 мс), нокдаун 70 мс; slow-mo — только нокдаун.
@@ -156,6 +158,7 @@ struct FBoxReplayFighter
 	float Yaw = 0.f;
 	TArray<FTransform> Bones; // локальные (bone space) трансформы логического меша
 	FBoxerFeelFrame Feel;     // кадр процедурного слоя (реакция, наведение) — для видимого меша
+	FVector Pelvis = FVector::ZeroVector; // S-66: таз видимого меша (мир) — кадр повтора держит в кадре и падающее тело
 };
 
 UCLASS()
@@ -257,6 +260,18 @@ private:
 	double LastRecT = -1.0;
 	bool bFirstSnap = true;
 	TArray<FTransform> ReplayScratch[2];
+	// S-66: кадр повтора — сглаженный центр/разлёт; отладка пропуска повтора «клавишей» (-BoxReplaySkipAt=С).
+	// S-66: табло арены (TextRender уровня «РАУНД 1   3:00») — живые раунд и время, а не статика.
+	void UpdateScoreboard(const FFightSnapshot& Snap);
+	bool bBoardsFound = false;
+	TArray<TWeakObjectPtr<class ATextRenderActor>> Boards;
+	FString BoardText;
+	bool bReplayCamInit = false;
+	FVector ReplayMid = FVector::ZeroVector;
+	float ReplaySpan = 0.f;
+	float ReplaySkipAt = -1.f;
+	float ReplayPlayedReal = 0.f;
+	int32 SkipKeyStage = 0;
 	uint64 KdFrame = 0;
 
 	// ---------- повтор нокаута ----------

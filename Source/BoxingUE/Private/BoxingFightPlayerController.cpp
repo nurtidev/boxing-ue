@@ -355,7 +355,30 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 	bRefCamValid = true;
 	// Точка взгляда на постановке — к игроку (у своего угла он в кадре целиком).
 	const FVector Look = CamMid + U * (LookAhead * (1.f - Sm) - PairDistM * 50.f * 0.35f * Sm) + FVector(0.f, 0.f, LookHeight - 10.f * Sm);
-	if (bSideCam)
+	// S-66 (отладка): -BoxCamOn=БОЕЦ,УГОЛ,ДИСТ,ВЫСОТА — камера на бойца (0 — красный): УГОЛ от его лица (0 — спереди,
+	// 90 — справа от него), ДИСТ/ВЫСОТА в см; взгляд — на него на 95 см. Контрольные кадры стойки (левши).
+	static const TArray<float> CamOn = [] {
+		TArray<float> V;
+		FString S;
+		if (FParse::Value(FCommandLine::Get(), TEXT("BoxCamOn="), S, false))
+		{
+			TArray<FString> Parts;
+			S.ParseIntoArray(Parts, TEXT(","));
+			for (const FString& P : Parts) V.Add(FCString::Atof(*P));
+		}
+		return V;
+	}();
+	const ABoxerCharacter* CamBoxer = CamOn.Num() >= 4 && GM ? GM->GetBoxer(FMath::Clamp(static_cast<int32>(CamOn[0]), 0, 1)) : nullptr;
+	if (CamBoxer)
+	{
+		const FVector At = CamBoxer->GetActorLocation();
+		const FVector Fwd = CamBoxer->GetActorForwardVector().GetSafeNormal2D().RotateAngleAxis(CamOn[1], FVector::UpVector);
+		Cam = FVector(At.X, At.Y, Floor.Z) + Fwd * CamOn[2] + FVector(0.f, 0.f, CamOn[3]);
+		RefCamFinal = Cam;
+		FightCamera->SetActorLocationAndRotation(Cam, (FVector(At.X, At.Y, Floor.Z + 95.f) - Cam).Rotation());
+		UpdateRopeVisibility(Cam, Floor);
+	}
+	else if (bSideCam)
 	{
 		const FVector PairMid((P0.X + P1.X) * 0.5f, (P0.Y + P1.Y) * 0.5f, Floor.Z);
 		const FVector Ax = (P1 - P0).GetSafeNormal2D();

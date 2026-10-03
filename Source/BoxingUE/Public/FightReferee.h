@@ -209,7 +209,15 @@ private:
 	int32 AllFrames = 0;
 	int32 SideOk = 0;           // в бою сбоку на 1.2–2 м (±0.15)
 	float MinStandCm = 1e6f;    // до стоящего бойца (центры)
-	float MinDownBodyCm = 1e6f; // S-62: от оси рефери до костей сбитого (голова, таз, кисти, предплечья, стопы) на счёте
+	float MinDownBodyCm = 1e6f; // S-62: от оси рефери до костей сбитого (голова, таз, кисти, предплечья, бёдра, голени, стопы) на счёте
+	// S-66: лежащий — и на счёте, и после нокаута (итог, проигравший лежит).
+	int32 LyingFrames = 0;      // кадров, пока сбитый лежит (тело на настиле)
+	int32 OnBodyFrames = 0;     // рефери стоит на теле: ось ближе ON_BODY_CM к кости тела
+	int32 LyingOccFrames = 0;   // рефери закрывает ЛЕЖАЩЕГО в кадре камеры
+	float LyingOccRun = 0.f;
+	float LyingOccWorst = 0.f;  // самый длинный подряд, с
+	float MinLyingSettledCm = 1e6f; // до тела — когда тело уже лежит ≥ 1 с (падение на рефери не в счёт)
+	float LyingT = 0.f;
 	float MaxSpeedSeen = 0.f;   // м/с, ход логики
 	float MaxLagCm = 0.f;       // отставание капсулы от места логики
 	FVector PrevActorLoc = FVector::ZeroVector;

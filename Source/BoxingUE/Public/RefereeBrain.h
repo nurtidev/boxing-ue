@@ -90,6 +90,12 @@ namespace BoxRef
 		bool bHasLying = false;
 		FV LyingHead;
 		FV LyingPelvis;
+		// UE (S-66): тело целиком — стопы итоговой позы (капсула «стопы → таз → голова») и конечности (кисти, колени).
+		// Без них в KO рефери стоял ногой между бёдрами: круги обхода головы/таза и точки падения оставляли «шов»
+		// ровно над бёдрами.
+		bool bHasLyingFeet = false;
+		FV LyingFeet;
+		TArray<FV> LyingLimbs;
 		FDown Down;
 		FOver Over;
 	};
@@ -169,7 +175,9 @@ namespace BoxRef
 	BOXINGUE_API double RouteDist(const TArray<FV>& Route, const FV& P);
 	BOXINGUE_API TArray<FV> RouteAhead(const TArray<FV>& Route, const FV& P);
 	// Head (UE, S-62) — голова лежащего: рефери держится и от неё (тело длиннее оценки веба).
-	BOXINGUE_API FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head = nullptr);
+	BOXINGUE_API FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head = nullptr,
+		const FInput* Lying = nullptr, // S-66: тело лежащего целиком (LyingDist) — место счёта не на нём
+		const FV* From = nullptr);     // S-66: где рефери сейчас — место за телом дороже на длину обхода
 	BOXINGUE_API FV AnnounceSpot(const FV& F0, const FV& F1, const FV& Cam);
 	BOXINGUE_API FArm WristArm(double S, const FV& Ref, double Yaw, const FV& F, double H, bool bHigh);
 	BOXINGUE_API double CountLift(double Age, double Beat);
@@ -179,6 +187,18 @@ namespace BoxRef
 	BOXINGUE_API FArm ArmReady(double S);
 	// Центр тела лежащего (порт lyingBody: 0.6 м за точкой падения, от стоящего).
 	BOXINGUE_API FV LyingBody(const FV& Down, const FV& Stand);
+
+	// S-66: тело лежащего для обхода — капсула «стопы → таз → голова» (радиус LYING_R) и конечности (LIMB_R).
+	constexpr double LYING_R = 0.5;     // от оси тела до оси рефери: полтела ~0.2 + рефери ~0.22 + запас
+	constexpr double LIMB_R = 0.32;     // кисть/колено → ось рефери
+	constexpr double LYING_CLEAR = 0.72; // место счёта — не ближе к оси тела
+	// Расстояние от точки до оси тела лежащего (min по отрезкам «стопы → таз → голова») и до конечностей за вычетом
+	// разницы радиусов (LYING_R − LIMB_R) — т. е. «эквивалент» дистанции до оси. Тела нет (bHasLying) — 1e9.
+	BOXINGUE_API double LyingDist(const FInput& In, const FV& P);
+	// S-66: путь Pos → Goal через тело лежащего (они по разные стороны оси и прямая проходит у тела) — обход через
+	// торец тела (за стопами или за головой, OutEnd 0/1; Prefer — прежний, −1 — нет). true — идти к OutP; false — прямо.
+	// Торец у канатов, где не пройти, не выбирается; нет ни одного — false (идёт прямо, обход препятствиями).
+	BOXINGUE_API bool LyingDetour(const FInput& In, const FV& Pos, const FV& Goal, int32 Prefer, FV& OutP, int32& OutEnd);
 
 	// Вход из снимка ядра (порт interactiveRefInput). Result — итог боя (Phase == Over), At — места бойцов,
 	// Cam — камера на плане, bStanding — досрочка, а проигравший на ногах.
@@ -235,6 +255,7 @@ namespace BoxRef
 		double ReadyK = 0;
 		int32 LastCount = 0;
 		int32 DetourEnd = -1;
+		int32 LyingEnd = -1; // S-66: обход лежащего через торец (0 — стопы, 1 — голова)
 		double RaisedT = 0;
 		double AnnounceT = -1;
 		bool bStopDone = false;

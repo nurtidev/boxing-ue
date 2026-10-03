@@ -299,6 +299,58 @@ def look_for(boxer, app):
     return look
 
 
+# ------------------------------------------------------------------------- S-68: угловые (тренер, катмен)
+# Порт web CornerCrew.tsx buildPerson: внешность угловых — generateAppearance от ключа «<имя бойца>:<роль>» и флага
+# бойца (земляки), hash01 — тот же FNV-1a (mod 10007): тренер с h < 0.4 — седой, рост (М 1.72 / Ж 1.62) + h·0.12 м,
+# вес = (рост_см − 100) × (тренер 1.12 / катмен 1.0); дреды → косички, ирокез → короткие. Записи — в тот же
+# Appearance.json (boxers[]) с id «crew:<id бойца>:coach|cutman» — рантайм берёт их тем же FindLook/ApplyBoxerLook.
+# Плюс облик по умолчанию на угол (боец не из ростера — карьера): «crew:Red:coach» … «crew:Blue:cutman».
+CREW_ROLES = (("coach", "trainer"), ("cutman", "cutman"))
+
+
+def hash01(s):
+    h = 0x811C9DC5
+    u = s.encode("utf-16-le")
+    for i in range(0, len(u), 2):
+        h = _imul(h ^ (u[i] | (u[i + 1] << 8)), 0x01000193)
+    return (h % 10007) / 10007.0
+
+
+def crew_look(name, gender, country, role_ue, role_web):
+    key = "%s:%s" % (name, role_web)
+    app = generate_appearance(key, gender, country)
+    app["hairStyle"] = {"dreads": "braids", "mohawk": "short"}.get(app["hairStyle"], app["hairStyle"])
+    h = hash01(key)
+    trainer = role_web == "trainer"
+    height = ((1.62 if gender == "F" else 1.72) + h * 0.12) * 100
+    weight = (height - 100) * (1.12 if trainer else 1.0)
+    grey = trainer and h < 0.4
+    if grey:
+        app["hairColor"] = "gray"
+    look = look_for({"name": key, "gender": gender, "heightCm": height, "weightKg": weight}, app)
+    look["morph"]["Muscular"] = 0.0 if trainer else 0.2       # web: тренер 0.1, катмен 0.25 (у тела MetaHuman база спортивнее)
+    if grey:
+        look["brows"]["white"] = 0.35
+        look["facial"]["white"] = 0.7
+    look["crew"] = {"role": role_ue, "grey": grey, "heightCm": round(height, 1), "weightKg": round(weight, 1)}
+    return app, look
+
+
+def crew_records(roster):
+    out = []
+    for b in roster:
+        for ue, web in CREW_ROLES:
+            app, look = crew_look(b["name"], b["gender"], b.get("countryCode", ""), ue, web)
+            out.append({"id": "crew:%s:%s" % (b["id"], ue), "name": "%s (%s)" % (b["name"], ue), "gender": b["gender"],
+                        "appearance": app, "look": look})
+    for corner, nm in (("Red", u"Красный угол"), ("Blue", u"Синий угол")):
+        for ue, web in CREW_ROLES:
+            app, look = crew_look(nm, "M", "KZ", ue, web)
+            out.append({"id": "crew:%s:%s" % (corner, ue), "name": "%s (%s)" % (nm, ue), "gender": "M",
+                        "appearance": app, "look": look})
+    return out
+
+
 def main():
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -326,16 +378,19 @@ def main():
         out.append({"id": b["id"], "name": b["name"], "gender": b["gender"], "countryCode": b.get("countryCode", ""),
                     "heightCm": b["heightCm"], "weightKg": b["weightKg"], "age": b.get("age"),
                     "appearance": app, "look": look_for(b, app)})
+    crew = crew_records(roster)   # S-68
     doc = {
         "source": "boxing/web data/appearance (фото) + generateAppearance (страна/хеш имени); look — "
                   "Tools/EditorScripts/look_appearance.py (S-60)",
         "modelHeightCm": MODEL_HEIGHT_CM,
         "groomAttach": GROOM_ATTACH,
         "count": len(out),
-        "boxers": out,
+        "crewCount": len(crew),
+        "boxers": out + crew,
     }
     with open(a.out, "w", encoding="utf-8") as f:
         json.dump(doc, f, ensure_ascii=False, indent=1)
+    print("угловых: %d (седых тренеров %d)" % (len(crew), sum(1 for c in crew if c["look"]["crew"]["grey"])))
     print("Appearance.json: %d бойцов (из таблиц веба %d, из них по фото %d; сгенерировано %d) → %s"
           % (len(out), n_table, n_photo, n_gen, a.out))
 

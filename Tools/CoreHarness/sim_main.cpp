@@ -2,6 +2,7 @@
 #include "BoxingFightCore.h"
 #include "FightBot.h"
 #include "FightProfile.h"
+#include <chrono>
 extern "C" int printf(const char*, ...);
 
 namespace
@@ -664,6 +665,141 @@ namespace
 		return 0;
 	}
 
+	// S-65: судейство любителей по World Boxing — 5 судей, раунд без ничьих, равная карта → судья называет победителя.
+	// Любительские пары QA (бот average за красного) + эталон AB (ИИ против ИИ), N боёв: формулировки решений, ровные карты,
+	// раунды 10-10 (должно быть 0), решения «против суммы голосов», и проверка, что подпись совпадает с фактом карт.
+	int32 AmateurJudgingTable(int32 N, bool bCheck)
+	{
+		printf("судейство любителей (S-65, World Boxing): 5 судей, %d боёв на пару, 55 с\n", N);
+		int32 Bad = 0;
+		auto Run = [&](const char* Name, const FFighterSetup& R0, const FFighterSetup& B0, bool bBot)
+		{
+			int32 Dec = 0, Una = 0, S41 = 0, S32 = 0, WithDraw = 0, EvenCards = 0, Nominated = 0, Draw10 = 0, Rounds = 0, LabelBad = 0, Judges = 0;
+			for (int32 K = 0; K < N; ++K)
+			{
+				FFightConfig C;
+				C.Seed = BotSeed(K);
+				C.Rounds = 3;
+				C.RoundSeconds = 55.f;
+				C.BreakSeconds = 0.f;
+				C.Fighters[0] = R0;
+				C.Fighters[1] = B0;
+				C.Fighters[0].bAiControlled = !bBot;
+				C.Fighters[1].bAiControlled = true;
+				FBoxingFightCore Core;
+				Core.Init(C);
+				FFightBot Bot;
+				Bot.Reset(EFightBotSkill::Average, C.Seed, 0);
+				TArray<FFightBotCmd> Cmds;
+				for (int32 Step = 0; Step < 60 * 60 * 30 && !Core.IsOver(); ++Step)
+				{
+					if (bBot)
+					{
+						Cmds.Reset();
+						bool bHeld = false;
+						EFightAction Held = EFightAction::StepBack;
+						Bot.Think(Core.GetSnapshot(), 1.f / 60.f, Cmds, bHeld, Held);
+						for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+						if (bHeld) Core.ApplyAction(0, Held);
+					}
+					Core.Tick(1.f / 60.f);
+					Core.PollEvents();
+				}
+				const FFightResult& R = Core.GetResult();
+				Judges = R.NumJudges;
+				for (int32 Ri = 0; Ri < R.Rounds.Num(); ++Ri)
+					for (int32 J = 0; J < R.NumJudges; ++J)
+					{
+						const FRoundResult& Rr = R.Rounds[Ri];
+						++Rounds;
+						Draw10 += Rr.JudgeCards[J].Red == Rr.JudgeCards[J].Blue;
+					}
+				if (R.Method != EFightMethod::Decision) continue;
+				++Dec;
+				int32 For = 0, Against = 0, Even = 0;
+				for (int32 J = 0; J < R.NumJudges; ++J)
+				{
+					const FJudgeCard& T = R.JudgeTotals[J];
+					int32 Pick = T.Red > T.Blue ? 0 : (T.Blue > T.Red ? 1 : -1);
+					if (Pick < 0)
+					{
+						++EvenCards;
+						if (R.TieNominee[J] >= 0) { ++Nominated; Pick = R.TieNominee[J]; }
+					}
+					if (Pick < 0) ++Even;
+					else if (Pick == R.WinnerIndex) ++For;
+					else ++Against;
+				}
+				WithDraw += Even > 0;
+				// Подпись по факту карт: единогласно — все за победителя; иначе раздельное; победитель — большинство голосов.
+				const EDecisionKind Want = For == R.NumJudges ? EDecisionKind::Unanimous : EDecisionKind::Split;
+				LabelBad += R.Decision != Want || For <= Against;
+				Una += For == 5;
+				S41 += For == 4;
+				S32 += For == 3;
+			}
+			printf("  %-24s %s судей %d: решений %d — единогласно 5:0 %.0f%%, раздельно 4:1/4+н %.0f%%, 3:2/3+н %.0f%%; ровных карт %d (из них судья назвал победителя %d, осталась ничья в %d решениях); "
+				"раундов 10-10 %d из %d; подпись ≠ карты %d\n", Name, bBot ? "бот average" : "ИИ vs ИИ  ", Judges, Dec, Dec ? 100.0 * Una / Dec : 0.0,
+				Dec ? 100.0 * S41 / Dec : 0.0, Dec ? 100.0 * S32 / Dec : 0.0, EvenCards, Nominated, WithDraw, Draw10, Rounds, LabelBad);
+			Bad += (Draw10 > 0) + (LabelBad > 0) + (Judges != 5);
+		};
+		for (const FQaRef& Q : GQa)
+		{
+			const FPairSetup P = PairOf(GRoster[Q.R], GRoster[Q.B], true);
+			if (P.bPro) continue;
+			Run(Q.Name, P.R, P.B, true);
+		}
+		const FFightConfig Ab = MakeConfig(1, 55.f, 0.f, false, false);
+		Run("эталон AB 78 vs 84", Ab.Fighters[0], Ab.Fighters[1], false);
+		if (!bCheck) return 0;
+		printf("судейство любителей: 5 судей, ни одного 10-10, подпись решения = факт карт — %s\n", Bad ? "MISMATCH" : "OK");
+		return Bad ? 1 : 0;
+	}
+
+	// S-65: «шансы при твоей игре» (PredictForPlayer: average 150 боёв, края 60, сиды прогноза) против факта — серии бота на
+	// НЕЗАВИСИМЫХ сидах (bal.sh: BotSeed), N боёв; ±95% ДИ факта. Плюс прогноз ИИ против ИИ (PredictOutcome) для сравнения.
+	// bCheck — проверка харнесса: average-прогноз в пределах 95% ДИ разности серий от факта на всех парах, порядок novice ≤ average ≤ strong.
+	int32 PlayerForecastTable(int32 N, bool bCheck)
+	{
+		const EFightBotSkill Skills[3] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong};
+		printf("шансы при твоей игре (S-65): прогноз = бот за красного, average 150 / края 60 боёв (сиды прогноза), факт — %d боёв (сиды bal.sh), 55 с, вес боя\n", N);
+		printf("  %-26s %-9s | %-17s | %-29s | %-29s | %-29s\n", "пара", "", "ИИ vs ИИ (карточка)", "novice прогноз / факт", "average прогноз / факт",
+			"strong прогноз / факт");
+		int32 Bad = 0;
+		double MsSum = 0;
+		int32 MsN = 0;
+		for (const FQaRef& Q : GQa)
+		{
+			const FPairSetup P = PairOf(GRoster[Q.R], GRoster[Q.B], true);
+			const int32 Rounds = P.bPro ? 10 : 3;
+			const BoxingFightProfile::FOutcomeOdds Ai = BoxingFightProfile::PredictOutcome(P.R, P.B, Rounds, P.bPro);
+			const auto T0 = std::chrono::steady_clock::now();
+			const BoxingFightProfile::FPlayerOdds Pl = BoxingFightProfile::PredictForPlayer(P.R, P.B, Rounds, P.bPro);
+			const double Ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - T0).count();
+			MsSum += Ms;
+			++MsN;
+			const BoxingFightProfile::FOutcomeOdds* Fc[3] = {&Pl.Novice, &Pl.Average, &Pl.Strong};
+			printf("  %-26s %s %2d р. | %3.0f%% (ничья %2.0f%%) |", Q.Name, P.bPro ? "профи " : "любит.", Rounds, Ai.RedWin * 100, Ai.Draw * 100);
+			for (int32 K = 0; K < 3; ++K)
+			{
+				const FBotTally T = RunBotSetups(Skills[K], P.R, P.B, N, 55.f, Rounds, P.bPro);
+				const double F = T.Rate();
+				const double Var = FMath::Max(F * (1 - F), 0.01);
+				const double Ci = 1.96 * FMath::Sqrt(Var / T.N);
+				// Допуск сверки: 95% ДИ разности двух независимых серий (прогноз Fc.Fights + факт N боёв), не меньше 6 п.
+				const double Tol = FMath::Max(0.06, 1.96 * FMath::Sqrt(Var / T.N + Var / FMath::Max(1, Fc[K]->Fights)));
+				printf(" %3.0f%% / %3.0f%% ±%2.0f (н %2.0f/%2.0f) |", Fc[K]->RedWin * 100, F * 100, Ci * 100, Fc[K]->Draw * 100, 100.0 * T.Draws / T.N);
+				if (K == 1 && AbsD(Fc[K]->RedWin - F) > Tol) ++Bad;
+			}
+			Bad += !(Pl.Novice.RedWin <= Pl.Average.RedWin + 0.05 && Pl.Average.RedWin <= Pl.Strong.RedWin + 0.05);
+			printf(" %.0f мс\n", Ms);
+		}
+		printf("  прогноз трёх уровней: в среднем %.0f мс на пару (270 боёв ядра + бот)\n", MsSum / FMath::Max(1, MsN));
+		if (!bCheck) return 0;
+		printf("шансы при твоей игре: average-прогноз vs факт в пределах ДИ разности серий, novice ≤ average ≤ strong — %s\n", Bad ? "MISMATCH" : "OK");
+		return Bad ? 1 : 0;
+	}
+
 	// Досрочки профи по весу: топ-10 каждого дивизиона ростера (близкие соседи и перевес через одного/двух), ИИ против ИИ.
 	struct FBand
 	{
@@ -802,6 +938,20 @@ int main(int Argc, char** Argv)
 		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
 		const float Rs = Sec > 0 ? float(Sec) : 55.f;
 		return Argv[1][0] == 'q' ? QaTable(N > 0 ? N : 50, Rs) : ProStoppageTable(N > 0 ? N : 20, Rs);
+	}
+	// S-65: sim.exe judges <N> — судейство любителей по World Boxing на парах QA.
+	if (Argc >= 2 && Argv[1][0] == 'j')
+	{
+		int32 N = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		return AmateurJudgingTable(N > 0 ? N : 200, true);
+	}
+	// S-65: sim.exe you <N> — «шансы при твоей игре» против факта бот-серий на парах QA.
+	if (Argc >= 2 && Argv[1][0] == 'y')
+	{
+		int32 N = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		return PlayerForecastTable(N > 0 ? N : 200, true);
 	}
 	// sim.exe webref <N> <раунд, с> — только сверка с эталоном веба (подробно).
 	if (Argc >= 2 && Argv[1][0] == 'w')
@@ -982,6 +1132,10 @@ int main(int Argc, char** Argv)
 	}
 	// --- 9. Профи-правила (S-61): доля досрочек по весу на парах ростера + бот против равного в профи ---
 	Fails += ProStoppageTable(16, 55.f);
+
+	// --- 10. S-65: судейство любителей по World Boxing (5 судей, без 10-10, подпись = факт карт) и «шансы при твоей игре» ---
+	Fails += AmateurJudgingTable(100, true);
+	Fails += PlayerForecastTable(120, true);
 
 	Fails += CheckGeometry();
 	Fails += G_Fail ? 1 : 0;

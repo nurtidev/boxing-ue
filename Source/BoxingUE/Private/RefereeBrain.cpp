@@ -400,18 +400,97 @@ namespace BoxRef
 		return Out;
 	}
 
-	FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head)
+	double LyingDist(const FInput& In, const FV& P)
+	{
+		if (!In.bHasLying)
+		{
+			return 1e9;
+		}
+		const FV& Feet = In.bHasLyingFeet ? In.LyingFeet : In.LyingPelvis;
+		double D = FMath::Min(Hyp(P, ClosestOnSeg(Feet, In.LyingPelvis, P)), Hyp(P, ClosestOnSeg(In.LyingPelvis, In.LyingHead, P)));
+		for (const FV& L : In.LyingLimbs)
+		{
+			D = FMath::Min(D, Hyp(P, L) + (LYING_R - LIMB_R));
+		}
+		return D;
+	}
+
+	bool LyingDetour(const FInput& In, const FV& Pos, const FV& Goal, int32 Prefer, FV& OutP, int32& OutEnd)
+	{
+		if (!In.bHasLying)
+		{
+			return false;
+		}
+		const FV& Feet = In.bHasLyingFeet ? In.LyingFeet : In.LyingPelvis;
+		const FV& Pel = In.LyingPelvis;
+		const FV& Head = In.LyingHead;
+		// Сторона точки от оси тела — по ближайшему отрезку.
+		auto SideOf = [&](const FV& P)
+		{
+			const bool bLegs = Hyp(P, ClosestOnSeg(Feet, Pel, P)) <= Hyp(P, ClosestOnSeg(Pel, Head, P));
+			const FV& A = bLegs ? Feet : Pel;
+			const FV& B = bLegs ? Pel : Head;
+			return Sign((B.X - A.X) * (P.Z - A.Z) - (B.Z - A.Z) * (P.X - A.X));
+		};
+		const double Near = FMath::Min(SegDist(Pos, Goal, Feet, Pel), SegDist(Pos, Goal, Pel, Head));
+		if (Near >= LYING_R || SideOf(Pos) == SideOf(Goal))
+		{
+			return false;
+		}
+		// Торцы: за стопами и за головой по оси тела, с запасом на радиус обхода.
+		auto EndAt = [&](const FV& Tip, const FV& From)
+		{
+			const double L = Or1(Hyp(Tip, From));
+			const double K = LYING_R + 0.35;
+			return FV(Tip.X + (Tip.X - From.X) / L * K, Tip.Z + (Tip.Z - From.Z) / L * K);
+		};
+		const FV Ends[2] = {EndAt(Feet, Pel), EndAt(Head, Pel)};
+		double Best = 1e18;
+		OutEnd = -1;
+		for (int32 E = 0; E < 2; ++E)
+		{
+			const FV P(ClampRing(Ends[E].X), ClampRing(Ends[E].Z));
+			if (LyingDist(In, P) < LYING_R + 0.12)
+			{
+				continue; // торец у канатов — не пройти
+			}
+			const double C = Hyp(Pos, P) + Hyp(P, Goal) - (E == Prefer ? 0.3 : 0.0);
+			if (C < Best)
+			{
+				Best = C;
+				OutP = P;
+				OutEnd = E;
+			}
+		}
+		return OutEnd >= 0;
+	}
+
+	FV DownSpot(const FV& Down, const FV& Body, const FV& Toward, const FV& Cam, const TArray<FV>* Route, const FV* Stand, const FV* Current, const FV* Head,
+		const FInput* Lying, const FV* From)
 	{
 		const FV Ideal = CountSpot(Down, Toward, Cam);
+		const bool bBody = Lying && Lying->bHasLying;
 		auto Viol = [](double D, double Need) { return D < Need ? (Need - D) * 20 + 5 : 0.0; };
 		auto Cost = [&](const FV& P)
 		{
 			double C = Hyp(P, Ideal);
 			C += Viol(Hyp(P, Down), DOWN_CLEAR) + Viol(Hyp(P, Body), BODY_CLEAR);
 			if (Head) C += Viol(Hyp(P, *Head), BODY_CLEAR);
+			// S-66: всё тело (стопы → таз → голова, кисти, колени), а не только его точки.
+			if (bBody) C += Viol(LyingDist(*Lying, P), LYING_CLEAR);
+			if (bBody && From)
+			{
+				// За телом — дороже на длину обхода (иначе рефери метался у тела, пытаясь пройти к месту за ним насквозь).
+				FV Dp;
+				int32 De = -1;
+				if (LyingDetour(*Lying, *From, P, -1, Dp, De)) C += Hyp(*From, Dp) + Hyp(Dp, P) - Hyp(*From, P);
+				else if (FMath::Min(SegDist(*From, P, Lying->bHasLyingFeet ? Lying->LyingFeet : Lying->LyingPelvis, Lying->LyingPelvis),
+					SegDist(*From, P, Lying->LyingPelvis, Lying->LyingHead)) < LYING_R * 0.5) C += 3;
+			}
 			if (Route) C += Viol(RouteDist(*Route, P), ROUTE_CLEAR);
 			if (Stand) C += Viol(Hyp(P, *Stand), STAND_CLEAR);
 			if (BlocksView(P, Cam, Down) || BlocksView(P, Cam, Body)) C += 2;
+			if (bBody && (BlocksView(P, Cam, Lying->LyingHead) || BlocksView(P, Cam, Lying->LyingPelvis))) C += 2;
 			if (Current) C += Hyp(P, *Current) * 0.35;
 			return C;
 		};
@@ -434,6 +513,8 @@ namespace BoxRef
 			for (const double R : Rs)
 			{
 				Consider(FV(ClampRing(Down.X + FMath::Cos(Ang) * R), ClampRing(Down.Z + FMath::Sin(Ang) * R)));
+				// S-66: тело длинное (до 1.9 м от точки падения) — места и вокруг его середины.
+				if (bBody) Consider(FV(ClampRing(Body.X + FMath::Cos(Ang) * R), ClampRing(Body.Z + FMath::Sin(Ang) * R)));
 			}
 		}
 		return Best;
@@ -671,15 +752,26 @@ namespace BoxRef
 			const FV Body = In.bHasLying ? FV((In.LyingHead.X + In.LyingPelvis.X) / 2, (In.LyingHead.Z + In.LyingPelvis.Z) / 2) : LyingBody(Down, StandAt);
 			const FV* Cur = bHasGoal ? &Goal : nullptr;
 			Target = DownSpot(Down, Body, Toward, In.Camera, bHasRoute ? &Route : nullptr, &In.Fighters[1 - DownIdx], Cur,
-				In.bHasLying ? &In.LyingHead : nullptr);
+				In.bHasLying ? &In.LyingHead : nullptr, &In, &Pos);
 			PushFighters(PASS_R);
-			Obs.Add({Body, 0.7, false});
-			Obs.Add({Down, 0.75, false});
 			if (In.bHasLying)
 			{
-				// UE (S-62): падающее тело целиком — от ног до головы (клип, масштаб облика, доворот от канатов).
-				Obs.Add({In.LyingHead, 0.7, false});
-				Obs.Add({In.LyingPelvis, 0.7, false});
+				// UE (S-62/S-66): падающее тело целиком — капсула «стопы → таз → голова» и конечности (клип, масштаб облика,
+				// доворот/сдвиг от канатов). Ближайшая точка оси — без «швов» между кругами (S-62: голова, таз и точка
+				// падения отдельными кругами — рефери застревал на стыке над бёдрами, 18 см до тела).
+				const FV& Feet = In.bHasLyingFeet ? In.LyingFeet : Down;
+				Obs.Add({ClosestOnSeg(Feet, In.LyingPelvis, Pos), LYING_R, false});
+				Obs.Add({ClosestOnSeg(In.LyingPelvis, In.LyingHead, Pos), LYING_R, false});
+				for (const FV& L : In.LyingLimbs)
+				{
+					Obs.Add({L, LIMB_R, false});
+				}
+				if (!In.bHasLyingFeet) Obs.Add({Down, 0.75, false});
+			}
+			else
+			{
+				Obs.Add({Body, 0.7, false});
+				Obs.Add({Down, 0.75, false});
 			}
 			// Стоящий ещё идёт в угол — его путь впереди него — стена.
 			if (Mode == EMode::Count && bHasRoute && Dn.bValid && !Dn.bArrived)
@@ -725,8 +817,20 @@ namespace BoxRef
 		// Цель за парой — через торец пары, а не в лоб.
 		FV DetP;
 		int32 DetEnd = -1;
-		const bool bDet = DownIdx < 0 && PairDetour(Pos, Goal, F0, F1, DetourEnd, DetP, DetEnd);
+		bool bDet = DownIdx < 0 && PairDetour(Pos, Goal, F0, F1, DetourEnd, DetP, DetEnd);
 		DetourEnd = bDet ? DetEnd : -1;
+		// S-66: цель за лежащим — в обход через торец тела (стопы/голова), а не сквозь него.
+		if (DownIdx >= 0 && (Mode == EMode::Count || Mode == EMode::Stop))
+		{
+			int32 Le = -1;
+			const bool bLd = LyingDetour(In, Pos, Goal, LyingEnd, DetP, Le);
+			LyingEnd = bLd ? Le : -1;
+			bDet = bLd;
+		}
+		else
+		{
+			LyingEnd = -1;
+		}
 		MoveToward(Pos, Vel, bDet ? DetP : Goal, Obs, Dt, Side);
 
 		// --- курс: идёт далеко — лицом по ходу, иначе на действие ---

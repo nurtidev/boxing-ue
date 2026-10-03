@@ -12,6 +12,7 @@
 # Скриншоты: Tools/EditorScripts/ring_shots.py (см. его шапку) → Docs/screens/ring_*.png.
 # Маркеры: TargetPoint RedStart/BlueStart (X = ∓57.5, лицом друг к другу), Corner_Red/Blue/NeutralA/B
 # (±263, ±263 — CORNER_SPOT), PlayerStart_Red/Blue (тег Red/Blue). GameMode уровню НЕ назначается.
+# S-68: угловые — CornerCrew_<Red|Blue>_<Coach|Cutman>_<Fight|Rest>, стул — CornerStool_<Red|Blue>[_Stow] (см. ниже).
 #
 # Размеры — из web/src/engine/ringSize.ts (метры → сантиметры UE).
 # Оси: web (x, y-вверх, z) → UE (X = x, Y = z, Z = y). Знаки углов сохраняются:
@@ -592,6 +593,43 @@ target_point("BlueStart", (START_HALF, 0, 0), 180.0, ["BlueStart", "Blue", "Figh
 for (sx, sy), name, _p in CORNERS:
     yaw = math.degrees(math.atan2(-sy, -sx))  # лицом к центру ринга
     target_point("Corner_" + name, (sx * CORNER_SPOT, sy * CORNER_SPOT, 0), yaw, ["Corner", "Corner_" + name])
+# S-68: угловые — точки СТУПНЕЙ (Z — уровень пола под ними; капсула персонажа GASP — центр на +92 × масштаб),
+# курс — лицом к стулу своего угла. Порт web crew.ts crewSpot/stoolSpot: тренер работает со стороны ±X угла, катмен —
+# со стороны ±Y (там ступени угла). Бой (Fight) — на полу арены у помоста за своим углом (голова видна над апроном);
+# перерыв (Rest) — на апроне за канатами у угла. Стул (CornerStool_<угол>) — центр стула под бойцом в углу
+# (= Corner_<угол>, CORNER_SPOT), _Stow — откуда въезжает/куда убирается: на апроне за столбом угла.
+# Теги: CornerCrew, <угол>, <Coach|Cutman>, <Fight|Rest>; стул — CornerStool, <угол>, <In|Stow>.
+CREW_FLOOR_OUT, CREW_FLOOR_ALONG = 42.0, 35.0      # crew.ts FLOOR_OUT/FLOOR_ALONG (м → см)
+CREW_APRON_OUT, CREW_APRON_ALONG = 30.0, 55.0      # crew.ts APRON_OUT/APRON_ALONG
+STOOL_INSET = ROPE_HALF - CORNER_SPOT              # crew.ts STOOL_INSET (0.42 м)
+
+
+def crew_spot(sx, sy, role, mode):
+    if mode == "Fight":
+        out, along = EDGE + CREW_FLOOR_OUT, ROPE_HALF - CREW_FLOOR_ALONG
+        if role == "Coach":
+            return sx * out, sy * along, FLOOR
+        return sx * (ROPE_HALF + CREW_FLOOR_ALONG), sy * out, FLOOR
+    out, along = ROPE_HALF + CREW_APRON_OUT, ROPE_HALF - STOOL_INSET - CREW_APRON_ALONG
+    if role == "Coach":
+        return sx * out, sy * along, 0.0
+    return sx * along, sy * out, 0.0
+
+
+for (sx, sy), name, _p in CORNERS[:2]:
+    stool = (sx * CORNER_SPOT, sy * CORNER_SPOT)
+    for role in ("Coach", "Cutman"):
+        for mode in ("Fight", "Rest"):
+            x, y, z = crew_spot(sx, sy, role, mode)
+            yaw = math.degrees(math.atan2(stool[1] - y, stool[0] - x))
+            target_point("CornerCrew_%s_%s_%s" % (name, role, mode), (x, y, z), yaw,
+                         ["CornerCrew", name, role, mode, "CornerCrew_%s_%s_%s" % (name, role, mode)])
+    yaw_in = math.degrees(math.atan2(-sy, -sx))
+    target_point("CornerStool_" + name, (stool[0], stool[1], 0), yaw_in, ["CornerStool", name, "In", "CornerStool_" + name])
+    stow = H + POST_OFF + 26.0                       # за столбом на апроне (по диагонали угла)
+    target_point("CornerStool_%s_Stow" % name, (sx * stow, sy * stow, 0), yaw_in,
+                 ["CornerStool", name, "Stow", "CornerStool_%s_Stow" % name])
+log("маркеры угловых: CornerCrew_* 8, CornerStool_* 4")
 # PlayerStart'ы (для игры по умолчанию; капсула стоит на канвасе → центр на +92)
 for label, x, yaw, tag in (("PlayerStart_Red", -START_HALF, 0.0, "Red"), ("PlayerStart_Blue", START_HALF, 180.0, "Blue")):
     ps = actors_ss.spawn_actor_from_class(unreal.PlayerStart, V(x, 0, 92), R(yaw=yaw))

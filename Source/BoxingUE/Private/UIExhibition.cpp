@@ -415,39 +415,34 @@ void UBoxingExhibitionWidget::RebuildSide()
 		AddV(PairCol, Wd, false, FMargin(0.f, 0.f, 0.f, 10.f));
 		if (F.bValid)
 		{
-			// Полоса шансов: красный | ничья | синий (доли — веса заполнения слотов).
-			UHorizontalBox* Split = WidgetTree->ConstructWidget<UHorizontalBox>();
-			auto Part = [this, Split](float Share, const FLinearColor& C)
-			{
-				if (Share <= 0.005f)
-				{
-					return;
-				}
-				UHorizontalBoxSlot* PS = Split->AddChildToHorizontalBox(Sized(Box(nullptr, C, 3.f, FMargin(0.f)), 0.f, 12.f));
-				FSlateChildSize Size(ESlateSizeRule::Fill);
-				Size.Value = Share;
-				PS->SetSize(Size);
-				PS->SetPadding(FMargin(1.f, 0.f));
-			};
-			Part(F.Odds.RedWin, BoxUi::Red);
-			Part(F.Odds.Draw, BoxUi::Muted);
-			Part(F.Odds.BlueWin, BoxUi::Blue);
-			AddV(PairCol, Split, false, FMargin(0.f, 0.f, 0.f, 6.f));
-			UHorizontalBox* Pct = WidgetTree->ConstructWidget<UHorizontalBox>();
+			// S-67 ← S-65: два честных прогноза. Сверху — «при твоей игре» (красного ведёт бот «человека», фоновый расчёт:
+			// блок заполнит FillPlayerOdds), ниже — нейтральный «ИИ против ИИ» (кто сильнее по ядру).
+			PlayerOddsBox = WidgetTree->ConstructWidget<UVerticalBox>();
+			AddV(PairCol, PlayerOddsBox, false, FMargin(0.f, 0.f, 0.f, 6.f));
+			bPlayerOddsPending = true;
+			FillPlayerOdds();
+			// Нейтральный прогноз — одной строкой (карточка не должна выталкивать «В бой!» за край на 1080p).
 			auto P = [](float V) { return FMath::RoundToInt(V * 100.f); };
-			AddH(Pct, Txt(FString::Printf(TEXT("Красный %d%%"), P(F.Odds.RedWin)), 17, FMath::Lerp(BoxUi::Red, FLinearColor::White, 0.25f), true), true);
+			UHorizontalBox* Ai = WidgetTree->ConstructWidget<UHorizontalBox>();
+			AddH(Ai, Txt(TEXT("По силам (ИИ против ИИ):"), 14, BoxUi::Muted, true), false, FMargin(0.f, 0.f, 8.f, 0.f), VAlign_Center);
+			AddH(Ai, Txt(FString::Printf(TEXT("красный %d%%"), P(F.Odds.RedWin)), 14, FMath::Lerp(BoxUi::Red, FLinearColor::White, 0.3f), true),
+				false, FMargin(0.f, 0.f, 8.f, 0.f), VAlign_Center);
 			if (IsProRules())
 			{
-				UTextBlock* D = Txt(FString::Printf(TEXT("ничья %d%%"), P(F.Odds.Draw)), 15, BoxUi::Muted);
-				D->SetJustification(ETextJustify::Center);
-				AddH(Pct, D, true);
+				AddH(Ai, Txt(FString::Printf(TEXT("ничья %d%%"), P(F.Odds.Draw)), 14, BoxUi::Muted), false, FMargin(0.f, 0.f, 8.f, 0.f), VAlign_Center);
 			}
-			UTextBlock* BP = Txt(FString::Printf(TEXT("Синий %d%%"), P(F.Odds.BlueWin)), 17, FMath::Lerp(BoxUi::Blue, FLinearColor::White, 0.25f), true);
-			BP->SetJustification(ETextJustify::Right);
-			AddH(Pct, BP, true);
-			AddV(PairCol, Pct, false, FMargin(0.f, 0.f, 0.f, 2.f));
-			AddV(PairCol, Txt(FString::Printf(TEXT("Прогноз ядра по %d боям с учётом веса · досрочно: %d%% / %d%% · нокдаунов за бой: %.1f"),
-				F.Odds.Fights, P(F.Odds.RedStoppage), P(F.Odds.BlueStoppage), F.Odds.KnockdownsPerFight), 13, BoxUi::Muted));
+			AddH(Ai, Txt(FString::Printf(TEXT("синий %d%%"), P(F.Odds.BlueWin)), 14, FMath::Lerp(BoxUi::Blue, FLinearColor::White, 0.3f), true),
+				false, FMargin(0.f, 0.f, 10.f, 0.f), VAlign_Center);
+			UTextBlock* AiMore = Txt(FString::Printf(TEXT("· досрочно %d%% / %d%% · нокдаунов за бой %.1f"), P(F.Odds.RedStoppage),
+				P(F.Odds.BlueStoppage), F.Odds.KnockdownsPerFight), 13, BoxUi::Muted);
+			AiMore->SetAutoWrapText(true); // узкое окно — перенос, а не обрезка за край карточки
+			AddH(Ai, AiMore, true, FMargin(0.f), VAlign_Center);
+			AddV(PairCol, Ai);
+		}
+		else
+		{
+			PlayerOddsBox = nullptr;
+			bPlayerOddsPending = false;
 		}
 		AddV(Side, Box(PairCol, BoxUi::WithAlpha(BoxUi::Panel, 0.7f), 10.f, FMargin(16.f, 12.f)), false, FMargin(0.f, 0.f, 0.f, 14.f));
 	}
@@ -614,9 +609,90 @@ void UBoxingExhibitionWidget::Back()
 	}
 }
 
+UWidget* UBoxingExhibitionWidget::MakeOddsBar(const BoxingFightProfile::FOutcomeOdds& O, float Height)
+{
+	// Полоса шансов: красный | ничья | синий (доли — веса заполнения слотов).
+	UHorizontalBox* Split = WidgetTree->ConstructWidget<UHorizontalBox>();
+	auto Part = [this, Split, Height](float Share, const FLinearColor& C)
+	{
+		if (Share <= 0.005f)
+		{
+			return;
+		}
+		UHorizontalBoxSlot* PS = Split->AddChildToHorizontalBox(Sized(Box(nullptr, C, 3.f, FMargin(0.f)), 0.f, Height));
+		FSlateChildSize Fill(ESlateSizeRule::Fill);
+		Fill.Value = Share;
+		PS->SetSize(Fill);
+		PS->SetPadding(FMargin(1.f, 0.f));
+	};
+	Part(O.RedWin, BoxUi::Red);
+	Part(O.Draw, BoxUi::Muted);
+	Part(O.BlueWin, BoxUi::Blue);
+	return Split;
+}
+
+void UBoxingExhibitionWidget::FillPlayerOdds()
+{
+	UVerticalBox* Box_ = PlayerOddsBox.Get();
+	const UBoxingGameInstanceSubsystem* S = UBoxingGameInstanceSubsystem::Get(this);
+	const FRosterBoxer* R = S ? S->FindById(RedId) : nullptr;
+	const FRosterBoxer* B = S ? S->FindById(BlueId) : nullptr;
+	if (!Box_ || !R || !B)
+	{
+		bPlayerOddsPending = false;
+		return;
+	}
+	// S-65 (fight-designer): красного (игрока) ведёт бот «человека» трёх уровней; пока считается в фоне (≈ 0.3–1.4 с) —
+	// «считаем…» без цифры, той же высоты (карточка не прыгает). Подписи — Docs/UI.md «Шансы при твоей игре».
+	const FPlayerForecast* PF = S->PlayerForecast(*R, *B, EffectiveRounds(), IsProRules());
+	const bool bReady = PF && PF->bValid;
+	if (bReady && !bPlayerOddsPending && Box_->GetChildrenCount() > 0)
+	{
+		return; // уже показан
+	}
+	if (!bReady && Box_->GetChildrenCount() > 0)
+	{
+		return; // заглушка уже стоит
+	}
+	Box_->ClearChildren();
+	auto P = [](float V) { return FMath::RoundToInt(V * 100.f); };
+	UHorizontalBox* Head = WidgetTree->ConstructWidget<UHorizontalBox>();
+	AddH(Head, Txt(TEXT("Твои шансы при обычной игре"), 16, BoxUi::Text, true), false, FMargin(0.f, 0.f, 10.f, 0.f), VAlign_Bottom);
+	AddH(Head, Txt(bReady ? FString::Printf(TEXT("≈ %d%%"), P(PF->Odds.Average.RedWin)) : FString(TEXT("считаем…")), bReady ? 20 : 16,
+		bReady ? FMath::Lerp(BoxUi::Red, FLinearColor::White, 0.25f) : BoxUi::Muted, true), true, FMargin(0.f), VAlign_Bottom);
+	if (bReady)
+	{
+		FString Right = FString::Printf(TEXT("соперник %d%%"), P(PF->Odds.Average.BlueWin));
+		if (IsProRules())
+		{
+			Right = FString::Printf(TEXT("ничья %d%% · "), P(PF->Odds.Average.Draw)) + Right;
+		}
+		AddH(Head, Txt(Right, 15, FMath::Lerp(BoxUi::Blue, FLinearColor::White, 0.25f), true), false, FMargin(0.f), VAlign_Bottom);
+	}
+	AddV(Box_, Head, false, FMargin(0.f, 0.f, 0.f, 4.f));
+	if (bReady)
+	{
+		AddV(Box_, MakeOddsBar(PF->Odds.Average, 12.f), false, FMargin(0.f, 0.f, 0.f, 4.f));
+		UTextBlock* Range = Txt(FString::Printf(TEXT("от %d%% (новичок) до %d%% (сильная игра) · ты в красном углу, бот-игрок против ИИ"),
+			P(PF->Odds.Novice.RedWin), P(PF->Odds.Strong.RedWin)), 13, BoxUi::Muted);
+		Range->SetAutoWrapText(true);
+		AddV(Box_, Range);
+		bPlayerOddsPending = false;
+	}
+	else
+	{
+		AddV(Box_, Sized(Box(nullptr, BoxUi::WithAlpha(BoxUi::Line, 0.5f), 3.f, FMargin(0.f)), 0.f, 12.f), false, FMargin(1.f, 0.f, 1.f, 4.f));
+		AddV(Box_, Txt(TEXT("ты в красном углу · бот-игрок против ИИ"), 13, BoxUi::Muted));
+	}
+}
+
 void UBoxingExhibitionWidget::NativeTick(const FGeometry& MyGeometry, float InDeltaTime)
 {
 	Super::NativeTick(MyGeometry, InDeltaTime);
+	if (bPlayerOddsPending)
+	{
+		FillPlayerOdds(); // фоновый прогноз «при твоей игре» готов — показать
+	}
 	UBoxingGameInstanceSubsystem* S = UBoxingGameInstanceSubsystem::Get(this);
 	if (!S || !S->bAuto || S->AutoFightsDone > 0)
 	{
@@ -643,6 +719,13 @@ void UBoxingExhibitionWidget::NativeTick(const FGeometry& MyGeometry, float InDe
 		for (int32 I = 0; I < 2; ++I)
 		{
 			const FRosterBoxer* B = S->AutoPick.IsValidIndex(I) ? S->FindByName(S->AutoPick[I], static_cast<int32>(Tab), bFemale ? 1 : 0) : nullptr;
+			if (!B && S->AutoPick.IsValidIndex(I))
+			{
+				// S-67: нет на вкладке — ищем по всем (Головкин — в «Легендах», а не в «Профи»); честно пишем в лог.
+				B = S->FindByName(S->AutoPick[I], -1, bFemale ? 1 : 0);
+				UE_LOG(LogTemp, Warning, TEXT("UI: сценарий — «%s» нет на вкладке, %s"), *S->AutoPick[I],
+					B ? *FString::Printf(TEXT("взят с другой: %s"), *B->Name) : TEXT("нет в ростере — беру сильнейшего из списка"));
+			}
 			if (!B || B->Id == RedId)
 			{
 				// Не нашёлся (или совпал с красным) — сильнейший свободный из списка.

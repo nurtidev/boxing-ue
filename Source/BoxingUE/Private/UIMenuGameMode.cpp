@@ -22,16 +22,19 @@ void ABoxingMenuGameMode::StartPlay()
 {
 	int32 Bg = 1;
 	FParse::Value(FCommandLine::Get(), TEXT("BoxMenuBg="), Bg);
+	ULevelStreamingDynamic* BgLevel = nullptr;
 	if (Bg != 0 && !BackgroundMap.IsEmpty() && FPackageName::DoesPackageExist(BackgroundMap))
 	{
 		bool bOk = false;
-		ULevelStreamingDynamic::LoadLevelInstance(GetWorld(), BackgroundMap, FVector::ZeroVector, FRotator::ZeroRotator, bOk);
+		BgLevel = ULevelStreamingDynamic::LoadLevelInstance(GetWorld(), BackgroundMap, FVector::ZeroVector, FRotator::ZeroRotator, bOk);
 		UE_LOG(LogTemp, Log, TEXT("UI: фон меню %s — %s"), *BackgroundMap, bOk ? TEXT("грузится") : TEXT("не загрузился"));
 	}
 	// S-63: ассеты боя — асинхронно, пока игрок в меню (к «В бой» всё уже в памяти, экран загрузки — на остаток).
+	// S-67: но ПОСЛЕ арены: иначе предзагрузка (216 ассетов) шла в той же очереди впереди фона, и меню ~18 с висело на
+	// чёрном фоне.
 	if (UBoxingGameInstanceSubsystem* S = UBoxingGameInstanceSubsystem::Get(this))
 	{
-		S->StartFightPreload();
+		S->StartFightPreloadAfter(BgLevel);
 	}
 	Super::StartPlay();
 }

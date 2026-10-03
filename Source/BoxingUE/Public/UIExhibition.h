@@ -65,6 +65,11 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UScrollBox> List;
 	UPROPERTY(Transient) TObjectPtr<UVerticalBox> Side;
 	UPROPERTY(Transient) TObjectPtr<UButton> FirstTab;
+	// S-67 ← S-65: «шансы при твоей игре» считаются в фоне — блок карточки заполняется, когда прогноз готов.
+	UPROPERTY(Transient) TObjectPtr<UVerticalBox> PlayerOddsBox;
+	bool bPlayerOddsPending = false;
+	void FillPlayerOdds();
+	UWidget* MakeOddsBar(const BoxingFightProfile::FOutcomeOdds& O, float Height);
 
 	float AutoTime = 0.f;
 	int32 AutoStep = 0;

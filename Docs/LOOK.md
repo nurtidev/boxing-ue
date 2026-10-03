@@ -290,3 +290,162 @@ Feet скрыт в BP).
 `GR_Cornrows` — 4 (Уайлдер, Дэвис, Ярд, Форд); женщин без грума или с волнами < 1 — 0.
 Пересборка: `LOOK_HAIR_ONLY=GR_Cornrows,GR_Braids` + `look_hair.py` → `LOOK_GROOM_ONLY=GR_Cornrows,GR_Braids` +
 `look_groom_import.py` → `look_appearance.py`. Снимки: `Docs/screens/look4_*`.
+
+## S-68: угловые (тренер и катмен) и стул углового — контент для game-feel
+
+Порт web `CornerCrew.tsx` / `crew.ts` (вид, роли, места). В этом спринте — только модели, облик и точки в уровне;
+поведение (переход пол → апрон, наклон к бойцу, бутылка, стул, сидячая поза бойца) — game-feel, следующий спринт.
+Снимки: `Docs/screens/crew_fight_*` (бой: угловые на полу у помоста), `crew_rest_*` (перерыв: на апроне, стул в углу),
+`crew_rest_game_stage_*` (игровая камера перерыва, `-BoxStageShots`), `crew_perf_{base,fight,rest}_30` (один кадр боя
+сид 60 без угловых / с угловыми — «до/после» с одного ракурса).
+
+### Что получилось
+
+| | тренер (`BP_CornerCoach_<угол>`) | катмен (`BP_Cutman_<угол>`) |
+|---|---|---|
+| верх | олимпийка в цвет угла (темнее: `#7a0c12` / `#0d2c78`), стойка воротника, белая молния и манжеты | футболка в цвет угла (`#b5121b` / `#1442b0`), белая бейка ворота |
+| полотенце / бутылка | — | полотенце на левом плече (махра, один меш с футболкой); бутылка 0.5 л в левой руке (кузов светлый, крышка в цвет угла) |
+| руки | кожа (запястья и кисти) | предплечья + чёрный нитрил на кистях (катмен работает с рассечениями) |
+| низ | тёмные брюки, тёмные кеды со светлой подошвой (меш туфель рефери) | то же |
+| облик | Appearance-механика: тон кожи, причёска, цвет, борода/щетина, **седина у ~40 % тренеров**, рост, телосложение (тренер плотнее, Heavy) | то же, без седины, Muscular 0.2 |
+
+Стул: `BP_CornerStool_Red/_Blue` (StaticMeshActor, `SM_CornerStool`: круглое сиденье Ø40 см в цвет угла, 4 хромированные
+ноги, кольцо-подножка; опора — центр на полу, верх сиденья 52 см; без коллизии). Отдельно `SM_CrewBottle` (та же бутылка
+статикой, опора — дно, ось +Z) — если бутылку надо передать бойцу/поставить на апрон (у катмена в руке она частью меша).
+
+### Облик под бойца (детерминированно, как web)
+
+`look_appearance.py` пишет в тот же `Content/Boxing/Data/Appearance.json` (массив `boxers`) записи угловых для КАЖДОГО бойца
+ростера: `id` = `crew:<id бойца>:coach` и `crew:<id бойца>:cutman` (1044 записи, `crewCount`), плюс облик по умолчанию
+на угол (боец не из ростера — карьера): `crew:Red:coach`, `crew:Red:cutman`, `crew:Blue:coach`, `crew:Blue:cutman`.
+Формула — web `buildPerson` бит-в-бит: `generateAppearance("<имя бойца>:<trainer|cutman>", пол бойца, флаг бойца)`
+(угловые — земляки), `hash01` того же ключа: тренер с h < 0.4 — седой (`white` 0.65 волосы, 0.7 борода, 0.35 брови),
+рост (М 1.72 / Ж 1.62) + 0.12·h, вес (рост − 100) × (тренер 1.12 / катмен 1.0) → морфы, масштаб. Формат записи — тот же
+`look`, что у бойцов (+ поле `look.crew` {role, grey, heightCm, weightKg} для справки), поэтому **C++ ничего нового не
+читает**:
+
+```cpp
+FBoxerLook L;
+if (UBoxerLookLibrary::FindLook(FString::Printf(TEXT("crew:%s:coach"), *FighterId), FString(), L)
+    || UBoxerLookLibrary::FindLook(FString::Printf(TEXT("crew:%s:coach"), Corner == 0 ? TEXT("Red") : TEXT("Blue")), FString(), L))
+{
+    UBoxerLookLibrary::ApplyBoxerLook(CrewVisual, CrewVisualChild, L, /*bHeadgear*/ false);
+}
+```
+
+Эталон на Python (так сняты все `crew_*`): `look_crew_shots.apply_looks` → `look_apply.apply(child_actor, rec["look"], child_comp)`.
+Морфы Heavy/Lean/Muscular/Female есть на всех мешах угловых (куртка, футболка с полотенцем, брюки, руки) — плотный
+тренер и женщины-угловые (морф Female) работают тем же `ApplyBoxerLook`. Женского лица нет (Kellan), как у бойцов.
+Без вызова облик — запечённый в BP (записи `crew:<угол>:<роль>`: кожа тона, волосы, седина).
+
+### Классы и ассеты
+
+| Путь | Что | git |
+|---|---|---|
+| `/Game/BoxingLocal/Characters/BP_CornerCoach_Red` / `_Blue` | тренер (копия BP_Kellan: ретаргет GASP) | нет |
+| `/Game/BoxingLocal/Characters/BP_Cutman_Red` / `_Blue` | катмен | нет |
+| `/Game/BoxingLocal/Characters/SKM_CrewJacket`, `SKM_CrewTeeTowel`, `SKM_CrewTrousers`, `SKM_CrewBody_Coach`, `SKM_CrewBody_Cutman` | одежда и видимая кожа (производные тела MetaHuman) | нет |
+| `/Game/Boxing/Characters/BP_CornerStool_Red` / `_Blue`, `Meshes/SM_CornerStool`, `Meshes/SM_CrewBottle` | стул, бутылка (своя геометрия) | да |
+| `/Game/Boxing/Characters/Materials/MI_Crew_*`, `MI_Stool_*` | материалы (`M_BoxerKit`) | да |
+| `/Game/BoxingLocal/Tmp/L_RingCrewLook` | копия ринга с угловыми и стульями — только для снимков/замера | нет |
+
+Пути классов: `/Game/BoxingLocal/Characters/BP_CornerCoach_Red.BP_CornerCoach_Red_C` (и `_Blue`, `BP_Cutman_*`),
+`/Game/Boxing/Characters/BP_CornerStool_Red.BP_CornerStool_Red_C`. Слоты BP: Body — кожа рук (катмен: + нитрил +
+бутылка), Torso — олимпийка / футболка+полотенце, Legs — брюки, Feet — `SKM_RefShoes`. `BoxingLocal` вне git — если класса
+нет, угловых просто не ставить (фолбэка не нужно).
+
+Как ставить (так сделан `L_RingCrewLook`, `look_crew_shots.py` → `build_level`): персонаж GASP (`SandboxCharacter_CMC` или
+своя копия без ввода) + ChildActorComponent «VisualOverride» = класс облика; логический манекен не рисуется
+(`Mesh->SetVisibility(false)`, `VisibilityBasedAnimTickOption = AlwaysTickPoseAndRefreshBones`) — как `ABoxerCharacter`.
+Idle Motion Matching на них работает (снимки), рост — масштаб ChildActorComponent (`look.scale`, делает `ApplyBoxerLook`).
+
+### Маркеры в `L_Ring` (`build_ring.py`, папка Markers, TargetPoint)
+
+Точка = **ступни** (Z — пол под ними; центр капсулы GASP = Z + полувысота × масштаб), курс (yaw) — лицом к стулу своего угла.
+Теги: `CornerCrew`, `<Red|Blue>`, `<Coach|Cutman>`, `<Fight|Rest>`, полное имя последним.
+
+| маркер | X, Y, Z (см) | что |
+|---|---|---|
+| `CornerCrew_Red_Coach_Fight` | −407, −270, −110 | бой: тренер на полу арены у помоста (сторона −X угла) |
+| `CornerCrew_Red_Cutman_Fight` | −340, −407, −110 | бой: катмен на полу (сторона −Y, у ступеней угла, с угловой стороны) |
+| `CornerCrew_Red_Coach_Rest` | −335, −208, 0 | перерыв: тренер на апроне за канатами |
+| `CornerCrew_Red_Cutman_Rest` | −208, −335, 0 | перерыв: катмен на апроне за канатами |
+| `CornerStool_Red` (теги `CornerStool`, `Red`, `In`) | −263, −263, 0 | стул под бойцом в углу (= `Corner_Red`, CORNER_SPOT) |
+| `CornerStool_Red_Stow` (`Stow`) | −343, −343, 0 | откуда стул въезжает / куда убирается: апрон за столбом |
+
+Синий угол — те же числа с плюсом (`CornerCrew_Blue_*`, `CornerStool_Blue[_Stow]`). Формулы — web `crew.ts`: бой — край
+помоста + 0.42 м наружу, 0.35 м от линии канатов вдоль стороны; перерыв — 0.30 м за канатами, 0.55 м от стула к середине
+стороны. Ступени угла (`Ring_Step_<угол>_*`) — на стороне ±Y у угла: катмен поднимается по ним (x ≈ ∓250, y ∓381…∓477).
+
+### Что нужно для поведения (game-feel)
+
+- **Переход бой ↔ перерыв** (web `CrewMood.up`, `crewPlace`): горизонталь — smoothstep, вверх — с опережением (`ey = min(1,
+  1.6·u)`), вниз — наоборот; скорость 0.9/с вверх, 1.1/с вниз. Катмен может честно идти CharacterMovement по ступеням (высота
+  ступени 27.5 см — проверить MaxStepHeight CMC, не мерил); тренеру со стороны ±X ступеней нет — как в web, вести по кривой `crewPlace`
+  (капсула без коллизии с помостом / `MOVE_Flying` на время перехода).
+- **Стул** (web `stool`): виден в перерыве, когда угловые наверху (`up > 0.6`) или боец сел; въезжает от `_Stow` к
+  `CornerStool_<угол>` за ~0.25 с (step 4/с) со «вырастанием» по Z 0.6 → 1; высота сиденья под бойца — масштаб по Z
+  (web `seatH`: верх сиденья ≈ высота колена бойца; меш 52 см при масштабе 1).
+- **Боец садится** — кости MetaHuman боксёра (не угловых): `pelvis` (опустить на высоту сиденья), `thigh_l/r` вперёд ~1.42 рад,
+  `calf_l/r` назад ~1.5, колени врозь 0.2, `spine_01..05` откинуть 0.1 на подушку угла, `upperarm_l/r` назад 0.75 и вниз 0.32
+  на верхний канат (132 см), `lowerarm_*` свисают 0.45 (web `sitPose.ts`: процедурно поверх клипов; IK ног на время сидения
+  гасить). Клипа «сидеть» в GASP нет.
+- **Тренер наклоняется к бойцу** (web `lean`): `spine_03..05` вперёд-вниз к голове сидящего (~0.5 рад), `neck_01/02`, `head`
+  смотрят на лицо бойца; руки — на верхний канат или к плечам бойца (`hand_l/r` IK, через канаты).
+- **Катмен протягивает бутылку**: бутылка — часть меша `SKM_CrewBody_Cutman`, жёстко на кости **`hand_l`** (в кулаке вдоль
+  большого пальца): IK левой руки (`upperarm_l` → `lowerarm_l` → `hand_l`) к точке у рта бойца (`head` + 10 см вперёд, −8 см).
+  Отдать/поставить бутылку — `SM_CrewBottle` на сокете/кости рукой (`AttachToComponent(Body, "hand_r")`), а запечённую —
+  спрятать нельзя (часть меша): если нужно, сделаю вариант тела без бутылки.
+- **Полотенце** — часть меша футболки, веса с кожи (`clavicle_l`, `spine_05`, `neck_01`) — едет с плечом. Махать/вытирать
+  им нельзя (не отдельный меш); если нужно — отдельный скин-меш полотенца на `hand_l/r` (сделаю).
+- **Реакции на бой** (web `crewReaction`): «да!» (кулак вверх: `upperarm_r` вверх, `lowerarm_r` согнут) и тревога (руки к
+  голове/канатам) — процедурно, как жесты рефери (Docs/LOOK.md «Рефери»: кости `clavicle_*`, `upperarm_*`, `lowerarm_*`, `hand_*`).
+- **Клипы GASP**: стойка (idle Motion Matching) и ходьба/поворот на месте — работают сами, если вести персонажа
+  CharacterMovement (проверено на снимках: idle на полу и на апроне). Жестов (наклон, протянуть, «да!») в GASP нет — процедурно
+  поверх MM (Control Rig/AnimBP-слой, как наведение кулака у бойцов) или клипы Mixamo через `anim_retarget.py` + монтаж.
+- Камера перерыва (web `restShot`): из ринга на угол — `стул + n·2.9 м + вбок 0.5 м`, высота 1.62, взгляд на 0.88 (снимки
+  `crew_rest_<угол>_corner` сняты так).
+
+### Пайплайн
+
+```
+rem 1. Blender: одежда, полотенце, бутылка, стул (вход — Saved/LookWork/body_full.fbx, face.fbx из look_export.py)
+%BL% -b --factory-startup --python %P%\Tools\Blender\look_crew.py
+rem 2. облик угловых в Appearance.json (Python без UE)
+"C:\Program Files\Blender Foundation\Blender 5.2\5.2\python\bin\python.exe" %P%\Tools\EditorScripts\look_appearance.py
+rem 3. UE: импорт, материалы, BP угловых и стула (коммандлет)
+%UE%\UnrealEditor-Cmd.exe %P%\BoxingUE.uproject -run=pythonscript -script=%P%\Tools\EditorScripts\look_build_crew.py -unattended -nosplash -nullrhi
+rem 4. маркеры — build_ring.py (пересобирает L_Ring); копия ринга с угловыми — look_crew_shots.py коммандлетом
+rem 5. снимки: игра на /Game/BoxingLocal/Tmp/L_RingCrewLook + -ExecCmds="DisableAllScreenMessages,py .../look_crew_shots.py"
+rem    (CREW_MODE=fight|rest, CREW_RED_ID / CREW_BLUE_ID — облик под бойцов, CREW_GAME="18" — кадры игровой камерой;
+rem     перерыв игровой камерой — -BoxRoundSec=15 -BoxStageShots -BoxShotPrefix=crew_rest_game)
+```
+
+Одежда — те же функции, что у рефери (`look_outfits.py`: `region_shell`, `transfer_weights`, …). В `region_shell` добавлены
+необязательные `pre` (разметка материалов по ровным разрезам ДО сглаживания — молния/манжеты) и `even` (у тонких клиньев после
+разрезов `use_even_offset` солидифая стрелял шипом на 70 см); по умолчанию поведение для рефери/формы прежнее.
+
+### Грабли
+
+- `push_out` к открытому мешу лица/брюк без ограничения дальности: для далёкой вершины ближайшая точка даёт огромный
+  «s < gap» — шип через полсцены. У угловых — `push_out_near` (только кожа ближе 6 см) + контроль `worst_gap` в логе.
+- `materials.clear()` в `region_shell` обнуляет индексы граней — разметку несёт атрибут грани `zone`.
+- Полотенце по коже (оболочкой) ползло по шее к уху и рвалось — теперь сетка лучами по телу без шеи (выше 1.485 м не видит).
+- Лампас по сетке тела и белый кант воротника рвались зубцами — убраны (воротник в цвет куртки).
+- Сохранение `L_Ring` при запущенной чужой игре падает (`Failed to move … to temp directory`) — пересобирать, когда игр нет.
+
+### Бюджет (LOD0)
+
+| меш | треуг. | материалы |
+|---|---|---|
+| SKM_CrewJacket | 14.8 тыс. | 3 |
+| SKM_CrewTeeTowel (футболка 8.2 + полотенце 1.0) | 9.2 тыс. | 3 |
+| SKM_CrewTrousers | 7.4 тыс. | 2 |
+| SKM_CrewBody_Coach / _Cutman (с бутылкой 0.3) | 5.3 / 7.3 тыс. | 1 / 4 |
+| SKM_RefShoes | 5.6 тыс. | 2 |
+| SM_CornerStool / SM_CrewBottle | 0.7 / 0.3 тыс. | 2 / 2 |
+
+Угловой ≈ 33–35 тыс. треугольников без лица + лицо Kellan и грумы (как рефери). Сцена с четырьмя угловыми: +160…185 draw
+calls, +260 тыс. примитивов, GPU +1.1…1.3 мс, игровой поток +1.2 мс — FPS 62–63 при 100 % (Docs/PERF.md «S-68»).
+Размеры uasset: SKM_Crew* 0.85–2.7 МБ (8.4 МБ всего, вне git), BP угловых по 0.36 МБ; в git — стул/бутылка 44 КБ, BP стула
+25 КБ ×2, 17 MI. Для мобильных: угловых — LOD1+ и без теней (они мелкие в кадре), полотенце/бутылка не прореживаются.

@@ -3,6 +3,7 @@
 // в перерыве, счёт у сбитого вне пути стоящего, досрочка, рука победителю) и живой бой ядра (автопилот).
 // Запуск: UnrealEditor-Cmd.exe <uproject> -nullrhi -unattended -nosound -ExecCmds="Automation RunTests BoxingUE.Referee;Quit"
 #include "RefereeBrain.h"
+#include "BoxerFall.h"
 #include "BoxingFightCore.h"
 #include "FightStaging.h"
 #include "Misc/AutomationTest.h"
@@ -595,6 +596,149 @@ bool FBoxRefereeTest::RunTest(const FString& Parameters)
 		{
 			TestTrue(TEXT("живой бой: нокдауны были (счёт проверен)"), Downs > 0);
 		}
+	}
+	{
+		// S-66 (QA UE-3, Головкин — Фьюри, сид 11): нокаут — сбитый не встаёт, итог досрочкой. Тело лежащего —
+		// длинная капсула «стопы → таз → голова» + кисти/колени (раскладка клипа нокдауна, см. BoxerFall); рефери
+		// на счёте, на разводе рук и потом над лежащим — НЕ на теле (было: стоял ногой между бёдрами, 18 см) и не
+		// переминается на стыке кругов обхода. Перебор: точка падения × курс × откуда идёт рефери.
+		struct FLay
+		{
+			FVector2D Feet, Pelvis, Head;
+			TArray<FVector2D> Limbs;
+		};
+		// Раскладка AM_Knockdown (оси бойца, см: X вперёд, Y вправо; голова в 152 см за точкой, ×1.02 облика).
+		const FLay Lay{FVector2D(12, 2), FVector2D(-97, 18), FVector2D(-155, 6),
+			{FVector2D(-125, -48), FVector2D(-118, 52), FVector2D(-45, -16), FVector2D(-42, 20)}};
+		auto Body = [&Lay](const FV& Pt, double YawDeg, FInput& In)
+		{
+			const FVector2D P(Pt.X * 100, Pt.Z * 100);
+			auto W = [&](const FVector2D& L)
+			{
+				const FVector2D V = BoxerFall::ToWorld(L, P, static_cast<float>(YawDeg));
+				return FV(V.X / 100, V.Y / 100);
+			};
+			In.bHasLying = true;
+			In.LyingHead = W(Lay.Head);
+			In.LyingPelvis = W(Lay.Pelvis);
+			In.bHasLyingFeet = true;
+			In.LyingFeet = W(Lay.Feet);
+			for (const FVector2D& L : Lay.Limbs) In.LyingLimbs.Add(W(L));
+		};
+		// Ось рефери → тело (до оси капсулы / кисти-колена), по самому телу — без радиусов обхода.
+		auto AxisGap = [](const FInput& In, const FV& P)
+		{
+			double D = FMath::Min(Hyp(P, ClosestOnSeg(In.LyingFeet, In.LyingPelvis, P)), Hyp(P, ClosestOnSeg(In.LyingPelvis, In.LyingHead, P)));
+			for (const FV& L : In.LyingLimbs) D = FMath::Min(D, Hyp(P, L) + 0.15); // кисть/колено тоньше корпуса: 25 см до неё ≈ 40 см до оси
+			return D;
+		};
+		struct FCase
+		{
+			FV Down, Stand, RefFrom, Cam;
+			double YawDeg;
+		};
+		TArray<FCase> Cases;
+		// Ровно случай QA: точка (−1.98, 0.84), курс −106° + доворот −25°, рефери подходит от (−2.38, 2.08), камера нокдауна.
+		Cases.Add({FV(-1.98, 0.84), FV(-1.2, 0.35), FV(-2.38, 2.08), FV(-3.89, 2.71), -131});
+		const FV Pts[5] = {FV(0, 0), FV(-1.9, 0.9), FV(1.2, -1.4), FV(1.6, 1.5), FV(-0.8, -1.9)};
+		const FV Froms[3] = {FV(0, 2), FV(2, -0.5), FV(-1.5, -1.5)};
+		for (const FV& Pt : Pts)
+			for (int32 A = 0; A < 12; ++A)
+				for (const FV& Fr : Froms)
+				{
+					const double Yaw = A * 30.0 - 180;
+					const double R = FMath::DegreesToRadians(Yaw);
+					// Стоящий — перед падающим (тот падает назад от удара), камера — сбоку от линии.
+					const FV St(FMath::Clamp(Pt.X + FMath::Cos(R) * 0.9, -2.7, 2.7), FMath::Clamp(Pt.Z + FMath::Sin(R) * 0.9, -2.7, 2.7));
+					const FV Cm(FMath::Clamp(Pt.X - FMath::Sin(R) * 3.0, -4.2, 4.2), FMath::Clamp(Pt.Z + FMath::Cos(R) * 3.0, -4.2, 4.2));
+					// Как в сцене: тело ложится внутри канатов (BoxerFall: доворот и сдвиг точки).
+					BoxerFall::FLayout L;
+					L.Pts = {Lay.Feet, Lay.Pelvis, Lay.Head};
+					L.Pts.Append(Lay.Limbs);
+					L.bValid = true;
+					BoxerFall::FPlaceIn Pi;
+					Pi.Pos = FVector2D(Pt.X * 100, Pt.Z * 100);
+					Pi.YawDeg = static_cast<float>(Yaw);
+					Pi.Layout = &L;
+					const BoxerFall::FPlaceOut Po = BoxerFall::Solve(Pi);
+					const FV Dp(Pt.X + Po.Offset.X / 100, Pt.Z + Po.Offset.Y / 100);
+					Cases.Add({Dp, St, Fr, Cm, Yaw + Po.TurnDeg});
+				}
+		double WorstSettled = 1e9, WorstQa = 1e9, WorstJitter = 0, QaJitter = 0;
+		int32 OnBody = 0, Frames = 0, Bad = 0;
+		bool bRing = true;
+		for (int32 Ci = 0; Ci < Cases.Num(); ++Ci)
+		{
+			const FCase& C = Cases[Ci];
+			FBrain B;
+			B.Place(C.RefFrom, 0);
+			const BoxingStaging::FRingPoint Np = BoxingStaging::NeutralFor({C.Down.X, C.Down.Z}, {C.Stand.X, C.Stand.Z});
+			const FV Nt(Np.X, Np.Z);
+			const TArray<FV> RouteP = {C.Stand, Nt};
+			double Min = 1e9, Jit = 0;
+			FV Prev = B.Pos;
+			FV At7 = B.Pos;
+			const double Dt = 1.0 / 30;
+			for (double T = 0; T < 9; T += Dt)
+			{
+				// 0..5 с — счёт (стоящий идёт в угол 1.8 м/с), дальше — нокаут: итог досрочкой, лежит.
+				const bool bOver = T >= 5;
+				const double U = FMath::Min(1.0, FMath::Max(0.0, T - 0.3) * 1.8 / FMath::Max(0.1, Hyp(C.Stand, Nt)));
+				const FV St = AlongPath(RouteP, U);
+				FInput In = Mk(bOver ? EPhase::Over : EPhase::Down, C.Down, St, C.Cam);
+				if (!bOver)
+				{
+					In.Down.bValid = true;
+					In.Down.Who = 0;
+					In.Down.Count = 1 + FMath::FloorToInt(T / 0.5);
+					In.Down.bHasNeutral = true;
+					In.Down.Neutral = Nt;
+					In.Down.bArrived = U >= 1;
+				}
+				else
+				{
+					In.Over.bValid = true;
+					In.Over.Winner = 1;
+					In.Over.bStoppage = true;
+				}
+				Body(C.Down, C.YawDeg, In);
+				B.Update(In, Dt);
+				bRing &= InRing(B.Pos);
+				const double G = AxisGap(In, B.Pos);
+				// Тело лежит (клип: таз на настиле с 0.8 с) и рефери успел сойти с пути падения — 1.5 с.
+				if (T >= 1.5)
+				{
+					Min = FMath::Min(Min, G);
+					++Frames;
+					OnBody += G < 0.3 ? 1 : 0;
+				}
+				// Над лежащим стоит, а не переминается: путь за последние 2 с сверх чистого смещения (дошёл позже — не в счёт).
+				if (T >= 7) Jit += Hyp(B.Pos, Prev);
+				else At7 = B.Pos;
+				Prev = B.Pos;
+			}
+			Jit -= Hyp(B.Pos, At7);
+			if (Ci == 0)
+			{
+				WorstQa = Min;
+				QaJitter = Jit;
+			}
+			if ((Min < 0.4 || Jit > 0.3) && Bad++ < 10)
+			{
+				AddInfo(FString::Printf(TEXT("  плохо: точка (%.2f, %.2f) курс %.0f, стоящий (%.2f, %.2f), рефери от (%.2f, %.2f), камера (%.2f, %.2f) → до тела %.2f, ход %.2f, конец (%.2f, %.2f)"),
+					C.Down.X, C.Down.Z, C.YawDeg, C.Stand.X, C.Stand.Z, C.RefFrom.X, C.RefFrom.Z, C.Cam.X, C.Cam.Z, Min, Jit, B.Pos.X, B.Pos.Z));
+			}
+			WorstSettled = FMath::Min(WorstSettled, Min);
+			WorstJitter = FMath::Max(WorstJitter, Jit);
+		}
+		AddInfo(FString::Printf(TEXT("S-66 нокаут: раскладок %d, случай QA — до тела %.2f м, ход за 2 с %.2f м; худший — до тела %.2f м, ход %.2f м; кадров «на теле» %d из %d"),
+			Cases.Num(), WorstQa, QaJitter, WorstSettled, WorstJitter, OnBody, Frames));
+		TestTrue(FString::Printf(TEXT("S-66 случай QA: не на теле (≥ 0.5 м, %.2f)"), WorstQa), WorstQa >= 0.5);
+		TestTrue(FString::Printf(TEXT("S-66 случай QA: стоит, не переминается (%.2f м за 2 с)"), QaJitter), QaJitter < 0.15);
+		TestTrue(FString::Printf(TEXT("S-66 нокаут: до тела ≥ 0.4 м во всех раскладках (%.2f)"), WorstSettled), WorstSettled >= 0.4);
+		TestTrue(TEXT("S-66 нокаут: ни кадра на теле"), OnBody == 0);
+		TestTrue(FString::Printf(TEXT("S-66 нокаут: не переминается (%.2f м за 2 с)"), WorstJitter), WorstJitter < 0.3);
+		TestTrue(TEXT("S-66 нокаут: внутри канатов"), bRing);
 	}
 	return true;
 }

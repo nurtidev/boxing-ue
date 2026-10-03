@@ -147,10 +147,10 @@ enum class EFightMethod : uint8
 enum class EDecisionKind : uint8
 {
 	None,         // досрочка
-	Unanimous,    // единогласное
-	Majority,     // большинством
-	Split,        // раздельное
-	TieBreak,     // любители: по доп. показателям (суммы карт / попадания)
+	Unanimous,    // единогласное (все судьи за одного: любители 5–0, профи 3–0)
+	Majority,     // большинством (только профи: 2 судьи за одного, третий — ничья)
+	Split,        // раздельное (любители WB п. 9.1.3: 3–2, 4–1, а также 4 + ничья / 3 + две ничьи; профи: 2–1)
+	TieBreak,     // не используется с S-65 (любители: равная карта — судья называет победителя, WB п. 9.1.5)
 	DrawUnanimous,
 	DrawMajority,
 	DrawSplit,
@@ -195,10 +195,10 @@ struct FFightConfig
 	float RoundSeconds = 180.f;
 	float BreakSeconds = 60.f;   // перерыв между раундами
 	bool bAutoProceed = true;    // false — перерыв длится, пока UE-слой не подаст Proceed
-	bool bAllowDraw = false;     // профи: ничья возможна; любители — добивается по очкам
+	bool bAllowDraw = false;     // профи: ничья возможна; любители — 5 судей World Boxing, ничьей нет (S-65)
 	// Профи-правила (S-61, осознанное отличие от веба — Docs/FIGHT_CORE_PORT.md «Профи: досрочки и судьи»): без шлема и в
 	// малых перчатках чистый силовой может уронить (сильнее — в тяжёлых весах), рефери останавливает избиение, у судей
-	// свой взгляд на раунд. false — любители: ядро бит-в-бит как веб (ни одного нового броска ГСЧ).
+	// свой взгляд на раунд. false — любители: поток боя бит-в-бит как веб; судейство — по World Boxing (S-65, свой ГСЧ судей).
 	bool bProRules = false;
 	// Постановка раунда (corners.ts): старт и перерыв в своих углах, выход по гонгу, нейтральный угол на
 	// нокдауне. false — прежний режим «раунд с центра» (corners:false веба; проверки механики).
@@ -208,6 +208,10 @@ struct FFightConfig
 	bool bGlassJaw = false;
 	uint32 Seed = 1;
 };
+
+// Судей: любители — 5 (World Boxing Competition Rules, п. 6.1.2: «In each Bout, five (5) Judges»), профи — 3. Массивы карт —
+// на MAX_JUDGES, сколько из них заполнено — NumJudges (результат/снимок). S-65.
+inline constexpr int32 MAX_JUDGES = 5;
 
 // Карта одного судьи: [красный, синий].
 struct FJudgeCard
@@ -220,7 +224,7 @@ struct FRoundResult
 {
 	int32 Round = 0;
 	float Landed[2] = {0.f, 0.f};     // взвешенные чистые попадания
-	FJudgeCard JudgeCards[3];
+	FJudgeCard JudgeCards[MAX_JUDGES]; // заполнены первые FFightResult::NumJudges
 	int32 Stamina[2] = {0, 0};
 	int32 Knockdowns[2] = {0, 0};
 	int32 Damage[2] = {0, 0};         // урон, ПОЛУЧЕННЫЙ бойцом
@@ -232,7 +236,10 @@ struct FFightResult
 	EFightMethod Method = EFightMethod::None;
 	EDecisionKind Decision = EDecisionKind::None;
 	int32 StoppedRound = 0;           // 0 — бой прошёл всю дистанцию
-	FJudgeCard JudgeTotals[3];
+	FJudgeCard JudgeTotals[MAX_JUDGES];
+	int32 NumJudges = 3;              // любители — 5, профи — 3 (S-65)
+	// Любители (WB п. 9.1.5): судья с равной суммой по требованию регламента НАЗЫВАЕТ победителя — кого (0/1); −1 — не называл.
+	int32 TieNominee[MAX_JUDGES] = {-1, -1, -1, -1, -1};
 	int32 Knockdowns[2] = {0, 0};
 	float Form[2] = {1.f, 1.f};       // скрытая «форма дня» 0.9..1.1
 	TArray<FRoundResult> Rounds;
@@ -307,7 +314,8 @@ struct FFightSnapshot
 	int32 DownWho = -1;               // кто лежит (Phase == Down)
 	int32 DownCount = 0;              // счёт рефери 1..10
 	float RiseProgress = 0.f;         // 0..1 набитый тапами подъём (человек)
-	FJudgeCard JudgeTotals[3];        // накопительные суммы судей
+	FJudgeCard JudgeTotals[MAX_JUDGES]; // накопительные суммы судей (первые NumJudges)
+	int32 NumJudges = 3;              // любители — 5, профи — 3 (S-65)
 	bool bHasResult = false;          // итог — GetResult()
 	// Постановка раунда (S-53): стадия, цели, кто дошёл. Stage.Kind == None — идёт бой (или бой окончен).
 	FRingStage Stage;

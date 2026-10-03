@@ -44,6 +44,8 @@ namespace
 	constexpr float OCC_R = 24.f;
 	constexpr float OCC_TOP = 180.f;
 	constexpr float OCC_FRAC = 0.4f;
+	// S-66: «стоит на теле» — ось рефери ближе к кости лежащего (стопа рефери ~15 см от оси + толщина тела).
+	constexpr float ON_BODY_CM = 30.f;
 
 	void CurlFor(BoxRef::EHand H, float Out[5])
 	{
@@ -750,12 +752,21 @@ void ABoxingReferee::Tick(float DeltaSeconds)
 	// S-62: где ляжет сбитый (итоговая поза падения с доворотом от канатов) — обходить всё тело, а не точку ног.
 	{
 		const int32 DownI = In.Down.bValid ? In.Down.Who : (In.Over.bValid && In.Over.bStoppage && In.Over.Winner >= 0 ? 1 - In.Over.Winner : -1);
-		FVector LHead, LPelvis;
-		if (DownI >= 0 && GM->GetBoxer(DownI)->GetLyingBody(LHead, LPelvis))
+		FVector LHead, LPelvis, LFeet;
+		TArray<FVector> LLimbs;
+		auto ToFv = [&Floor](const FVector& P) { return BoxRef::FV((P.X - Floor.X) / 100.0, (P.Y - Floor.Y) / 100.0); };
+		if (DownI >= 0 && GM->GetBoxer(DownI)->GetLyingLayout(LHead, LPelvis, LFeet, LLimbs))
 		{
 			In.bHasLying = true;
-			In.LyingHead = BoxRef::FV((LHead.X - Floor.X) / 100.0, (LHead.Y - Floor.Y) / 100.0);
-			In.LyingPelvis = BoxRef::FV((LPelvis.X - Floor.X) / 100.0, (LPelvis.Y - Floor.Y) / 100.0);
+			In.LyingHead = ToFv(LHead);
+			In.LyingPelvis = ToFv(LPelvis);
+			// S-66: тело целиком — капсула «стопы → таз → голова» и конечности (кисти, колени).
+			In.bHasLyingFeet = true;
+			In.LyingFeet = ToFv(LFeet);
+			for (const FVector& L : LLimbs)
+			{
+				In.LyingLimbs.Add(ToFv(L));
+			}
 		}
 	}
 	if (!bBrainInit)
@@ -950,19 +961,65 @@ void ABoxingReferee::UpdateMetrics(const BoxRef::FInput& In, float DeltaSeconds)
 		KdSeen = 1;
 	}
 	// S-62: до тела сбитого — падающего и лежащего (кости видимого меша), а не до точки его ног.
+	// S-66: и после нокаута (итог, проигравший лежит), и бёдра/голени — в KO рефери стоял ногой между бёдрами, а метрика
+	// мерила только до таза/стоп (18 см «ни о чём не говорили»); плюс кадры «на теле» и заслон лежащего.
+	int32 LyingI = -1;
 	if (S.Phase == EFightPhase::Down && S.DownWho >= 0 && S.DownWho < 2)
 	{
-		if (const USkeletalMeshComponent* M = GM->GetBoxer(S.DownWho)->GetFeelMesh())
+		LyingI = S.DownWho;
+	}
+	else if (S.Phase == EFightPhase::Over && bOverStoppageLying && In.Over.Winner >= 0 && S.Fighters[1 - In.Over.Winner].bDown)
+	{
+		LyingI = 1 - In.Over.Winner;
+	}
+	TArray<FVector, TInlineAllocator<12>> LyingPts;
+	bool bFloored = false;
+	if (LyingI >= 0)
+	{
+		const ABoxerCharacter* Down = GM->GetBoxer(LyingI);
+		bFloored = Down->IsFloored();
+		if (const USkeletalMeshComponent* M = Down->GetFeelMesh())
 		{
-			static const TCHAR* Bones[] = {TEXT("head"), TEXT("pelvis"), TEXT("hand_l"), TEXT("hand_r"), TEXT("lowerarm_l"), TEXT("lowerarm_r"), TEXT("foot_l"), TEXT("foot_r")};
+			static const TCHAR* Bones[] = {TEXT("head"), TEXT("pelvis"), TEXT("hand_l"), TEXT("hand_r"), TEXT("lowerarm_l"), TEXT("lowerarm_r"),
+				TEXT("thigh_l"), TEXT("thigh_r"), TEXT("calf_l"), TEXT("calf_r"), TEXT("foot_l"), TEXT("foot_r")};
+			float MinNow = 1e6f;
 			for (const TCHAR* B : Bones)
 			{
 				if (M->GetBoneIndex(FName(B)) != INDEX_NONE)
 				{
-					MinDownBodyCm = FMath::Min(MinDownBodyCm, static_cast<float>(FVector::Dist2D(Me, M->GetBoneLocation(FName(B)))));
+					const FVector P = M->GetBoneLocation(FName(B));
+					LyingPts.Add(P);
+					MinNow = FMath::Min(MinNow, static_cast<float>(FVector::Dist2D(Me, P)));
+					// Середина бедра (кость thigh — у таза, calf — у колена): сюда и вставал рефери.
+					if (FCString::Strncmp(B, TEXT("calf"), 4) == 0)
+					{
+						const FName Thigh(FString(TEXT("thigh")) + (B[5] == TEXT('l') ? TEXT("_l") : TEXT("_r")));
+						if (M->GetBoneIndex(Thigh) != INDEX_NONE)
+						{
+							MinNow = FMath::Min(MinNow, static_cast<float>(FVector::Dist2D(Me, 0.5f * (P + M->GetBoneLocation(Thigh)))));
+						}
+					}
+				}
+			}
+			MinDownBodyCm = FMath::Min(MinDownBodyCm, MinNow);
+			if (bFloored)
+			{
+				++LyingFrames;
+				LyingT += DeltaSeconds;
+				if (MinNow < ON_BODY_CM)
+				{
+					++OnBodyFrames;
+				}
+				if (LyingT >= 1.f)
+				{
+					MinLyingSettledCm = FMath::Min(MinLyingSettledCm, MinNow);
 				}
 			}
 		}
+	}
+	if (!bFloored)
+	{
+		LyingT = 0.f;
 	}
 	// «Рефери закрывает бойца в кадре»: лучи камеры к точкам бойца (40…170 см) проходят сквозь ось рефери
 	// (вертикальный отрезок, радиус OCC_R) ближе к камере, чем боец. Боец закрыт, если закрыто ≥ OCC_FRAC точек.
@@ -997,6 +1054,29 @@ void ABoxingReferee::UpdateMetrics(const BoxRef::FInput& In, float DeltaSeconds)
 			}
 		}
 		bOcc = Hit >= FMath::CeilToInt(OCC_FRAC * N);
+	}
+	// S-66: заслон ЛЕЖАЩЕГО — лучи камеры к его костям (голова, таз, кисти, бёдра, колени, стопы) сквозь ось рефери.
+	if (bFloored && LyingPts.Num() > 0)
+	{
+		int32 Hit = 0;
+		for (const FVector& P : LyingPts)
+		{
+			FVector OnRay, OnAxis;
+			FMath::SegmentDistToSegmentSafe(Cam, P, A0, A1, OnRay, OnAxis);
+			const double T = FVector::Dist(Cam, OnRay) / FMath::Max(1.0, FVector::Dist(Cam, P));
+			if (FVector::Dist(OnRay, OnAxis) < OCC_R && T < 0.97)
+			{
+				++Hit;
+			}
+		}
+		const bool bLyingOcc = Hit >= FMath::CeilToInt(OCC_FRAC * LyingPts.Num());
+		LyingOccFrames += bLyingOcc ? 1 : 0;
+		LyingOccRun = bLyingOcc ? LyingOccRun + DeltaSeconds : 0.f;
+		LyingOccWorst = FMath::Max(LyingOccWorst, LyingOccRun);
+	}
+	else
+	{
+		LyingOccRun = 0.f;
 	}
 	++AllFrames;
 	if (bOcc)
@@ -1061,6 +1141,10 @@ void ABoxingReferee::LogSummary(const TCHAR* Why)
 	UE_LOG(LogTemp, Log, TEXT("REF СВОДКА (%s): кадров боя %d — рефери закрывает бойца в кадре камеры %d (%.1f%%), макс. подряд %.2f с; во всех фазах %d из %d; сбоку 1.2–2 м %.1f%%; мин. до стоящего бойца %.0f см; мин. до тела сбитого %.0f см; макс. ход актора %.2f м/с, макс. отставание от логики %.0f см"),
 		Why, FightFrames, OccludedFrames, FightFrames ? 100.f * OccludedFrames / FightFrames : 0.f, OccludedWorst, OccludedAny, AllFrames,
 		FightFrames ? 100.f * SideOk / FightFrames : 0.f, MinStandCm, MinDownBodyCm, MaxSpeedSeen, MaxLagCm);
+	// S-66: лежащий (счёт и нокаут) — «на теле», заслон лежащего в кадре, дистанция после того, как тело легло.
+	UE_LOG(LogTemp, Log, TEXT("REF ЛЕЖАЩИЙ (%s): кадров %d — рефери на теле (< %.0f см) %d, закрывает лежащего %d (%.1f%%), макс. подряд %.2f с; мин. до тела (лёг ≥ 1 с) %.0f см"),
+		Why, LyingFrames, ON_BODY_CM, OnBodyFrames, LyingOccFrames, LyingFrames ? 100.f * LyingOccFrames / LyingFrames : 0.f, LyingOccWorst,
+		MinLyingSettledCm);
 }
 
 void ABoxingReferee::UpdateShots(const BoxRef::FInput& In)
