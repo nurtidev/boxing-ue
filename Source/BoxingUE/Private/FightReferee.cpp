@@ -346,12 +346,15 @@ void FRefereeVisualRootNode::CacheBones_AnyThread(const FAnimationCacheBonesCont
 void FRefereeVisualRootNode::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
 	Retarget.Update_AnyThread(Context);
+	Dt = Context.GetDeltaTime();
 }
 
 void FRefereeVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
 {
 	Retarget.Evaluate_AnyThread(Output);
 	Fx.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform());
+	Feet.Apply(Output.Pose, FeetFrame, Output.AnimInstanceProxy->GetComponentTransform(), Dt); // S-70: ступни
+	Dt = 0.f;
 }
 
 void FRefereeVisualProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutNodes)
@@ -368,6 +371,17 @@ void FRefereeVisualProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSe
 		if (const ABoxingReferee* R = Inst->Referee.Get())
 		{
 			Root.Frame = R->GetPoseFrame();
+			// S-70: ступни рефери — стойка из позы GASP; идёт (быстрее 25 см/с) — попеременным шагом, иначе стоит.
+			static const bool bFootLock = [] { int32 V = 1; FParse::Value(FCommandLine::Get(), TEXT("BoxFootLock="), V); return V != 0; }();
+			FBoxerFeelFrame& F = Root.FeetFrame;
+			const float Speed = static_cast<float>(R->GetVelocity().Size2D());
+			F.Fwd = R->GetActorForwardVector();
+			F.Right = R->GetActorRightVector();
+			F.bFeetOn = bFootLock && !R->IsHidden();
+			F.bFeetPoseStance = true;
+			F.bFeetWalking = Speed > 25.f || (F.bFeetWalking && Speed > 12.f); // гистерезис
+			F.bFeetCalm = Speed < 10.f;
+			F.FeetScale = 1.f;
 		}
 	}
 }

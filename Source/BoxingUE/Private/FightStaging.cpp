@@ -13,6 +13,14 @@
 #include "FightStaging.h"
 #include "BoxingFightCore.h"
 
+// S-73: ядро — строго /fp:precise и в UE (модуль собирается с /fp:fast). Иначе компилятор вправе не округлять
+// промежуточные float (1.f/60.f уходил в Think() как double 1/60 — часы бота плыли на 1e-9), и один и тот же
+// сид давал в UE другой бой, чем в харнессе: карточка «при твоей игре» 37% против 44% харнесса. Сидируемость
+// бит-в-бит между UE, харнессом и платформами — только с этой прагмой (MSVC и clang).
+#if defined(_MSC_VER) || defined(__clang__)
+#pragma float_control(precise, on)
+#endif
+
 namespace BoxingStagingImpl
 {
 	constexpr double ARRIVE_EPS = 1e-6;

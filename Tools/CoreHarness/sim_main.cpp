@@ -3,6 +3,9 @@
 #include "FightBot.h"
 #include "FightProfile.h"
 #include <chrono>
+#if defined(_MSC_VER) || defined(__clang__)
+#pragma float_control(precise, on) // S-73: как ядро — харнесс бит-в-бит с UE при любом /fp
+#endif
 extern "C" int printf(const char*, ...);
 
 namespace
@@ -762,7 +765,7 @@ namespace
 	int32 PlayerForecastTable(int32 N, bool bCheck)
 	{
 		const EFightBotSkill Skills[3] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong};
-		printf("шансы при твоей игре (S-65): прогноз = бот за красного, average 150 / края 60 боёв (сиды прогноза), факт — %d боёв (сиды bal.sh), 55 с, вес боя\n", N);
+		printf("шансы при твоей игре (S-65): прогноз = бот за красного, average 240 / края 60 боёв (сиды прогноза), факт — %d боёв (сиды bal.sh), 55 с, вес боя\n", N);
 		printf("  %-26s %-9s | %-17s | %-29s | %-29s | %-29s\n", "пара", "", "ИИ vs ИИ (карточка)", "novice прогноз / факт", "average прогноз / факт",
 			"strong прогноз / факт");
 		int32 Bad = 0;
@@ -794,10 +797,86 @@ namespace
 			Bad += !(Pl.Novice.RedWin <= Pl.Average.RedWin + 0.05 && Pl.Average.RedWin <= Pl.Strong.RedWin + 0.05);
 			printf(" %.0f мс\n", Ms);
 		}
-		printf("  прогноз трёх уровней: в среднем %.0f мс на пару (270 боёв ядра + бот)\n", MsSum / FMath::Max(1, MsN));
+		printf("  прогноз трёх уровней: в среднем %.0f мс на пару (360 боёв ядра + бот)\n", MsSum / FMath::Max(1, MsN));
 		if (!bCheck) return 0;
 		printf("шансы при твоей игре: average-прогноз vs факт в пределах ДИ разности серий, novice ≤ average ≤ strong — %s\n", Bad ? "MISMATCH" : "OK");
 		return Bad ? 1 : 0;
+	}
+
+	// S-73: сверка «шансов при твоей игре» (карточка) с бот-сериями UE. Варианты на одной паре, бот average:
+	//   card    — ровно карточка: PredictWithBot, сиды прогноза (^0x5eed), с постановкой углов (S-73), 240 боёв;
+	//   fc N    — те же сиды, N боёв (сходимость карточки);
+	//   ue N    — как -BoxBotFights UE: сиды ^0xabc, С постановкой углов (RunBotSetups);
+	//   = UE    — PredictWithBot на сидах ^0xabc: обязан совпасть с «ue» бой-в-бой (тот же путь, что -BoxBotFights);
+	//   кусками по 50 — разброс 50-боевых серий (как плейтест QA).
+	int32 ForecastAudit(int32 N, int32 Only)
+	{
+		printf("S-73: сверка прогноза average (карточка) с бот-сериями, %d боёв на вариант, раунд 55 с, вес боя\n", N);
+		for (int32 Qi = 0; Qi < int32(sizeof(GQa) / sizeof(GQa[0])); ++Qi)
+		{
+			if (Only >= 0 && Qi != Only) continue;
+			const FQaRef& Q = GQa[Qi];
+			const FPairSetup P = PairOf(GRoster[Q.R], GRoster[Q.B], true);
+			const int32 Rounds = P.bPro ? 10 : 3;
+			const auto Ci = [](double F, int32 Num) { return 1.96 * FMath::Sqrt(FMath::Max(F * (1 - F), 0.01) / FMath::Max(1, Num)); };
+			const BoxingFightProfile::FOutcomeOdds Card = BoxingFightProfile::PredictWithBot(P.R, P.B, Rounds, P.bPro, EFightBotSkill::Average, 240);
+			const BoxingFightProfile::FOutcomeOdds Fc = BoxingFightProfile::PredictWithBot(P.R, P.B, Rounds, P.bPro, EFightBotSkill::Average, N);
+			const BoxingFightProfile::FOutcomeOdds Nc = BoxingFightProfile::PredictWithBot(P.R, P.B, Rounds, P.bPro, EFightBotSkill::Average, N, 0xabcu);
+			const FBotTally Ue = RunBotSetups(EFightBotSkill::Average, P.R, P.B, N, 55.f, Rounds, P.bPro);
+			printf("  %-26s %d р. | карточка %3.0f%% | прогноз-сиды %d: %4.1f%% ±%3.1f | прогноз на UE-сидах %4.1f%% (%s) | UE-сиды с углами (как -BoxBotFights) %4.1f%% ±%3.1f\n",
+				Q.Name, Rounds, Card.RedWin * 100, N, Fc.RedWin * 100, Ci(Fc.RedWin, N) * 100, Nc.RedWin * 100, int32(Nc.RedWin * N + 0.5f) == Ue.Wins ? "= UE бой-в-бой" : "≠ UE!", Ue.Rate() * 100,
+				Ci(Ue.Rate(), Ue.N) * 100);
+			// Разброс серий по 50 (UE-сиды с углами, непересекающиеся куски).
+			double Lo = 1, Hi = 0;
+			int32 Chunks = 0, Far = 0;
+			for (int32 From = 0; From + 50 <= N; From += 50)
+			{
+				int32 W = 0;
+				char Seq[51] = {};
+				for (int32 K = From; K < From + 50; ++K)
+				{
+					FFightConfig C;
+					C.Seed = BotSeed(K);
+					C.Rounds = Rounds;
+					C.RoundSeconds = 55.f;
+					C.BreakSeconds = 0.f;
+					C.bAllowDraw = P.bPro;
+					C.bProRules = P.bPro;
+					C.Fighters[0] = P.R;
+					C.Fighters[0].bAiControlled = false;
+					C.Fighters[1] = P.B;
+					C.Fighters[1].bAiControlled = true;
+					FBoxingFightCore Core;
+					Core.Init(C);
+					FFightBot Bot;
+					Bot.Reset(EFightBotSkill::Average, C.Seed, 0);
+					TArray<FFightBotCmd> Cmds;
+					for (int32 S = 0; S < 60 * 60 * 60 && !Core.IsOver(); ++S)
+					{
+						Cmds.Reset();
+						bool bHeld = false;
+						EFightAction Held = EFightAction::StepBack;
+						Bot.Think(Core.GetSnapshot(), 1.f / 60.f, Cmds, bHeld, Held);
+						for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+						if (bHeld) Core.ApplyAction(0, Held);
+						Core.Tick(1.f / 60.f);
+						Core.PollEvents();
+					}
+					W += Core.GetResult().WinnerIndex == 0;
+					Seq[K - From] = Core.GetResult().WinnerIndex == 0 ? 'W' : '.';
+				}
+				const double R = W / 50.0;
+				if (From < 200) printf("      серия %d-%d: %d/50 %s\n", From, From + 49, W, Seq);
+				Lo = FMath::Min(Lo, R);
+				Hi = FMath::Max(Hi, R);
+				Far += AbsD(R - Fc.RedWin) >= 0.17 ? 1 : 0;
+				++Chunks;
+			}
+			if (Chunks > 0)
+				printf("      серии по 50 (UE-сиды, углы): %d серий, от %.0f%% до %.0f%%; отклонение ≥ 17 п. от прогноза — %d из %d\n", Chunks, Lo * 100, Hi * 100,
+					Far, Chunks);
+		}
+		return 0;
 	}
 
 	// Досрочки профи по весу: топ-10 каждого дивизиона ростера (близкие соседи и перевес через одного/двух), ИИ против ИИ.
@@ -952,6 +1031,14 @@ int main(int Argc, char** Argv)
 		int32 N = 0;
 		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
 		return PlayerForecastTable(N > 0 ? N : 200, true);
+	}
+	// S-73: sim.exe audit <N> [пара] — сверка карточки «при твоей игре» с бот-сериями (пара — индекс GQa, по умолчанию все).
+	if (Argc >= 2 && Argv[1][0] == 'a')
+	{
+		int32 N = 0, Only = -1;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		if (Argc >= 4) { Only = 0; for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Only = Only * 10 + (*C - '0'); }
+		return ForecastAudit(N > 0 ? N : 1000, Only);
 	}
 	// sim.exe webref <N> <раунд, с> — только сверка с эталоном веба (подробно).
 	if (Argc >= 2 && Argv[1][0] == 'w')

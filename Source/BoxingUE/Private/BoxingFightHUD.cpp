@@ -11,6 +11,7 @@
 #include "InputCoreTypes.h"
 #include "Misc/CommandLine.h"
 #include "UIFightHud.h"
+#include "UIBreakPanel.h"
 #include "UIFightResult.h"
 #include "BoxingGameInstanceSubsystem.h"
 #include "FightFx.h"
@@ -124,6 +125,12 @@ void ABoxingFightHUD::Tick(float DeltaSeconds)
 	{
 		OpenPause();
 	}
+	// S-71: A геймпада в перерыве — «Продолжить» (Enter идёт через PlayerController → RequestBreakProceed).
+	if (PC && !PauseWidget && GM && GM->IsFightStarted() && GM->GetSnapshot().Phase == EFightPhase::Between
+		&& PC->WasInputKeyJustPressed(EKeys::Gamepad_FaceButton_Bottom))
+	{
+		RequestBreakProceed(TEXT("A"));
+	}
 	if (!HudWidget || ResultWidget || !GM || !GM->IsFightStarted() || !GM->GetCore().IsOver())
 	{
 		return;
@@ -140,6 +147,27 @@ void ABoxingFightHUD::Tick(float DeltaSeconds)
 	{
 		ShowResult();
 	}
+}
+
+bool ABoxingFightHUD::RequestBreakProceed(const TCHAR* Source)
+{
+	ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr;
+	if (!GM || PauseWidget)
+	{
+		return false;
+	}
+	const UBoxingBreakPanelWidget* Panel = HudWidget ? HudWidget->GetBreakPanel() : nullptr;
+	if (Panel && GM->GetSnapshot().Phase == EFightPhase::Between && !Panel->CanProceed())
+	{
+		UE_LOG(LogTemp, Log, TEXT("UI: «Продолжить» (%s) — игрок ещё садится в угол, ждём"), Source);
+		return false;
+	}
+	GM->QueueAction(EFightAction::Proceed);
+	if (GM->GetSnapshot().Phase == EFightPhase::Between)
+	{
+		UE_LOG(LogTemp, Log, TEXT("UI: «Продолжить» (%s) через %.1f с перерыва"), Source, Panel ? Panel->BreakTime() : -1.f);
+	}
+	return true;
 }
 
 void ABoxingFightHUD::UpdateReplayInput()

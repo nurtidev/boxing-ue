@@ -25,6 +25,7 @@
 #include "Retargeter/IKRetargeter.h"
 #include "AnimNodes/AnimNode_RetargetPoseFromMesh.h"
 #include "Engine/SkeletalMesh.h"
+#include "UnrealClient.h" // S-70: -BoxFootShots
 
 namespace
 {
@@ -478,6 +479,27 @@ void ABoxerCharacter::SnapToFightState(const FVector& WorldTarget, float YawDeg)
 	FightTargetVelocity = FVector::ZeroVector;
 }
 
+FBoxerSitFrame ABoxerCharacter::GetSitFrame() const
+{
+	// S-71: кадр посадки для видимого меша (BoxerSit.h); вне перерыва W = 0 — поза не трогается.
+	FBoxerSitFrame F;
+	const float K = FMath::Clamp(Sit.W, 0.f, 1.f);
+	F.W = K * K * (3.f - 2.f * K);
+	const FVector Fwd = GetActorForwardVector().GetSafeNormal2D();
+	F.Fwd = Fwd;
+	F.Left = FVector(Fwd.Y, -Fwd.X, 0.f);
+	// Кисти — на канаты своего угла (IK сидя).
+	if (F.W > 1e-3f)
+	{
+		if (const ABoxingFightGameMode* GM = GetWorld() ? GetWorld()->GetAuthGameMode<ABoxingFightGameMode>() : nullptr)
+		{
+			BoxerSit::RopeHands(GM->GetRingFloorCenter(), FighterIndex, GetActorLocation(), F.Left, F.HandTarget);
+			F.bHands = true;
+		}
+	}
+	return F;
+}
+
 void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double CoreTime, const FVector& WorldTarget, float YawDeg, float DeltaSeconds)
 {
 	if (bReplayDriven)
@@ -506,6 +528,7 @@ void ABoxerCharacter::ApplyFightState(const FFightSnapshot& Snapshot, double Cor
 	// Постановка раунда (S-53): выход из угла / в угол / в нейтральный угол — ходьба вне боевого времени,
 	// поэтому скорость точки — из ядра (WalkVel, м/с → см/с), а курс доворачивается плавно (TrackFightTarget).
 	bStaging = Snapshot.Stage.Kind != ERingStageKind::None;
+	Sit.Update(BoxerSit::WantsSit(Snapshot, FighterIndex), DeltaSeconds); // S-71: сесть на стул в углу (перерыв)
 	if (F.WalkSpeed > 0.f)
 	{
 		FightTargetVelocity = FVector(F.WalkVelX * 100.f, F.WalkVelZ * 100.f, 0.f);
@@ -933,26 +956,110 @@ void ABoxerCharacter::Tick(float DeltaSeconds)
 
 void ABoxerCharacter::UpdateFootProbe(float DeltaSeconds)
 {
+	// S-70 (отладка): -BoxFootShots=T0,N,ШАГ — серия из N снимков раз в ШАГ с, с T0 с реального времени
+	// → Docs/screens/<-BoxShotPrefix, иначе feel5_feet>_tNNNNN.png (мс от T0). Снимает красный.
+	static const TArray<float> FootShots = [] {
+		TArray<float> V;
+		FString S;
+		if (FParse::Value(FCommandLine::Get(), TEXT("BoxFootShots="), S, false))
+		{
+			TArray<FString> Parts;
+			S.ParseIntoArray(Parts, TEXT(","));
+			for (const FString& P : Parts) V.Add(FCString::Atof(*P));
+		}
+		return V;
+	}();
+	if (FighterIndex == 0 && FootShots.Num() >= 3 && FootProbe.ShotsTaken < static_cast<int32>(FootShots[1]))
+	{
+		const float Now = GetWorld()->GetRealTimeSeconds();
+		const float At = FootShots[0] + FootProbe.ShotsTaken * FootShots[2];
+		if (Now >= At)
+		{
+			static const FString Prefix = [] { FString V = TEXT("feel5_feet"); FParse::Value(FCommandLine::Get(), TEXT("BoxShotPrefix="), V); return V; }();
+			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") /
+				FString::Printf(TEXT("%s_t%05d.png"), *Prefix, FMath::RoundToInt((At - FootShots[0]) * 1000.f)));
+			FScreenshotRequest::RequestScreenshot(Path, false, false);
+			++FootProbe.ShotsTaken;
+		}
+	}
 	static const bool bOn = FParse::Param(FCommandLine::Get(), TEXT("BoxFootLog"));
 	const USkeletalMeshComponent* M = bOn ? GetFeelMesh() : nullptr;
-	if (!M || DeltaSeconds <= 0.004f || bKnockedDown || bReplayDriven)
+	if (!M || DeltaSeconds <= 0.004f || bKnockedDown || bReplayDriven || Sit.W > 0.01f)
 	{
 		FootProbe.bPrev = false;
 		return;
 	}
-	static const FName Balls[2] = {TEXT("ball_l"), TEXT("ball_r")};
-	static const FName Feet[2] = {TEXT("foot_l"), TEXT("foot_r")};
+	// S-70: подушечки — из самой оценки позы (анимпоток, тот же трансформ компонента): кость меша на игровом потоке —
+	// поза прошлой оценки × трансформ компонента ЭТОГО кадра, и опора «ехала» бы со скоростью корпуса. Новая оценка —
+	// по счётчику; её шаг — шаг анимации (хит-стоп ≈ 0 — пропуск).
+	const FBoxerFeelDebug Dbg = GetFeelDebug();
 	FVector P[2];
-	for (int32 I = 0; I < 2; ++I)
+	if (Dbg.bBallW)
 	{
-		const FName B = M->GetBoneIndex(Balls[I]) != INDEX_NONE ? Balls[I] : Feet[I];
-		if (M->GetBoneIndex(B) == INDEX_NONE)
+		if (Dbg.EvalSeq == FootProbe.LastSeq)
 		{
 			return;
 		}
-		P[I] = M->GetBoneLocation(B);
+		FootProbe.LastSeq = Dbg.EvalSeq;
+		DeltaSeconds = Dbg.EvalDt;
+		if (DeltaSeconds <= 0.004f)
+		{
+			FootProbe.bPrev = false;
+			return;
+		}
+		P[0] = Dbg.BallW[0];
+		P[1] = Dbg.BallW[1];
+	}
+	else
+	{
+		static const FName Balls[2] = {TEXT("ball_l"), TEXT("ball_r")};
+		static const FName Feet[2] = {TEXT("foot_l"), TEXT("foot_r")};
+		for (int32 I = 0; I < 2; ++I)
+		{
+			const FName B = M->GetBoneIndex(Balls[I]) != INDEX_NONE ? Balls[I] : Feet[I];
+			if (M->GetBoneIndex(B) == INDEX_NONE)
+			{
+				return;
+			}
+			P[I] = M->GetBoneLocation(B);
+		}
+	}
+	for (int32 I = 0; I < 2; ++I)
+	{
 		FootProbe.MinZ = FMath::Min(FootProbe.MinZ, static_cast<float>(P[I].Z));
 	}
+	// Переносы планировщика и шаги ядра (на ногах, вне повтора).
+	FootProbe.ProbeT += DeltaSeconds;
+	if (Dbg.bFeet)
+	{
+		if (FootProbe.Swings0 < 0)
+		{
+			FootProbe.Swings0 = Dbg.FootSwings;
+			FootProbe.Drags0 = Dbg.FootDrags;
+		}
+		FootProbe.Swings = Dbg.FootSwings - FootProbe.Swings0;
+		FootProbe.Drags = Dbg.FootDrags - FootProbe.Drags0;
+		FootProbe.MaxHipDrop = FMath::Max(FootProbe.MaxHipDrop, Dbg.HipDropCm);
+		FMemory::Memcpy(FootProbe.Why, Dbg.FootWhy, sizeof(FootProbe.Why));
+		FMemory::Memcpy(FootProbe.Ctx, Dbg.FootCtx, sizeof(FootProbe.Ctx));
+	}
+	static const float Verbose = [] { float V = 0.f; FParse::Value(FCommandLine::Get(), TEXT("BoxFootVerbose="), V); return V; }();
+	if (Verbose > 0.f && Dbg.bFeet)
+	{
+		FootProbe.VerboseT -= DeltaSeconds;
+		if (FootProbe.VerboseT <= 0.f)
+		{
+			FootProbe.VerboseT = Verbose;
+			UE_LOG(LogTemp, Log, TEXT("FEETV [%d] t=%.2f w=%.2f U %.2f/%.2f heel %.2f/%.2f stretch %.3f/%.3f err %.1f/%.1f см lunge %.1f/%.1f см drop %.1f v=%.0f punch=%d step=%d"),
+				FighterIndex, GetWorld()->GetTimeSeconds(), Dbg.FeetW, Dbg.FootU[0], Dbg.FootU[1], Dbg.FootHeel[0], Dbg.FootHeel[1], Dbg.FootStretch[0], Dbg.FootStretch[1],
+				Dbg.FootErrCm[0], Dbg.FootErrCm[1], Dbg.FootLungeCm[0], Dbg.FootLungeCm[1], Dbg.HipDropCm, GetVelocity().Size2D(), bPunching ? 1 : 0, static_cast<int32>(StepKind));
+			UE_LOG(LogTemp, Log, TEXT("FEETV [%d] стойка: передняя %s; L (%.1f, %.1f) см %.0f°, R (%.1f, %.1f) см %.0f° (вперёд, вправо)"), FighterIndex,
+				Dbg.LeadSide == 0 ? TEXT("левая") : TEXT("правая"), Dbg.StanceCm[0].X, Dbg.StanceCm[0].Y, Dbg.StanceYawDeg[0], Dbg.StanceCm[1].X, Dbg.StanceCm[1].Y, Dbg.StanceYawDeg[1]);
+		}
+	}
+	const uint8 StepNow = static_cast<uint8>(StepKind);
+	FootProbe.EngineSteps += (StepNow != 0 && FootProbe.PrevStep == 0) ? 1 : 0;
+	FootProbe.PrevStep = StepNow;
 	// Вид хода: скорость актора в осях бойца — вбок сильнее, чем вперёд/назад, и быстрее 35 см/с — «боковой шаг».
 	const FVector V = GetVelocity();
 	const float Lat = FMath::Abs(FVector::DotProduct(V, GetActorRightVector()));
@@ -967,18 +1074,28 @@ void ABoxerCharacter::UpdateFootProbe(float DeltaSeconds)
 	{
 		for (int32 I = 0; I < 2; ++I)
 		{
-			// Опора: подушечка у настила (до 3 см над самой низкой точкой за бой).
-			if (P[I].Z < FootProbe.MinZ + 3.f && FootProbe.Prev[I].Z < FootProbe.MinZ + 3.f)
+			// Опора: подушечка у настила (до 3 см над «полом» подушечек) — классификация в конце боя (LogFootProbe):
+			// пол — 2-й перцентиль высоты подушечек, а не минимум (один кадр с носком под настилом сдвигал минимум, и
+			// опорой не считалось почти ничего).
+			FFootProbe::FSample Smp;
+			Smp.ZHi = static_cast<float>(FMath::Max(P[I].Z, FootProbe.Prev[I].Z));
+			Smp.ZLo = static_cast<float>(FMath::Min(P[I].Z, FootProbe.Prev[I].Z));
+			Smp.D = static_cast<float>(FVector::Dist2D(P[I], FootProbe.Prev[I]));
+			Smp.Dt = DeltaSeconds;
+			Smp.K = static_cast<uint8>(K);
+			FootProbe.Samples.Add(Smp);
+			// S-70: опора по планировщику — ступня не в переносе (и не волоком) в этой и прошлой оценке.
+			if (Dbg.bFeet && Dbg.FeetW > 0.98f && Dbg.FootU[I] < 0.f && FootProbe.PrevU[I] < 0.f)
 			{
 				const double D = FVector::Dist2D(P[I], FootProbe.Prev[I]);
-				FootProbe.SlideSum[K] += D;
-				FootProbe.PlantT[K] += DeltaSeconds;
-				++FootProbe.Frames[K];
-				FootProbe.Fast[K] += D / DeltaSeconds > 20.0 ? 1 : 0;
-				FootProbe.Speeds[K].Add(static_cast<float>(D / DeltaSeconds));
+				FootProbe.PlanSum[K] += D;
+				FootProbe.PlanT[K] += DeltaSeconds;
+				FootProbe.PlanSpeeds[K].Add(static_cast<float>(D / DeltaSeconds));
 			}
 		}
 	}
+	FootProbe.PrevU[0] = Dbg.bFeet ? Dbg.FootU[0] : 0.f;
+	FootProbe.PrevU[1] = Dbg.bFeet ? Dbg.FootU[1] : 0.f;
 	FootProbe.Prev[0] = P[0];
 	FootProbe.Prev[1] = P[1];
 	FootProbe.bPrev = true;
@@ -992,6 +1109,32 @@ void ABoxerCharacter::LogFootProbe()
 		return;
 	}
 	const TCHAR* Names[2] = {TEXT("прочее"), TEXT("боковой ход")};
+	// Геометрическая опора: подушечка у настила (до 3 см над «полом» подушечек — 2-й перцентиль их высоты за бой).
+	float Floor = 0.f;
+	{
+		FFootProbe& F = FootProbe;
+		TArray<float> Lo;
+		Lo.Reserve(F.Samples.Num());
+		for (const FFootProbe::FSample& S : F.Samples)
+		{
+			Lo.Add(S.ZLo);
+		}
+		Lo.Sort();
+		Floor = Lo.Num() ? Lo[Lo.Num() / 50] : 0.f;
+		for (const FFootProbe::FSample& S : F.Samples)
+		{
+			if (S.ZHi < Floor + 3.f && S.Dt > 0.f)
+			{
+				F.SlideSum[S.K] += S.D;
+				F.PlantT[S.K] += S.Dt;
+				++F.Frames[S.K];
+				F.Fast[S.K] += S.D / S.Dt > 20.f ? 1 : 0;
+				F.Speeds[S.K].Add(S.D / S.Dt);
+			}
+		}
+		UE_LOG(LogTemp, Log, TEXT("FEET ПОЛ [%d]: подушечки — мин. %.1f, пол (p2) %.1f, медиана %.1f см (мир Z)"), FighterIndex,
+			Lo.Num() ? Lo[0] : 0.f, Floor, Lo.Num() ? Lo[Lo.Num() / 2] : 0.f);
+	}
 	for (int32 K = 0; K < 2; ++K)
 	{
 		FFootProbe& F = FootProbe;
@@ -999,10 +1142,26 @@ void ABoxerCharacter::LogFootProbe()
 		const int32 N = F.Speeds[K].Num();
 		const float Med = N ? F.Speeds[K][N / 2] : 0.f;
 		const float P25 = N ? F.Speeds[K][N / 4] : 0.f;
-		UE_LOG(LogTemp, Log, TEXT("FEET СВОДКА [%d] %s %s: %s — хода %.1f с, опоры %.1f с, скольжение в опоре ср. %.1f см/с, медиана %.1f, p25 %.1f, кадров > 20 см/с %.1f%%"),
+		const float P90 = N ? F.Speeds[K][FMath::Min(N - 1, N * 9 / 10)] : 0.f;
+		UE_LOG(LogTemp, Log, TEXT("FEET СВОДКА [%d] %s %s: %s — хода %.1f с, опоры %.1f с, скольжение в опоре ср. %.1f см/с, медиана %.1f, p25 %.1f, p90 %.1f, кадров > 20 см/с %.1f%%"),
 			FighterIndex, *Preset.Name, IsSouthpaw() ? TEXT("левша") : TEXT("правша"), Names[K], F.MoveT[K], F.PlantT[K],
-			F.PlantT[K] > 0 ? F.SlideSum[K] / F.PlantT[K] : 0.0, Med, P25, F.Frames[K] ? 100.0 * F.Fast[K] / F.Frames[K] : 0.0);
+			F.PlantT[K] > 0 ? F.SlideSum[K] / F.PlantT[K] : 0.0, Med, P25, P90, F.Frames[K] ? 100.0 * F.Fast[K] / F.Frames[K] : 0.0);
+		// S-70: опора по планировщику (ступня не в переносе и не волоком).
+		F.PlanSpeeds[K].Sort();
+		const int32 Np = F.PlanSpeeds[K].Num();
+		if (Np > 0)
+		{
+			UE_LOG(LogTemp, Log, TEXT("FEET ПЛАН [%d] %s: %s — опоры %.1f с, скольжение ср. %.1f см/с, медиана %.1f, p90 %.1f"),
+				FighterIndex, IsSouthpaw() ? TEXT("левша") : TEXT("правша"), Names[K], F.PlanT[K], F.PlanT[K] > 0 ? F.PlanSum[K] / F.PlanT[K] : 0.0,
+				F.PlanSpeeds[K][Np / 2], F.PlanSpeeds[K][FMath::Min(Np - 1, Np * 9 / 10)]);
+		}
 	}
+	FFootProbe& F = FootProbe;
+	UE_LOG(LogTemp, Log, TEXT("FEET ШАГИ [%d] %s: замер %.1f с, переносов %d (%.2f/с, волоком %d), шагов ядра %d (%.2f/с) — %.2f переноса на шаг ядра, таз опускался до %.1f см"),
+		FighterIndex, IsSouthpaw() ? TEXT("левша") : TEXT("правша"), F.ProbeT, F.Swings, F.ProbeT > 0 ? F.Swings / F.ProbeT : 0.0, F.Drags,
+		F.EngineSteps, F.ProbeT > 0 ? F.EngineSteps / F.ProbeT : 0.0, F.EngineSteps > 0 ? static_cast<double>(F.Swings) / F.EngineSteps : 0.0, F.MaxHipDrop);
+	UE_LOG(LogTemp, Log, TEXT("FEET ПРИЧИНЫ [%d]: нога на пределе %d, подтяг %d, порог %d, разворот ступни %d, шаг ядра %d, ходьба %d | в ударе %d, выпад %d, шаг ядра %d, разворот на месте %d, ход корпуса %d (всё — с начала боя)"),
+		FighterIndex, F.Why[0], F.Why[1], F.Why[2], F.Why[3], F.Why[4], F.Why[5], F.Ctx[0], F.Ctx[1], F.Ctx[2], F.Ctx[3], F.Ctx[4]);
 }
 
 void ABoxerCharacter::EndPlay(const EEndPlayReason::Type Reason)
@@ -1515,6 +1674,25 @@ void ABoxerCharacter::UpdateFeel(float DeltaSeconds)
 	}
 	Feel.Fwd = GetActorForwardVector();
 	Feel.Right = GetActorRightVector();
+	// S-70: ступни (FBoxerFootIk на видимом меше). Лёжа/вставая/сидя — IK гаснет (ноги клипа / позы стула).
+	{
+		static const bool bFootLock = [] { int32 V = 1; FParse::Value(FCommandLine::Get(), TEXT("BoxFootLock="), V); return V != 0; }();
+		const bool bFloorPose = bKnockedDown || ActiveMontageSlot == EBoxMontageSlot::Knockdown || ActiveMontageSlot == EBoxMontageSlot::GetUp;
+		Feel.bFeetOn = bFootLock && !bFloorPose && !bFeetIkOff && !Sit.bWant && Sit.W <= 0.01f;
+		Feel.bFeetWalking = bStaging && FightTargetVelocity.Size2D() > 5.f;
+		Feel.FeetStep = static_cast<int32>(StepKind);
+		Feel.bFeetPunch = bPunching;
+		Feel.FeetPunchPhase = PunchPhaseAnim;
+		Feel.bFeetRearArm = CurrentPunch == EBoxPunchType::Cross || CurrentPunch == EBoxPunchType::HookR || CurrentPunch == EBoxPunchType::UpperR;
+		Feel.FeetPunchKind = CurrentPunch == EBoxPunchType::Jab ? 0 : CurrentPunch == EBoxPunchType::Cross ? 1
+			: (CurrentPunch == EBoxPunchType::HookL || CurrentPunch == EBoxPunchType::HookR) ? 2 : 3;
+		Feel.FeetScale = VisualScale();
+		Feel.bFeetSouthpaw = IsSouthpaw();
+		// Стойка учится по спокойным кадрам: стоит, не бьёт, не ныряет, без реакции и без клипа удара в блок/реакции.
+		Feel.bFeetCalm = Feel.bFeetOn && !bPunching && SlipSide == 0 && !React.IsActive() && !Feel.bFeetWalking &&
+			GetVelocity().Size2D() < 15.f && ActiveMontageSlot != EBoxMontageSlot::Hit && ActiveMontageSlot != EBoxMontageSlot::BlockHit &&
+			ActiveMontageSlot != EBoxMontageSlot::Finale;
+	}
 	Feel.FistReachCm = FistReachCm;
 	// S-62: подшаг — в осях своего меша (× свой масштаб облика); против более высокого — длиннее (голова выше и дальше:
 	// раздвижка VisMinSep идёт по среднему росту), иначе низкий бил 198-см «в перчатку».

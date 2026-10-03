@@ -200,7 +200,7 @@ namespace BoxFx
 		OutLook = FVector(Body.X + D.X * 60.f, Body.Y + D.Y * 60.f, RingCenter.Z + 60.f);
 	}
 
-	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale)
+	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale, float Seated)
 	{
 		const float S = Corner == 0 ? -1.f : 1.f;
 		const FVector C(RingCenter.X + S * 263.f, RingCenter.Y + S * 263.f, RingCenter.Z);
@@ -209,7 +209,9 @@ namespace BoxFx
 		const float Wide = FMath::Clamp((Aspect - 1.25f) / 0.35f, 0.f, 1.f);
 		// S-62: боец в UE в углу стоит (стула нет) — кадр веба (сидящий) резал голову 198-см под панелью HUD: дальше
 		// и выше по росту (не меньше, чем для 178 см).
-		const float Hs = FMath::Clamp(HeightScale, 1.f, 1.25f);
+		// S-71: боец сел на стул (Seated → 1) — снова кадр веба (сидящий ниже, угловые рядом): рост не важен.
+		const float Sd = FMath::Clamp(Seated, 0.f, 1.f);
+		const float Hs = FMath::Lerp(FMath::Clamp(HeightScale, 1.f, 1.25f), 1.f, Sd);
 		const float D = 290.f * (1.f + 0.45f * Portrait) * Hs;
 		const FVector R(N.Y, -N.X, 0.f); // вправо от взгляда «камера → угол»
 		FVector Pos = C + N * D + R * 50.f;
@@ -223,7 +225,7 @@ namespace BoxFx
 		Pos.Z = RingCenter.Z + (162.f + 30.f * Portrait) * Hs + FMath::Min(50.f, Out * 0.45f);
 		Look += Dx;
 		// Точка взгляда чуть выше, чем у веба (стоит, а не сидит): голова не под панелью раунда/счёта HUD.
-		Look.Z = RingCenter.Z + (88.f + 17.f * (1.f - Portrait) - 68.f * Portrait) * Hs;
+		Look.Z = RingCenter.Z + (88.f + 17.f * (1.f - Portrait) * (1.f - Sd) - 68.f * Portrait) * Hs;
 		OutCam = Pos;
 		OutLook = Look;
 	}
@@ -727,6 +729,12 @@ void UBoxingFightFx::UpdateTimeDilation()
 
 bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 {
+	if (bShotCam)
+	{
+		Cam = ShotCam; // S-71: кадр скриншота угловых
+		Look = ShotLook;
+		return true;
+	}
 	if (!bEnabled)
 	{
 		return false;
@@ -1047,8 +1055,14 @@ void UBoxingFightFx::UpdateReplay(float RealDt)
 			static const float Every = [] { float V = 1.f; FParse::Value(FCommandLine::Get(), TEXT("BoxReplayShotEvery="), V); return FMath::Max(0.1f, V); }();
 			Replay.ShotTimer = Every; // -BoxReplayShotEvery=С (S-66: QA снимал раз в 1 с — 6 кадров кончались до падения)
 			--ReplayShotsLeft;
-			const FString Path = FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") /
-				FString::Printf(TEXT("fx_replay_%02d.png"), ++Replay.ShotIndex));
+			// S-70: с -BoxShotPrefix=X — Docs/screens/X_replay_NN.png; без него — Saved/Screenshots/BoxReplay (отслеживаемые
+			// снимки в Docs/screens больше не перезаписываются).
+			static const FString ShotPrefix = [] { FString V; FParse::Value(FCommandLine::Get(), TEXT("BoxShotPrefix="), V); return V; }();
+			const FString Path = ShotPrefix.IsEmpty()
+				? FPaths::ConvertRelativePathToFull(FPaths::ProjectSavedDir() / TEXT("Screenshots/BoxReplay") /
+					FString::Printf(TEXT("fx_replay_%02d.png"), ++Replay.ShotIndex))
+				: FPaths::ConvertRelativePathToFull(FPaths::ProjectDir() / TEXT("Docs/screens") /
+					FString::Printf(TEXT("%s_replay_%02d.png"), *ShotPrefix, ++Replay.ShotIndex));
 			FScreenshotRequest::RequestScreenshot(Path, true, false);
 			UE_LOG(LogTemp, Log, TEXT("FX скриншот повтора %s (t=%+.2f с от удара)"), *Path, Replay.Cursor - Replay.ClipKd);
 		}
@@ -1177,7 +1191,8 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 		}
 		const float Aspect = Vp.Y > 0.f ? Vp.X / Vp.Y : 16.f / 9.f;
 		const ABoxerCharacter* Pl = GM->GetBoxer(GM->GetPlayerIndex());
-		BoxFx::RestShot(GM->GetPlayerIndex(), Aspect, Pl->GetActorLocation(), RC, RestCam, RestLook, Pl->Preset.HeightCm > 0.f ? Pl->Preset.HeightCm / 178.f : 1.f);
+		BoxFx::RestShot(GM->GetPlayerIndex(), Aspect, Pl->GetActorLocation(), RC, RestCam, RestLook, Pl->Preset.HeightCm > 0.f ? Pl->Preset.HeightCm / 178.f : 1.f,
+			Pl->GetSitWeight());
 	}
 	RestMix += ((bRest ? 1.f : 0.f) - RestMix) * (1.f - FMath::Exp(-(bRest ? 1.4f : 2.6f) * RealDt));
 	if (!bRest && RestMix < 0.01f)

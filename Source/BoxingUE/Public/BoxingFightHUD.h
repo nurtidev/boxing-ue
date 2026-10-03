@@ -39,6 +39,10 @@ public:
 	void SurrenderFromPause();
 	void ExitToMenu();
 
+	// S-71: «Продолжить» перерыва (Enter — из PlayerController, A — опрос в Tick, сценарий). Пока игрок не сел в углу —
+	// отказ (панель пишет «Садится в угол…»). Без панели (Canvas-HUD) — сразу, как раньше. true — Proceed отправлен.
+	bool RequestBreakProceed(const TCHAR* Source);
+
 protected:
 	virtual void BeginPlay() override;
 

@@ -8,6 +8,7 @@
 #include "UIFightHud.generated.h"
 
 class ABoxingFightGameMode;
+class UBoxingBreakPanelWidget;
 class UBorder;
 class UProgressBar;
 class UTextBlock;
@@ -21,6 +22,8 @@ class BOXINGUE_API UBoxingFightHudWidget : public UBoxingUiWidget
 public:
 	void SetControlsVisible(bool bVisible);
 	bool AreControlsVisible() const { return bControls; }
+	// S-71: панель перерыва (карты судей, статистика, совет угла, «Продолжить»).
+	UBoxingBreakPanelWidget* GetBreakPanel() const { return BreakPanel; }
 
 protected:
 	virtual UWidget* BuildUi() override;
@@ -53,6 +56,12 @@ private:
 	UPROPERTY(Transient) TObjectPtr<UTextBlock> CueText;
 	UPROPERTY(Transient) TObjectPtr<UWidget> Controls;
 	UPROPERTY(Transient) TObjectPtr<UWidget> AutoBadge;
+	UPROPERTY(Transient) TObjectPtr<UBoxingBreakPanelWidget> BreakPanel;
+	// Сценарий проверки (-BoxUiAuto): снимки перерыва и «Продолжить» за игрока.
+	int32 ShotBreakRound = 0;
+	bool bShotBreakWait = false;
+	bool bShotBreakReady = false;
+	float ReadyTime = 0.f;
 	// Повтор нокаута (S-59): плашка «ПОВТОР» и подсказка пропуска; панели/часы/баннер на это время скрыты.
 	UPROPERTY(Transient) TObjectPtr<UWidget> PanelRoot0;
 	UPROPERTY(Transient) TObjectPtr<UWidget> PanelRoot1;

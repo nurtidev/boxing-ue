@@ -20,6 +20,7 @@
 #include "AnimNodes/AnimNode_RetargetPoseFromMesh.h"
 #include "BoneIndices.h"
 #include "RefereeBrain.h"
+#include "BoxerFeel.h" // S-70: ступни (FBoxerFootIk)
 #include "FightReferee.generated.h"
 
 class ABoxingFightGameMode;
@@ -75,6 +76,10 @@ struct FRefereeVisualRootNode : public FAnimNode_Base
 {
 	FAnimNode_RetargetPoseFromMesh Retarget;
 	FRefereePoseFx Fx;
+	// S-70: ступни — тот же планировщик и IK ног, что у бойцов (стойка — из позы, ход — попеременным шагом).
+	FBoxerFootIk Feet;
+	FBoxerFeelFrame FeetFrame;
+	float Dt = 0.f;
 	FRefereePoseFrame Frame;
 
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;

@@ -166,6 +166,8 @@ public:
 	// Сдача игрока (меню паузы, S-59): поражение RSC в текущем раунде, события раздаются сразу.
 	void Surrender();
 	bool WasSurrendered() const { return bSurrendered; }
+	// S-71 (ux): каждое событие ядра — подписчикам UI (копилка «совета угла» в перерыве). Только чтение, ГСЧ не трогает.
+	TMulticastDelegate<void(const FFightEvent&)> OnFightEventUi;
 
 	// Оформление арены по типу боя (S-64): акторы L_Ring с тегом ArenaAmateur / ArenaPro.
 	UFUNCTION(BlueprintCallable, Category = "Boxing")

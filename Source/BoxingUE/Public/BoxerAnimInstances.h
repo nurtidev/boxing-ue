@@ -18,6 +18,7 @@
 #include "AnimNodes/AnimNode_Slot.h"
 #include "AnimNodes/AnimNode_RetargetPoseFromMesh.h"
 #include "BoxerFeel.h"
+#include "BoxerSit.h"
 #include "BoxerAnimInstances.generated.h"
 
 class ABoxerCharacter;
@@ -41,6 +42,8 @@ struct FBoxerLayerRootNode : public FAnimNode_Base
 	FAnimNode_Slot Slot;
 	FBoxerUpperMask Mask;
 	FBoxerPoseFx Fx;
+	FBoxerFootIk Feet; // S-70: без визуальной подмены ступни ставятся здесь (с Params.bFx)
+	float Dt = 0.f;
 	FBoxerFeelFrame Frame;
 	FBoxerLayerParams Params;
 	FName BlendRoot = TEXT("spine_01");
@@ -101,6 +104,12 @@ struct FBoxerVisualRootNode : public FAnimNode_Base
 	FBoxerPoseFx Fx;
 	FBoxerFeelFrame Frame;
 	FBoxerFeelDebug Debug;
+	// S-70: ступни — планировщик + IK ног, после слоя «ощущения», до посадки (сидя IK гаснет: Frame.bFeetOn).
+	FBoxerFootIk Feet;
+	float Dt = 0.f;
+	// S-71: посадка на стул в перерыве — поверх слоя «ощущения» (BoxerSit.h).
+	FBoxerSitFx SitFx;
+	FBoxerSitFrame SitFrame;
 
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;

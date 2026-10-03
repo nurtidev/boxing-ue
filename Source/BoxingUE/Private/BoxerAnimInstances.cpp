@@ -85,6 +85,7 @@ void FBoxerLayerRootNode::CacheBones_AnyThread(const FAnimationCacheBonesContext
 void FBoxerLayerRootNode::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
 	Slot.Update_AnyThread(Context);
+	Dt = Context.GetDeltaTime();
 }
 
 void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
@@ -156,6 +157,8 @@ void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
 	{
 		Debug = FBoxerFeelDebug();
 		Fx.Apply(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug);
+		Feet.Apply(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), Dt, &Debug); // S-70: ступни
+		Dt = 0.f;
 	}
 }
 
@@ -252,6 +255,7 @@ void FBoxerVisualRootNode::CacheBones_AnyThread(const FAnimationCacheBonesContex
 void FBoxerVisualRootNode::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
 	Retarget.Update_AnyThread(Context);
+	Dt = Context.GetDeltaTime();
 }
 
 void FBoxerVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
@@ -259,6 +263,9 @@ void FBoxerVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
 	Retarget.Evaluate_AnyThread(Output);
 	Debug = FBoxerFeelDebug();
 	Fx.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug);
+	Feet.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform(), Dt, &Debug); // S-70: ступни
+	Dt = 0.f; // повторная оценка без обновления (пауза) — стоп-кадр, не шаг
+	SitFx.Apply(Output.Pose, SitFrame, Output.AnimInstanceProxy->GetComponentTransform()); // S-71: сидя на стуле в перерыве
 }
 
 void FBoxerVisualProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutNodes)
@@ -276,6 +283,7 @@ void FBoxerVisualProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeco
 		if (ABoxerCharacter* B = FindBoxer(Inst->Boxer, Inst))
 		{
 			Root.Frame = B->GetFeelFrame();
+			Root.SitFrame = B->GetSitFrame(); // S-71
 		}
 	}
 }

@@ -439,6 +439,18 @@ public:
 	// S-58: проигравший досрочкой остановлен на ногах (RSC по итогам раунда, отказ) — стоит, не падает.
 	bool IsStoppedStanding() const { return bStoppedStanding; }
 
+	// S-70: принудительно выключить фиксацию ступней (IK ног гаснет за ~0.1 с; лёжа/вставая/сидя — и так выкл.).
+	bool bFeetIkOff = false;
+
+	// ---------- S-71: посадка на стул в углу в перерыве (BoxerSit.h, поза — на видимом меше) ----------
+	// true — боец сел на стул (стадия Rest, дошёл до угла, поза ≥ 95 %): панель перерыва / «Продолжить» (ux-mobile).
+	UFUNCTION(BlueprintPure, Category = "Boxing")
+	bool IsSeatedInCorner() const { return Sit.IsSeated(); }
+	// Вес позы «сидя» 0..1 (стул/камера перерыва — ABoxingCornerCrew, FightFx).
+	float GetSitWeight() const { return Sit.W; }
+	// Кадр позы для анимпотока видимого меша.
+	FBoxerSitFrame GetSitFrame() const;
+
 	// ---------- Падение внутри канатов (S-62, BoxerFall.h) ----------
 	// Лежит на настиле: клип падения дошёл до касания таза (а не «ещё стоит согнувшись») — для баннера HUD.
 	bool IsFloored() const;
@@ -526,6 +538,29 @@ private:
 		int32 Fast[2] = {0, 0};        // кадров опоры со скольжением > 20 см/с
 		int32 Frames[2] = {0, 0};
 		TArray<float> Speeds[2];       // см/с каждого кадра опоры (медиана — устойчиво к ошибкам классификации)
+		// S-70: опора по планировщику ступней (ступня не в переносе) — те же виды хода; переносы и шаги ядра.
+		TArray<float> PlanSpeeds[2];
+		double PlanT[2] = {0, 0};
+		double PlanSum[2] = {0, 0};
+		double ProbeT = 0;             // с замера (стоя на ногах)
+		int32 Swings0 = -1, Drags0 = 0; // счётчики переносов планировщика на старте замера
+		int32 Swings = 0, Drags = 0;
+		int32 LastSeq = -1;
+		float PrevU[2] = {0.f, 0.f};
+		int32 EngineSteps = 0;         // шагов ядра (фронт StepKind)
+		uint8 PrevStep = 0;
+		float MaxHipDrop = 0.f;
+		int32 Why[6] = {0, 0, 0, 0, 0, 0};
+		int32 Ctx[5] = {0, 0, 0, 0, 0};
+		int32 ShotsTaken = 0;          // -BoxFootShots
+		float VerboseT = 0.f;          // -BoxFootVerbose=С
+		// Кадры подушечек для геометрической опоры (классификация в конце: пол — 2-й перцентиль высоты).
+		struct FSample
+		{
+			float ZHi = 0.f, ZLo = 0.f, D = 0.f, Dt = 0.f;
+			uint8 K = 0;
+		};
+		TArray<FSample> Samples;
 	} FootProbe;
 	void LoadDefaultMontages();
 	UAnimMontage* FindMontage(const TCHAR* Name) const;
@@ -653,5 +688,6 @@ private:
 	float FallW = 0.f;
 	FVector2D FallOffsetNow = FVector2D::ZeroVector;
 	float FallTurnNow = 0.f;
+	FBoxerSitState Sit; // S-71
 	float FallMaxOutCm = -1e6f; // отладка (-BoxFallLog): кости тела за канатами
 };

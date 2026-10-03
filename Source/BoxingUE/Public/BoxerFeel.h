@@ -14,6 +14,7 @@
 
 #include "CoreMinimal.h"
 #include "BoneIndices.h"
+#include "FootPlant.h"
 
 struct FCompactPose;
 struct FBoneContainer;
@@ -132,6 +133,19 @@ struct FBoxerFeelFrame
 
 	// Отладка (пишется анимпотоком, читается на игровом потоке с лагом в кадр).
 	bool bActive = false;
+
+	// --- S-70: ступни (FBoxerFootIk) ---
+	bool bFeetOn = false;      // IK ног включён (не лежит, не встаёт, не сидит); false — плавно гаснет
+	bool bFeetCalm = false;    // стоит спокойно (без удара/реакции/хода) — по этим кадрам учится стойка
+	bool bFeetWalking = false; // ходьба постановки (выход из угла, в угол) — попеременный шаг
+	int32 FeetStep = 0;        // вид шага ядра (EStepKind: 0 — не идёт)
+	bool bFeetPunch = false;   // идёт удар (пивот опорной ступни «от ноги»)
+	bool bFeetRearArm = false; // бьёт задняя рука
+	int32 FeetPunchKind = 0;   // 0 — джеб, 1 — кросс, 2 — хук, 3 — апперкот
+	float FeetPunchPhase = 0.f; // фаза удара (контакт = 0.5)
+	float FeetScale = 1.f;     // масштаб облика (рост / эталон)
+	bool bFeetSouthpaw = false; // левша: стойка зеркально (передняя — правая)
+	bool bFeetPoseStance = false; // стойка — из позы (рефери): без боксёрской стойки, таза боком, приседа и пяток
 };
 
 namespace BoxerFeel
@@ -157,6 +171,31 @@ struct FBoxerFeelDebug
 	FVector RawChest = FVector::ZeroVector;
 	FVector RawHandL = FVector::ZeroVector;
 	FVector RawHandR = FVector::ZeroVector;
+	// S-70: ступни (FBoxerFootIk) — [0] левая, [1] правая.
+	bool bFeet = false;               // планировщик ступней работал в этом кадре
+	float FeetW = 0.f;                // вес IK ног
+	float FootU[2] = {-1.f, -1.f};    // фаза переноса (−1 — стоит в опоре)
+	bool bFootDrag[2] = {false, false}; // перенос — подтяг волоком
+	int32 FootSwings = 0;             // всего переносов (накопительно)
+	int32 FootDrags = 0;              // из них волоком
+	float HipDropCm = 0.f;            // таз опущен, чтобы нога дотянулась (см, мир)
+	int32 LeadSide = 0;               // передняя ступня: 0 — левая (правша), 1 — правая (левша)
+	// Замер: подушечки в мире в этой оценке позы (после IK; и с выключенной фиксацией).
+	bool bBallW = false;
+	FVector BallW[2] = {FVector::ZeroVector, FVector::ZeroVector};
+	int32 EvalSeq = 0;
+	float EvalDt = 0.f;
+	int32 FootWhy[6] = {0, 0, 0, 0, 0, 0}; // причины переносов: нога на пределе, подтяг, порог, разворот, шаг ядра, ходьба
+	int32 FootCtx[5] = {0, 0, 0, 0, 0};    // контекст: удар, выпад, шаг ядра, разворот, ход корпуса
+	float FootHeel[2] = {0.f, 0.f};       // подъём пятки (рад), по стороне
+	float FootStretch[2] = {0.f, 0.f};    // вытянутость ноги
+	float FootLungeCm[2] = {0.f, 0.f};    // выпад таза от стойки (вперёд, вбок), см
+	float FootErrCm[2] = {0.f, 0.f};      // щиколотка после IK → цель (см): недотянулась
+	// S-70: пик выноса таза в текущем ударе (FBoxerPoseFx → FBoxerFootIk в той же оценке позы), пространство компонента.
+	bool bLungePeak = false;
+	FVector LungePeakCS = FVector::ZeroVector;
+	FVector2D StanceCm[2] = {FVector2D::ZeroVector, FVector2D::ZeroVector}; // стойка: щиколотка от корпуса (вперёд, вправо), см
+	float StanceYawDeg[2] = {0.f, 0.f};   // курс ступни стойки от курса бойца (град)
 };
 
 // Применение кадра к позе. Индексы костей кэшируются по серийному номеру контейнера костей.
@@ -182,6 +221,58 @@ private:
 	FCompactPoseBoneIndex UpperArm[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
 	FCompactPoseBoneIndex LowerArm[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
 	FCompactPoseBoneIndex Hand[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+};
+
+// S-70: ступни видимого меша — планировщик BoxFoot (FootPlant.h, порт footPlant.ts) + двухзвенная IK ног (порт legIk.ts и
+// plantFeet из SkinnedFighter.tsx). Применяется ПОСЛЕДНИМ (после ретаргета и FBoxerPoseFx): опорная ступня стоит в мире,
+// шаг — перенос одной ступни, таз — перенос веса/«пружина»/опускание ≤ 3.5 см, пятки и пивот на подушечке.
+// Стойка (щиколотки, курс и поворот ступней, таз) учится на лету по «спокойным» кадрам позы GASP (bFeetCalm) в
+// пространстве компонента — левша (зеркало позы) получается сам: передняя ступня — та, что дальше по курсу.
+class FBoxerFootIk
+{
+public:
+	// Dt — шаг анимации этого меша (с; хит-стоп ≈ 0). CompToWorld — трансформ компонента.
+	void Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const FTransform& CompToWorld, float Dt, FBoxerFeelDebug* OutDebug = nullptr);
+	void Reset();
+
+private:
+	void Resolve(const FBoneContainer& Bones);
+	void ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const FTransform& CompToWorld, float Dt, FBoxerFeelDebug* OutDebug);
+
+	int32 Seq = 0;
+	uint16 Serial = MAX_uint16;
+	const void* ContainerPtr = nullptr;
+	FCompactPoseBoneIndex Pelvis = FCompactPoseBoneIndex(INDEX_NONE);
+	// [0] — левая, [1] — правая.
+	FCompactPoseBoneIndex Thigh[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+	FCompactPoseBoneIndex Calf[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+	FCompactPoseBoneIndex Foot[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+	FCompactPoseBoneIndex Ball[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+	FCompactPoseBoneIndex Spine1 = FCompactPoseBoneIndex(INDEX_NONE); // корпус над тазом (таз боком — корпус на месте)
+
+	// Стойка (пространство компонента, см): щиколотки, подушечки, поворот ступней, таз.
+	bool bStance = false;
+	float CalmTime = 0.f;
+	FVector StAnkle[2];
+	FVector StBall[2];
+	FQuat StFootQ[2];
+	FVector StPelvis = FVector::ZeroVector;
+
+	// Состояние (планировщик — в мире, м; индекс планировщика: 0 — передняя, 1 — задняя).
+	BoxFoot::FGait Gait;
+	BoxFoot::FStepTrack Track;
+	BoxFoot::FLungeHold Hold[2];
+	float IkW = 0.f;
+	float WalkMix = 0.f;
+	bool bPrevBody = false;
+	FVector2D PrevBody = FVector2D::ZeroVector;
+	float VX = 0.f, VY = 0.f;
+	float WsX = 0.f, WsY = 0.f; // перенос веса (мир, м)
+	float Dip = 0.f;            // «пружина» на шаге (м)
+	float HipDrop = 0.f;        // опускание таза (м)
+	float ReachHeel[2] = {0.f, 0.f};
+	float Twist[2] = {0.f, 0.f};
+	int32 Ctx[5] = {0, 0, 0, 0, 0}; // отладка: контекст переносов (см. FBoxerFeelDebug::FootCtx)
 };
 
 // Маска «верх тела» для слоя ударов: кость BlendRoot и всё под ней.

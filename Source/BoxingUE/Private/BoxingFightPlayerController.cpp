@@ -2,6 +2,7 @@
 
 #include "BoxerCharacter.h"
 #include "BoxingFightGameMode.h"
+#include "BoxingFightHUD.h"
 #include "FightFx.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
@@ -248,6 +249,12 @@ void ABoxingFightPlayerController::OnProceed(const FInputActionInstance& Instanc
 	{
 		return;
 	}
+	// S-71: «Продолжить» перерыва — через панель перерыва HUD (активна, когда игрок сел в углу).
+	if (ABoxingFightHUD* Hud = Cast<ABoxingFightHUD>(GetHUD()))
+	{
+		Hud->RequestBreakProceed(TEXT("Enter"));
+		return;
+	}
 	if (ABoxingFightGameMode* GM = GetFightMode())
 	{
 		GM->QueueAction(EFightAction::Proceed);
@@ -375,7 +382,8 @@ void ABoxingFightPlayerController::UpdateCamera(float DeltaSeconds)
 		const FVector Fwd = CamBoxer->GetActorForwardVector().GetSafeNormal2D().RotateAngleAxis(CamOn[1], FVector::UpVector);
 		Cam = FVector(At.X, At.Y, Floor.Z) + Fwd * CamOn[2] + FVector(0.f, 0.f, CamOn[3]);
 		RefCamFinal = Cam;
-		FightCamera->SetActorLocationAndRotation(Cam, (FVector(At.X, At.Y, Floor.Z + 95.f) - Cam).Rotation());
+		// S-70: 5-е число — высота точки взгляда (см; ступни крупно — ~30), по умолчанию 95.
+		FightCamera->SetActorLocationAndRotation(Cam, (FVector(At.X, At.Y, Floor.Z + (CamOn.Num() >= 5 ? CamOn[4] : 95.f)) - Cam).Rotation());
 		UpdateRopeVisibility(Cam, Floor);
 	}
 	else if (bSideCam)

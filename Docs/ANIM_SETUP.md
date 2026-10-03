@@ -9,7 +9,9 @@
 | Ретаргетнутые клипы `A_BX_*` (+ зеркальный `A_BX_slipL`) | `/Game/BoxingLocal/Retargeted/UEFN`, `/Game/BoxingLocal/Retargeted/Manny` | нет |
 | Монтажи `AM_*` (скелет UEFN — логика GASP) | `/Game/BoxingLocal/Anim/AM_*` | нет: ссылаются на клипы Mixamo |
 | Монтажи `AM_*` (скелет UE5 Manny) | `/Game/BoxingLocal/Anim/Manny/AM_*` | нет |
-| AnimBP бойца (копия AnimBP GASP) | `/Game/Boxing/Anim/ABP_Boxer` | да (ссылается только на контент GASP) |
+| AnimBP бойца/рефери/угловых — урезанная копия AnimBP GASP (S-69) | `/Game/Boxing/Anim/ABP_Boxer` | да (ссылается на GASP и `BoxingLocal/Anim/Loco`) |
+| Копии chooser'ов баз, стейт-машины, паркура; `AC_BoxerPreCMCTick`, `AC_BoxerTraversalLogic` (S-69) | `/Game/Boxing/Anim/Loco` | да (1.9 МБ) |
+| Копии нужных баз Motion Matching (17), их клипов (246), наборов нормализации, blend space'ов (S-69) | `/Game/BoxingLocal/Anim/Loco/{DB,Seq}` | нет (GASP, ~350 МБ) |
 | Физреакция: пружины по костям | `/Game/Boxing/Anim/DT_HitReaction_PhysAnim` | да |
 | Уровень для превью-рендера | `/Game/BoxingLocal/Tmp/L_AnimPreview` | нет |
 
@@ -35,6 +37,8 @@ rem 3. монтажи, зеркальный слип, кадры контакт�
 %UE%\UnrealEditor-Cmd.exe %P%\BoxingUE.uproject -run=pythonscript -script=%P%\Tools\EditorScripts\anim_montages.py -unattended -nosplash -nullrhi
 rem 4. копия AnimBP GASP -> /Game/Boxing/Anim/ABP_Boxer (повторный запуск не трогает ручные правки)
 %UE%\UnrealEditor-Cmd.exe %P%\BoxingUE.uproject -run=pythonscript -script=%P%\Tools\EditorScripts\anim_abp.py -unattended -nosplash -nullrhi
+rem 4б. S-69: урезать локомоцию (ABP_Boxer, BP_Boxer/BP_Referee/BP_CornerCrew) — нужен собранный модуль (UBoxerAssetTools)
+%UE%\UnrealEditor-Cmd.exe %P%\BoxingUE.uproject -run=pythonscript -script=%P%\Tools\EditorScripts\anim_loco.py -unattended -nosplash -nullrhi
 rem 5. таблица пружин физреакции
 %UE%\UnrealEditor-Cmd.exe %P%\BoxingUE.uproject -run=pythonscript -script=%P%\Tools\EditorScripts\anim_hitreaction.py -unattended -nosplash -nullrhi
 rem 6. превью: (а) редактор собирает уровень и позы, (б) игра снимает -> Docs/screens/anim_*.png
@@ -136,3 +140,72 @@ AI->OnPlayMontageNotifyBegin.AddDynamic(this, &AMyPawn::OnNotify); // NotifyName
   нырок вправо со шагом; `knockdown`/`knockout` падают назад на ~1–1.4 м (в DefaultSlot с Root Lock падение
   будет на месте).
 - Превью: `Docs/screens/anim_<поза>_{front34,side}.png` (Manny), `anim_uefn_*` (UEFN).
+
+## S-69: боксёрская локомоция вместо полного GASP (холодный старт)
+
+**Проблема.** Холодный «В бой» — 16–37 с, из них кусок предзагрузки «BP_Boxer» 15–37 с. Разведка (реестр ассетов, жёсткие
+зависимости, `Saved/s69/probe*.py` — одноразовые): BP_Boxer тянул **2617 пакетов** (1241 AnimSequence, 154 базы PoseSearch,
+282 текстуры, MetaHuman Kellan, Paragon, Echo…). Не только AnimBP:
+
+| Цепочка | Пакетов (своих) | Время загрузки (коммандлет, по шагам) |
+|---|---|---|
+| `AC_VisualOverrideManager` → `GM_Sandbox` → `PC_Sandbox`, `SandboxCharacter_Mover` (+ его AnimBP и базы), Echo, Twinblast, Kellan, Manny/Quinn | ~1180 | **9.4 с** |
+| `SandboxCharacter_CMC_ABP` → `CHT_PoseSearchDatabases` (Dense/Sparse/ExtremeSparse: 71 база) + `CHT_CMCCharacterAnimations` (стейт-машина, ~390 клипов) | ~440 | 5.8 с |
+| `AC_TraversalLogic` → chooser'ы монтажей паркура | ~130 | 1.3 с |
+| `AC_PreCMCTick` → **оригинальный** `SandboxCharacter_CMC` → всё выше | — | — |
+
+Данные GASP перепутаны и сами: каждая база ссылается на набор нормализации `PSN_*_All` (все базы уровня, с прыжками и паркуром),
+а клипы ходьбы через нотифаи стейт-машины — на базы `PSD_SM_CMC_*`, где клипы бега с `BP_NotifyState_EarlyTransition`, который
+ссылается на **оригинальный** AnimBP со всеми chooser'ами. Поэтому «просто урезать chooser» не хватает: одна ссылка — и вся
+сеть снова в памяти.
+
+**Что боксу реально нужно** (`anim_loco_probe.py` — проба AnimBP в бою, автопилот 60 с, бойцы + рефери + угловые): Gait всегда
+Walk (ядро шлёт WantsToWalk + WantsToStrafe), Stance Stand, MovementMode OnGround, RotationMode Strafe, `MMDatabaseLOD` 0
+(Dense), Speed2D ≤ 2.4 м/с. Выбранные базы за бой: `PSD_Dense_Stand_Idles` (~75 %), `Walk_Loops` (~20 %), `Walk_Pivots`,
+`TurnInPlace`, `Walk_SpinTransition` — те же, что до урезания (сид 12345: 2513/686/40/3 → 2521/688/42/5 снимков).
+
+**Что сделано** (`Tools/EditorScripts/anim_loco.py`, повторяемо; оригиналы GASP не тронуты):
+
+1. `ABP_Boxer` (прежняя полная копия AnimBP GASP из `anim_abp.py`, ручной шаг в ней так и не делался) стал урезанным: его chooser'ы
+   → копии `CHT_BoxerMM(+_Dense/_Sparse/_ExtremeSparse)` — **строки и колонки те же** (интерфейс chooser'ов не менялся), ссылки на
+   базы, до которых бокс не доходит (бег, спринт, присед, прыжки, приземления, паркур, слайды), обнулены; стейт-машина →
+   `CHT_BoxerStateMachine` с обнулёнными клипами (режим выключен). Оставлены базы `Stand_Idles`, `Stand_TurnInPlace`,
+   `Stand_Walk_{Starts,Loops,Pivots,Stops,SpinTransition}` и `Stand_Run_Stops` (строка «стойки» по скорости ≥ 1 м/с) —
+   17 баз на трёх уровнях плотности вместо 71.
+2. Эти 17 баз, их 246 клипов, наборы нормализации (`PSN_Boxer_*` — только оставленные базы) и blend space'ы AnimBP —
+   копии в `/Game/BoxingLocal/Anim/Loco` (вне git, ~350 МБ); в копиях клипов ссылки на базы стейт-машины обнулены, пустые
+   нотифаи `PoseSearchBranchIn` убраны (иначе ошибка в лог при сборке индекса).
+3. `BP_Boxer`, `BP_Referee`, `BP_CornerCrew` (все — копии `SandboxCharacter_CMC`): компонент `AC_VisualOverrideManager` удалён
+   (граф BP его не использует, облик ставит C++), `AC_PreCMCTick` → `AC_BoxerPreCMCTick` (владелец — `Character` вместо
+   оригинального `SandboxCharacter_CMC`), `AC_TraversalLogic` → `AC_BoxerTraversalLogic` (chooser'ы монтажей паркура — пустые
+   копии; прыжка у боксёра нет), AnimClass логического меша → `ABP_Boxer`.
+
+Итог: BP_Boxer **2617 → 682 пакета** (AnimSequence 1241 → 247, базы 154 → 17), загрузка в коммандлете 13.3 → 2.0–2.6 с.
+
+**C++ (точечно, только редакторные инструменты):** `UBoxerAssetTools` (`Source/BoxingUE/Public/BoxerAssetTools.h`) — Python
+не умеет: перепривязать ссылки внутри одного ассета (`consolidate_assets` меняет их во всём проекте и удаляет оригинал),
+читать скрытые свойства chooser'ов, сменить класс компонента BP, не порвав связи графа (удаление+добавление через
+`SubobjectDataSubsystem` роняет компиляцию: AddDelegate теряет Target), перенести связи «осиротевшего» контакта узла
+`Evaluate Chooser` (вход контекста назван по классу AnimBP) и дождаться сжатия свежих копий клипов (иначе сохранение копии
+базы падает на ассерте `bEnforceCompressedDataSampling`). В игре функции ничего не делают; рантайм боя и ядро не тронуты.
+
+**Грабли:**
+* Каталог общий: пока чужой `-game` держит ассеты, сохранение падает (`MoveFile … Error Code 32`). Скрипт сохраняет только
+  изменённое; при сбое — просто перезапустить (идемпотентен).
+* Новый персонаж из копии `SandboxCharacter_CMC` (как `feel_crew_bp.py`) вернёт всю загрузку GASP — после его скрипта прогнать
+  `anim_loco.py` (путь — в `BPS` или `LOCO_EXTRA_BPS`). Проверка: `LOCO …: ссылок на оригиналы GASP: 0` в логе.
+* Первый запуск на другой машине строит индексы 17 баз-копий и сжимает 246 клипов-копий в DDC (однократно, ~10 с).
+* Отладка: `LOCO_SKIP_BPS=1` — только ассеты анимации (BP, которыми пользуются другие роли, не трогаются).
+
+**Качество ног — не хуже** (A/B на одном сиде 12345, автопилот 75 с, `-BoxFootLog -BoxFootLock=0`, т.е. чистый Motion
+Matching без фиксации S-70):
+
+| Скольжение ступни в опоре, медиана (ср.), см/с | До (полный GASP) | После |
+|---|---|---|
+| красный, боковой ход | 126.9 (140.8) | 133.3 (144.6) |
+| красный, прочее | 52.4 (97.6) | 50.9 (95.1) |
+| синий, боковой ход | 131.7 (151.5) | 131.6 (147.7) |
+| синий, прочее | 86.4 (121.6) | 86.5 (121.5) |
+
+Шагов ядра 77/66 в обоих прогонах; кадры `s69_before_34.png` / `s69_after_34.png`, `_58` (камера сбоку на ноги красного) —
+стойка и ступни совпадают. Бот `-BoxBot=average` 65 с — бой идёт, ошибок PoseSearch нет, 90 FPS при 1280×720 (`s69_bot_55.png`).

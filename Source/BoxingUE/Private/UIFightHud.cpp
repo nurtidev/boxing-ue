@@ -13,6 +13,10 @@
 #include "Components/VerticalBox.h"
 #include "Engine/World.h"
 #include "FightFx.h"
+#include "UIBreakPanel.h"
+#include "BoxingFightHUD.h"
+#include "GameFramework/PlayerController.h"
+#include "Kismet/GameplayStatics.h"
 
 namespace
 {
@@ -159,6 +163,11 @@ UWidget* UBoxingFightHudWidget::BuildUi()
 	Place(Root, AutoBadge, FAnchors(0.5f, 1.f), FVector2D(0.5f, 1.f), FMargin(0.f, -28.f, 0.f, 0.f));
 	AutoBadge->SetVisibility(ESlateVisibility::Collapsed);
 
+	// S-71: панель перерыва — справа, под панелью синего угла (сцена угла игрока — левее, не перекрывается).
+	BreakPanel = WidgetTree->ConstructWidget<UBoxingBreakPanelWidget>(UBoxingBreakPanelWidget::StaticClass());
+	Place(Root, BreakPanel, FAnchors(1.f, 0.5f), FVector2D(1.f, 0.5f), FMargin(-32.f, 70.f, 0.f, 0.f));
+	BreakPanel->SetVisibility(ESlateVisibility::Collapsed);
+
 	// Повтор нокаута: плашка сверху (как ТВ-врезка) и подсказка снизу.
 	UHorizontalBox* Rp = WidgetTree->ConstructWidget<UHorizontalBox>();
 	AddH(Rp, Sized(Box(nullptr, BoxUi::Red, 7.f, FMargin(0.f)), 14.f, 14.f), false, FMargin(0.f, 0.f, 14.f, 0.f));
@@ -262,6 +271,11 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	}
 	UpdatePanel(0, *GM, Clock);
 	UpdatePanel(1, *GM, Clock);
+	// S-71: копилка раунда и панель перерыва (на паузе мир стоит — время копилки тоже).
+	if (BreakPanel && !UGameplayStatics::IsGamePaused(this))
+	{
+		BreakPanel->UpdateFrom(*W->GetAuthGameMode<ABoxingFightGameMode>(), InDeltaTime, bHuman);
+	}
 
 	// Раунд и часы.
 	const float Left = S.Phase == EFightPhase::Between ? S.BreakLeft : S.TimeLeft;
@@ -302,6 +316,10 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		SetText(BannerBig, FString::FromInt(Sec));
 		SetText(BannerSub, FString::Printf(TEXT("Раунд %d через %d с"), S.Round + 1, Sec));
 		RiseBar->SetVisibility(ESlateVisibility::Collapsed);
+		if (BreakPanel)
+		{
+			BanVis = ESlateVisibility::Collapsed; // S-71: перерыв — панель справа (сцена угла не закрыта баннером)
+		}
 		break;
 	default:
 		BanVis = ESlateVisibility::Collapsed;
@@ -325,7 +343,7 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 	CueText->SetColorAndOpacity(FSlateColor(CueCol));
 	CueBox->SetVisibility(Cue.IsEmpty() ? ESlateVisibility::Collapsed : ESlateVisibility::HitTestInvisible);
 
-	const bool bShowControls = bHuman && bControls && S.Phase != EFightPhase::Over;
+	const bool bShowControls = bHuman && bControls && S.Phase != EFightPhase::Over && S.Phase != EFightPhase::Between;
 	Controls->SetVisibility(bShowControls ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 	AutoBadge->SetVisibility(!bHuman && S.Phase != EFightPhase::Over ? ESlateVisibility::HitTestInvisible : ESlateVisibility::Collapsed);
 
@@ -339,5 +357,33 @@ void UBoxingFightHudWidget::NativeTick(const FGeometry& MyGeometry, float InDelt
 		if (!bShotHud && FightTime > 6.f) { bShotHud = true; Sub->TakeUiShot(TEXT("hud")); }
 		if (!bShotKd && DownTime > 1.6f) { bShotKd = true; Sub->TakeUiShot(TEXT("hud_knockdown")); }
 		if (!bShotBreak && BreakTime > 1.f) { bShotBreak = true; Sub->TakeUiShot(TEXT("hud_break")); }
+		// S-71: перерыв — «садится» и «готов» (каждый раунд, суффикс — номер раунда), затем «Продолжить» за игрока.
+		if (BreakPanel && BreakPanel->IsInBreak())
+		{
+			if (ShotBreakRound != S.Round)
+			{
+				ShotBreakRound = S.Round;
+				bShotBreakWait = bShotBreakReady = false;
+				ReadyTime = 0.f;
+			}
+			if (!bShotBreakWait && !BreakPanel->IsReady() && BreakPanel->BreakTime() > 0.6f)
+			{
+				bShotBreakWait = true;
+				Sub->TakeUiShot(FString::Printf(TEXT("break_wait_r%d"), S.Round));
+			}
+			ReadyTime = BreakPanel->IsReady() ? ReadyTime + InDeltaTime : 0.f;
+			if (!bShotBreakReady && ReadyTime > 1.2f)
+			{
+				bShotBreakReady = true;
+				Sub->TakeUiShot(FString::Printf(TEXT("break_ready_r%d"), S.Round));
+			}
+			if (bHuman && bShotBreakReady && ReadyTime > 2.0f && ReadyTime - InDeltaTime <= 2.0f)
+			{
+				if (ABoxingFightHUD* Hud = Cast<ABoxingFightHUD>(GetOwningPlayer() ? GetOwningPlayer()->GetHUD() : nullptr))
+				{
+					Hud->RequestBreakProceed(TEXT("сценарий"));
+				}
+			}
+		}
 	}
 }

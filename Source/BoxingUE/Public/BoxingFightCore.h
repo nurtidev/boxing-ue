@@ -68,6 +68,12 @@ public:
 	EFightPhase GetPhase() const { return Phase; }
 	ERingStageKind GetStageKind() const { return Stage.Kind; }
 	double GetFightTime() const { return T; }
+	// S-71 (UI перерыва, только чтение): с какой стаминой боец выйдет на раунд после отдыха в углу, % от максимума
+	// (итог BeginCornerRest); −1 — отдыха нет (не перерыв).
+	float GetCornerRestTargetPct(int32 I) const
+	{
+		return I >= 0 && I < 2 && Rt[I].bHasRest && Rt[I].MaxStam > 0 ? static_cast<float>(Rt[I].RestStam1 / Rt[I].MaxStam * 100.0) : -1.f;
+	}
 
 	// Эффективность удара Kind на дистанции Dist (м) для размаха ReachCm: 0 — не достаёт,
 	// 1 — идеальная дистанция (punches.ts rangeFactor). Публично — для подсказок UI.

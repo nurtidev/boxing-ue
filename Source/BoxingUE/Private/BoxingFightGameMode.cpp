@@ -6,6 +6,7 @@
 #include "BoxingGameInstanceSubsystem.h"
 #include "FightFx.h"
 #include "FightReferee.h"
+#include "FightCrew.h"
 #include "Animation/AnimInstance.h"
 #include "Components/CapsuleComponent.h"
 #include "Components/SkeletalMeshComponent.h"
@@ -321,6 +322,8 @@ void ABoxingFightGameMode::StartPlay()
 		RunBotBatch(); // S-57: серия боёв бота без отрисовки → сводка в лог → выход
 		return;
 	}
+	// S-71: угловые (тренер, катмен) и стулья у обоих углов — сами по снимку и событиям ядра. -BoxNoCrew — без них.
+	ABoxingCornerCrew::SpawnFor(this);
 	UE_LOG(LogTemp, Log, TEXT("FIGHT: старт — класс %s, ринг (%.0f, %.0f, %.0f), сид %d, раундов %d × %.0f с, автопилот %d"),
 		*Cls->GetName(), RingFloor.X, RingFloor.Y, RingFloor.Z, Seed, Rounds, RoundSeconds, bAutopilot ? 1 : 0);
 }
@@ -377,6 +380,15 @@ void ABoxingFightGameMode::StartFight()
 	Cfg.Rounds = Rounds;
 	Cfg.RoundSeconds = RoundSeconds;
 	Cfg.BreakSeconds = BreakSeconds;
+	// S-71 (ux): с игроком перерыв ждёт «Продолжить» (Enter / A, после посадки в угол — ABoxingFightHUD), а сам заканчивается
+	// лишь через минуту, как в боксе (страховка). Автопилот/бот и явный -BoxBreakSec= — прежний таймер.
+	{
+		FString BreakCmd;
+		if (!bAutopilot && !bBot && !FParse::Value(FCommandLine::Get(), TEXT("BoxBreakSec="), BreakCmd))
+		{
+			Cfg.BreakSeconds = FMath::Max(BreakSeconds, 60.f);
+		}
+	}
 	Cfg.bAutoProceed = true;
 	Cfg.bAllowDraw = bAllowDraw;
 	Cfg.bProRules = bAllowDraw; // S-61: профи-правила (досрочки от удара, рефери, судьи профи) — там же, где ничья возможна
@@ -504,6 +516,7 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 {
 	for (const FFightEvent& E : Events)
 	{
+		OnFightEventUi.Broadcast(E); // S-71: копилка «совета угла» (UI)
 		++EventCount[static_cast<int32>(E.Kind)];
 		const bool bMajor = E.Kind == EFightEventKind::Knockdown || E.Kind == EFightEventKind::RoundEnd || E.Kind == EFightEventKind::FightEnd;
 		if (bLogEvents || bMajor)
@@ -547,6 +560,7 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 		{
 			Fx->OnFightEvent(E, this);
 		}
+		ABoxingCornerCrew::NotifyEvent(this, E); // S-71: реакции углов
 		for (int32 I = 0; I < 2; ++I)
 		{
 			if (ABoxerCharacter* B = GetBoxer(I))

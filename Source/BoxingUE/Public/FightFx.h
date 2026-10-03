@@ -25,7 +25,7 @@
 //
 // Флаги: -BoxFx=0 (всё выкл.), -BoxFxProfile=classic (стоп 50→110 мс с mag 1.1 и slow-mo на mag ≥ 1.9 —
 // значения веба ДО S-36), -BoxFxLog (лог хит-стопов/slow-mo/камеры/вибрации), -BoxSfxLog (лог звуков),
-// -BoxMute, -BoxNoReplay, -BoxReplayShots=N (скриншоты повтора), -BoxFxShots=N (серии кадров хит-стопа: fx_NN_<вид>_<мс>_tNNN.png), -BoxReplayTest (повтор после каждого нокдауна).
+// -BoxMute, -BoxNoReplay, -BoxReplayShots=N (скриншоты повтора: Saved/Screenshots/BoxReplay, с -BoxShotPrefix=X — Docs/screens/X_replay_NN.png), -BoxFxShots=N (серии кадров хит-стопа: fx_NN_<вид>_<мс>_tNNN.png), -BoxReplayTest (повтор после каждого нокдауна).
 #pragma once
 
 #include "CoreMinimal.h"
@@ -140,7 +140,7 @@ namespace BoxFx
 	// Кадр перерыва (restShot + walkToCornerShot веба): Corner 0 — красный (−,−), 1 — синий; At — где сейчас боец (идёт к углу
 	// — кадр едет с ним); Aspect — ширина/высота вьюпорта (портрет — дальше, широкий — угол левее центра).
 	// S-62: HeightScale — рост бойца / 178: высокий (198 см) целиком в кадре, голова не под панелью HUD (дальше и выше).
-	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale = 1.f);
+	void RestShot(int32 Corner, float Aspect, const FVector& At, const FVector& RingCenter, FVector& OutCam, FVector& OutLook, float HeightScale = 1.f, float Seated = 0.f);
 	// S-62: кадр итога (панель итога в центре экрана — 16:9 закрывает ~29…71 % ширины): победитель (с рефери) во весь рост
 	// в свободной полосе слева от панели. Winner/Loser — места бойцов, Cam — нынешняя камера (сторона та же), HFovDeg —
 	// горизонтальный FOV, HeightScale — рост победителя / 178. Камера внутри апрона.
@@ -188,6 +188,10 @@ public:
 	// ---------- от PlayerController ----------
 	// Тряска/наезд/толчок поверх камеры боя; во время повтора — своя камера (true — кадр задан повтором).
 	bool ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg);
+	// S-71 (отладка/скриншоты угловых, ABoxingCornerCrew -BoxCrewShots): камера в заданную точку на эти кадры.
+	bool bShotCam = false;
+	FVector ShotCam = FVector::ZeroVector;
+	FVector ShotLook = FVector::ZeroVector;
 
 	// ---------- чтение (HUD/BP) ----------
 	UFUNCTION(BlueprintPure, Category = "Boxing|Fx")
