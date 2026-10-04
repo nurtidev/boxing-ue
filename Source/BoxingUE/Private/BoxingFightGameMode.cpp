@@ -18,6 +18,8 @@
 #include "Kismet/GameplayStatics.h"
 #include "Misc/CommandLine.h"
 #include "Misc/Paths.h"
+#include "Kismet/KismetMaterialLibrary.h"
+#include "Materials/MaterialParameterCollection.h"
 #include "UnrealClient.h"
 
 namespace
@@ -510,6 +512,41 @@ void ABoxingFightGameMode::Tick(float DeltaSeconds)
 	PushStateToBoxers(DeltaSeconds);
 	DebugStage();
 	DebugLog(DeltaSeconds);
+	UpdateCrowd(DeltaSeconds);
+}
+
+void ABoxingFightGameMode::CrowdPeak(float Level, float HoldSeconds)
+{
+	CrowdTarget = FMath::Max(CrowdTarget, Level);
+	CrowdHold = FMath::Max(CrowdHold, HoldSeconds);
+}
+
+void ABoxingFightGameMode::UpdateCrowd(float DeltaSeconds)
+{
+	// Подъём к пику ~0.3 с, удержание, спад ~2.5 с (Docs/LOOK.md, «API реакции зала»).
+	if (CrowdHold > 0.f)
+	{
+		CrowdHold -= DeltaSeconds;
+		CrowdExcite = FMath::Min(CrowdTarget, CrowdExcite + DeltaSeconds / 0.3f);
+	}
+	else
+	{
+		CrowdTarget = 0.f;
+		CrowdExcite = FMath::Max(0.f, CrowdExcite - DeltaSeconds / 2.5f);
+	}
+	if (FMath::IsNearlyEqual(CrowdExcite, CrowdSent, 0.005f))
+	{
+		return;
+	}
+	if (!CrowdMpc)
+	{
+		CrowdMpc = LoadObject<UMaterialParameterCollection>(nullptr, TEXT("/Game/Boxing/Environment/Crowd/MPC_Crowd.MPC_Crowd"));
+	}
+	if (CrowdMpc)
+	{
+		UKismetMaterialLibrary::SetScalarParameterValue(this, CrowdMpc, TEXT("Excite"), CrowdExcite);
+		CrowdSent = CrowdExcite;
+	}
 }
 
 void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
@@ -518,6 +555,19 @@ void ABoxingFightGameMode::DispatchEvents(TArray<FFightEvent>&& Events)
 	{
 		OnFightEventUi.Broadcast(E); // S-71: копилка «совета угла» (UI)
 		++EventCount[static_cast<int32>(E.Kind)];
+		// Реакция зала (S-77): нокдаун — вскакивают, итог — стоят дольше, тяжёлое попадание — полувстают.
+		if (E.Kind == EFightEventKind::Knockdown)
+		{
+			CrowdPeak(1.f, 1.2f);
+		}
+		else if (E.Kind == EFightEventKind::FightEnd)
+		{
+			CrowdPeak(1.f, 5.f);
+		}
+		else if (E.Kind == EFightEventKind::Hit && E.Magnitude >= 1.7f)
+		{
+			CrowdPeak(0.55f, 0.3f);
+		}
 		const bool bMajor = E.Kind == EFightEventKind::Knockdown || E.Kind == EFightEventKind::RoundEnd || E.Kind == EFightEventKind::FightEnd;
 		if (bLogEvents || bMajor)
 		{

@@ -41,6 +41,63 @@ POSES = [x.split(":") for x in os.environ.get("LOOK_POSES", "").split(",") if x]
 MONTAGE_DIR = "/Game/BoxingLocal/Anim"
 POSE_WAIT = 30
 EVENTS = os.environ.get("LOOK_EVENTS", "1") == "1"
+# S-77: LOOK_NODETAIL=1 — снимок «как до S-77»: у всех MI от M_BoxerKit фактура гасится на лету (MID: NormalStrength,
+# FoldStrength, RoughVar = 0 → нормаль плоская, шероховатость = Roughness, как у прежнего мастера)
+NODETAIL = os.environ.get("LOOK_NODETAIL", "0") == "1"
+
+
+def flatten_detail(world):
+    n = 0
+    for a in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor):
+        for comp in a.get_components_by_class(unreal.MeshComponent):
+            for i in range(comp.get_num_materials()):
+                m = comp.get_material(i)
+                base = m
+                while base is not None and isinstance(base, unreal.MaterialInstance):
+                    base = base.get_editor_property("parent")
+                if base is None or base.get_name() != "M_BoxerKit":
+                    continue
+                mid = comp.create_dynamic_material_instance(i, m)
+                for k in ("NormalStrength", "FoldStrength", "RoughVar"):
+                    mid.set_scalar_parameter_value(k, 0.0)
+                n += 1
+    unreal.log("LOOKSHOT фактура погашена у %d слотов (LOOK_NODETAIL)" % n)
+
+
+def face_cm_fix(world):
+    """S-77 / QA-14: проверка — карты цвета морщин лица (BaseColor_CM1..3, тёмные текстуры Kellan) = текстура тона."""
+    n = 0
+    for a in unreal.GameplayStatics.get_all_actors_of_class(world, unreal.Actor):
+        for comp in a.get_components_by_class(unreal.SkeletalMeshComponent):
+            if os.environ.get("LOOK_TINT_COMP") and comp.get_name() == os.environ["LOOK_TINT_COMP"]:   # проверка: какой меш что рисует
+                for j in range(comp.get_num_materials()):
+                    mm = comp.get_material(j)
+                    if mm:
+                        d = comp.create_dynamic_material_instance(j, mm)
+                        d.set_vector_parameter_value("BaseColor_ColorCorrect", unreal.LinearColor(0.2, 3.0, 0.2, 1.0))
+                        d.set_vector_parameter_value("Color", unreal.LinearColor(0.0, 1.0, 0.0, 1.0))
+            if comp.get_name() != "Face":
+                continue
+            if os.environ.get("LOOK_FACE_LOD"):   # проверка: лицо на заданном LOD (1 = LOD0)
+                comp.set_forced_lod(int(os.environ["LOOK_FACE_LOD"]))
+            names = comp.get_material_slot_names()
+            for i in range(comp.get_num_materials()):
+                m = comp.get_material(i)
+                if i >= len(names) or not str(names[i]).startswith("head_LOD") or not isinstance(m, unreal.MaterialInstanceDynamic):
+                    continue
+                t = m.get_texture_parameter_value("BaseColor")
+                if os.environ.get("LOOK_FACE_TEX"):   # проверка: подменить текстуру лица
+                    t = unreal.load_asset(os.environ["LOOK_FACE_TEX"])
+                    m.set_texture_parameter_value("BaseColor", t)
+                for k in ("BaseColor_CM1", "BaseColor_CM2", "BaseColor_CM3"):
+                    m.set_texture_parameter_value(k, t)
+                for kv in [x for x in os.environ.get("LOOK_FACE_SCALARS", "").split(",") if x]:   # проверка: скаляры лица
+                    k, v = kv.split("=")
+                    m.set_scalar_parameter_value(k, float(v))
+                if os.environ.get("LOOK_FACE_GREEN") == "1":   # проверка: какие секции рисуются этими MID
+                    m.set_vector_parameter_value("BaseColor_ColorCorrect", unreal.LinearColor(0.2, 3.0, 0.2, 1.0))
+                n += 1
+    unreal.log("LOOKSHOT карты CM лица = тон у %d слотов (LOOK_FACE_CM)" % n)
 
 
 def log(m):
@@ -333,6 +390,15 @@ def main():
                 ctx["cam"] = ctx["pc"].get_view_target()
                 ctx["pc"].set_actor_tick_enabled(False)
                 log("камера %s" % ctx["cam"].get_name())
+                if NODETAIL:
+                    flatten_detail(ctx["world"])
+                if os.environ.get("LOOK_FACE_CM") == "1":
+                    face_cm_fix(ctx["world"])
+                if os.environ.get("LOOK_HIDE_FUZZ") == "1":   # проверка QA-14: пушок (грум Fuzz) с материалом по умолчанию
+                    for a in unreal.GameplayStatics.get_all_actors_of_class(ctx["world"], unreal.Actor):
+                        for g in a.get_components_by_class(unreal.GroomComponent):
+                            if g.get_name() == "Fuzz":
+                                g.set_visibility(False)
             if st["frames"] < 100:
                 return
             if st["shot"] >= MAX_SHOTS:

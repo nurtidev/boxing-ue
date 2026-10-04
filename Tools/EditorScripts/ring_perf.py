@@ -8,7 +8,8 @@
 #     -ExecCmds="DisableAllScreenMessages,stat unit,stat fps,py C:/Users/user/Desktop/boxing-ue/Tools/EditorScripts/ring_perf.py"
 #
 # Окружение: PERF_SP=100 — r.ScreenPercentage (по умолчанию не трогать), PERF_T0/PERF_T1 — окно CSV (с от старта
-# скрипта, 18/48), PERF_GPU=50 — момент ProfileGPU (0 — не снимать), PERF_CMDS="a;b" — доп. команды консоли на старте.
+# скрипта, 18/48), PERF_GPU=50 — момент ProfileGPU (0 — не снимать), PERF_CMDS="a;b" — доп. команды консоли на старте,
+# PERF_EXCITE=1 — публика «болеет» (WPO позы) всё окно (S-77).
 import os
 import time
 
@@ -23,6 +24,7 @@ NOSHADOW = [x for x in os.environ.get("PERF_NOSHADOW", "").split(",") if x]   # 
 OFF = [x for x in os.environ.get("PERF_OFF", "").split(",") if x]           # подстроки имён — выключить свет
 FG = os.environ.get("PERF_FG", "")                                              # Lumen final gather quality в PPV
 PRO = os.environ.get("PERF_PRO", "") == "1"
+EXCITE = os.environ.get("PERF_EXCITE", "")   # S-77: 0..1 — реакция зала (MPC_Crowd) на всё время замера
 CREW = os.environ.get("PERF_CREW", "")   # S-68: fight|rest — угловые по маркерам (уровень L_RingCrewLook, look_crew_shots.py)
 CONTACT = os.environ.get("PERF_CONTACT", "").split(":") if os.environ.get("PERF_CONTACT") else None  # подстрока:длина                                     # оформление профи (как сделает GameMode)
 st = {"t0": time.time(), "step": 0, "h": None, "frames": 0, "acc": 0.0, "worst": 0.0}
@@ -55,6 +57,11 @@ def tick(dt):
         for c in CMDS:
             cmd(c.strip())
         w = world()
+        if EXCITE:   # S-77: зал «болеет» всё окно замера (худший случай WPO публики)
+            mpc = unreal.load_asset("/Game/Boxing/Environment/Crowd/MPC_Crowd")
+            if mpc:
+                unreal.MaterialLibrary.set_scalar_parameter_value(w, mpc, "Excite", float(EXCITE))
+                log("MPC_Crowd.Excite = " + EXCITE)
         for a in unreal.GameplayStatics.get_all_actors_of_class(w, unreal.Light):
             nm = a.get_actor_label() if hasattr(a, "get_actor_label") else a.get_name()
             if CONTACT and CONTACT[0] in nm:

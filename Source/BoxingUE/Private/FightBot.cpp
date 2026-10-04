@@ -66,6 +66,9 @@ const char* FFightBot::SkillName(EFightBotSkill Skill)
 	case EFightBotSkill::Novice: return "novice";
 	case EFightBotSkill::Strong: return "strong";
 	case EFightBotSkill::Masher: return "masher";
+	case EFightBotSkill::JabSpam: return "jabspam";
+	case EFightBotSkill::Turtle: return "turtle";
+	case EFightBotSkill::Runner: return "runner";
 	default: return "average";
 	}
 }
@@ -87,7 +90,69 @@ void FFightBot::Reset(EFightBotSkill InSkill, uint32 FightSeed, int32 InMe)
 	bReactSlip = false;
 	NextStep = 0;
 	bBlockHeld = false;
+	RunDir = 1;
 	PunchesPressed = Blocks = Slips = RiseTaps = 0;
+}
+
+// S-76: абьюз-боты. Без реакции на замах — только своё правило; ГСЧ бота — для разброса пауз.
+void FFightBot::ThinkAbuser(const FFightSnapshot& S, TArray<FFightBotCmd>& Out, bool& bHeld, EFightAction& HeldStep)
+{
+	const FFighterState& Mine = S.Fighters[Me];
+	const FFighterState& Foe = S.Fighters[1 - Me];
+	auto Press = [&Out](EFightAction A) { Out.Add({A, EPunchTarget::Head}); };
+	if (Skill == EFightBotSkill::JabSpam)
+	{
+		if (S.Distance > 1.5)
+		{
+			bHeld = true;
+			HeldStep = EFightAction::StepFwd;
+		}
+		if (!Mine.bPunching)
+		{
+			Press(EFightAction::Jab);
+			++PunchesPressed;
+		}
+		return;
+	}
+	if (Skill == EFightBotSkill::Turtle)
+	{
+		if (S.Distance > 1.4)
+		{
+			bHeld = true;
+			HeldStep = EFightAction::StepFwd;
+		}
+		// Опускает руки на один кросс, когда соперник не бьёт; иначе — блок (кнопка держится).
+		if (T >= NextPunch && !Foe.bPunching && !Mine.bPunching)
+		{
+			if (bBlockHeld) Press(EFightAction::BlockEnd);
+			bBlockHeld = false;
+			Press(EFightAction::Cross);
+			++PunchesPressed;
+			NextPunch = T + 1.5 + Rng.Next();
+		}
+		else if (!bBlockHeld && !Mine.bPunching)
+		{
+			Press(EFightAction::BlockStart);
+			bBlockHeld = true;
+			++Blocks;
+		}
+		return;
+	}
+	// Runner: дальняя дистанция; с края досягаемости — джеб, иначе назад / по дуге (у канатов — сменить сторону).
+	if (Mine.RopeLevel > 0 && T >= NextStep)
+	{
+		RunDir = -RunDir;
+		NextStep = T + 1.2;
+	}
+	bHeld = true;
+	if (S.Distance < 1.6) HeldStep = Mine.RopeLevel > 0 ? (RunDir > 0 ? EFightAction::StepLeft : EFightAction::StepRight) : EFightAction::StepBack;
+	else HeldStep = RunDir > 0 ? EFightAction::StepLeft : EFightAction::StepRight;
+	if (T >= NextPunch && !Mine.bPunching && FBoxingFightCore::RangeFactor(EPunchKind::Jab, S.Distance) > 0.4)
+	{
+		Press(EFightAction::Jab);
+		++PunchesPressed;
+		NextPunch = T + 0.5 + 0.4 * Rng.Next();
+	}
 }
 
 void FFightBot::Think(const FFightSnapshot& S, double Dt, TArray<FFightBotCmd>& Out, bool& bHeld, EFightAction& HeldStep)
@@ -107,7 +172,11 @@ void FFightBot::Think(const FFightSnapshot& S, double Dt, TArray<FFightBotCmd>& 
 	}
 	auto Press = [&Out](EFightAction A, EPunchTarget Tg = EPunchTarget::Head) { Out.Add({A, Tg}); };
 
-	if (S.Phase == EFightPhase::Fighting)
+	if (S.Phase == EFightPhase::Fighting && Skill >= EFightBotSkill::JabSpam)
+	{
+		ThinkAbuser(S, Out, bHeld, HeldStep);
+	}
+	else if (S.Phase == EFightPhase::Fighting)
 	{
 		const FFighterState& Mine = S.Fighters[Me];
 		const FFighterState& Foe = S.Fighters[1 - Me];

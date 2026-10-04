@@ -12,6 +12,7 @@ namespace
 {
 	double AbsD(double V) { return V < 0 ? -V : V; }
 	double HypotD(double X, double Z) { return FMath::Sqrt(X * X + Z * Z); }
+	bool G_StyleNoClinch = false; // S-76: sim.exe styles|pro N … noclinch — сравнение без клинча
 
 	// Пары: AB — эталон паритета (технарь vs прессинг), PG — панчер vs «стеклянный» объёмник (нокдауны → нейтральный угол).
 	FFightConfig MakeConfig(uint32 Seed, float RoundSec, float BreakSec, bool bCorners, bool bKdPair)
@@ -455,6 +456,7 @@ namespace
 			C.BreakSeconds = 0.f;
 			C.bAllowDraw = bPro;
 			C.bProRules = bPro;
+			C.bClinch = !G_StyleNoClinch;
 			C.Fighters[0] = Me;
 			C.Fighters[0].bAiControlled = false;
 			C.Fighters[1] = Ai;
@@ -879,6 +881,366 @@ namespace
 		return 0;
 	}
 
+	// S-76: ИИ стилей против человека — бот × стиль ИИ на равных 70/70 (3 р. × 55 с) + «почерк» стиля (что ИИ делает в бою с
+	// average). Ориентир: average 40–55% против КАЖДОГО стиля, strong > average > novice, спам/абьюз ≤ 10%.
+	struct FStyleFeel
+	{
+		int32 Fights = 0;
+		double Ticks = 0, DistSum = 0, HumanRope = 0, Clinch = 0, HumanStamSum = 0;
+		int32 AiPunches = 0, AiPower = 0, AiBody = 0, AiCounterHits = 0, AiHits = 0, GuardBreaks = 0, AiSteps = 0, Clinches = 0;
+		int32 MaxSeries = 0, Series3 = 0; // серии ИИ: ударов подряд с паузой < 0.45 с
+	};
+	FBotTally RunStyleSeries(EFightBotSkill Skill, const FFighterSetup& Me, const FFighterSetup& Ai, int32 N, FStyleFeel* Feel, float RoundSec = 55.f)
+	{
+		FBotTally T;
+		for (int32 K = 0; K < N; ++K)
+		{
+			FFightConfig C;
+			C.Seed = BotSeed(K);
+			C.Rounds = 3;
+			C.RoundSeconds = RoundSec;
+			C.BreakSeconds = 0.f;
+			C.bClinch = !G_StyleNoClinch;
+			C.Fighters[0] = Me;
+			C.Fighters[0].bAiControlled = false;
+			C.Fighters[1] = Ai;
+			C.Fighters[1].bAiControlled = true;
+			FBoxingFightCore Core;
+			Core.Init(C);
+			FFightBot Bot;
+			Bot.Reset(Skill, C.Seed, 0);
+			TArray<FFightBotCmd> Cmds;
+			const float Dt = 1.f / 60.f;
+			bool bWasPunching = false, bWasClinch = false;
+			EStepKind PrevStep = EStepKind::None;
+			double LastAiPunchT = -10;
+			int32 Run = 0;
+			for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+			{
+				Cmds.Reset();
+				bool bHeld = false;
+				EFightAction Held = EFightAction::StepBack;
+				const FFightSnapshot S = Core.GetSnapshot();
+				Bot.Think(S, Dt, Cmds, bHeld, Held);
+				for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+				if (bHeld) Core.ApplyAction(0, Held);
+				Core.Tick(Dt);
+				if (Feel && S.Phase == EFightPhase::Fighting)
+				{
+					const FFighterState& A = S.Fighters[1];
+					Feel->Ticks += 1;
+					Feel->DistSum += S.Distance;
+					Feel->HumanRope += S.Fighters[0].RopeLevel > 0 ? 1 : 0;
+					Feel->HumanStamSum += S.Fighters[0].StaminaPct;
+					Feel->Clinch += S.bClinch ? 1 : 0;
+					if (S.bClinch && !bWasClinch) ++Feel->Clinches;
+					bWasClinch = S.bClinch;
+					if (A.bPunching && !bWasPunching)
+					{
+						++Feel->AiPunches;
+						const double Now = Step * double(Dt);
+						Run = Now - LastAiPunchT < 0.45 + A.PunchDuration ? Run + 1 : 1;
+						if (Run == 3) ++Feel->Series3;
+						Feel->MaxSeries = FMath::Max(Feel->MaxSeries, Run);
+						LastAiPunchT = Now;
+						Feel->AiPower += A.Punch != EPunchType::Jab;
+						Feel->AiBody += A.PunchTarget == EPunchTarget::Body;
+					}
+					bWasPunching = A.bPunching;
+					if (A.Step != EStepKind::None && A.Step != PrevStep) ++Feel->AiSteps;
+					PrevStep = A.Step;
+				}
+				TArray<FFightEvent> Ev = Core.PollEvents();
+				for (int32 E = 0; E < Ev.Num(); ++E)
+				{
+					if (Ev[E].Kind == EFightEventKind::Hit) (Ev[E].Attacker == 0 ? T.HitsFor : T.HitsAgainst) += 1;
+					if (Ev[E].Kind == EFightEventKind::Knockdown) (Ev[E].Defender == 1 ? T.KdFor : T.KdAgainst) += 1;
+					if (Ev[E].Kind == EFightEventKind::Gassed) ++T.Gassed;
+					if (Feel && Ev[E].Kind == EFightEventKind::Hit && Ev[E].Attacker == 1)
+					{
+						++Feel->AiHits;
+						Feel->AiCounterHits += Ev[E].bCounter;
+						Feel->GuardBreaks += Ev[E].bGuardBreak;
+					}
+				}
+			}
+			const FFightResult& R = Core.GetResult();
+			++T.N;
+			T.Wins += R.WinnerIndex == 0;
+			T.Ko += R.Method == EFightMethod::KO;
+			T.Rsc += R.Method == EFightMethod::RSC;
+			T.Dec += R.Method == EFightMethod::Decision || R.Method == EFightMethod::Draw;
+			T.LossStop += R.WinnerIndex == 1 && (R.Method == EFightMethod::KO || R.Method == EFightMethod::RSC);
+			if (Feel) ++Feel->Fights;
+		}
+		return T;
+	}
+
+	// S-76: вариант судейства любителей (ВЫКЛ. по умолчанию — решение владельца): доля единогласных 5:0 при разных порогах
+	// «явного» раунда / разбросе / вкусе судей. Пары — любительские пары QA (бот average) + равные 70/70 (бот average) + эталон AB
+	// (ИИ против ИИ); реальный ориентир — ~69% единогласных (ЧМ 2025). Поток боя не меняется (попадания бой-в-бой с вариантом 0).
+	int32 JudgeVariantTable(int32 N)
+	{
+		struct FVar { const char* Name; float Clear, Noise, Lean; };
+		const FVar Vars[] = {
+			{"сейчас (4.5 / ±1.6 / 0)", 0, 0, 0},
+			{"порог 6", 6, 0, 0},
+			{"порог 8", 8, 0, 0},
+			{"порог 6, ±2.5", 6, 2.5f, 0},
+			{"порог 8, ±2.5", 8, 2.5f, 0},
+			{"порог 6, ±2, вкус 0.25", 6, 2, 0.25f},
+			{"порог 8, ±2.5, вкус 0.25", 8, 2.5f, 0.25f},
+			{"порог 10, ±3, вкус 0.3", 10, 3, 0.3f},
+			{"порог 12, ±4, вкус 0.3", 12, 4, 0.3f},
+			{"порог 15, ±5, вкус 0.3", 15, 5, 0.3f},
+			{"порог 20, ±6, вкус 0.35", 20, 6, 0.35f},
+			{"порог 25, ±8, вкус 0.4", 25, 8, 0.4f},
+			{"порог 15, ±6, без вкуса", 15, 6, 0},
+		};
+		struct FPairRun { const char* Name; FFighterSetup R, B; bool bBot; };
+		TArray<FPairRun> Pairs;
+		for (const FQaRef& Q : GQa)
+		{
+			const FPairSetup P = PairOf(GRoster[Q.R], GRoster[Q.B], true);
+			if (!P.bPro) Pairs.Add({Q.Name, P.R, P.B, true});
+		}
+		Pairs.Add({"равные 70/70", SetupOf(GWebRef[0].A), SetupOf(GWebRef[0].A), true});
+		const FFightConfig Ab = MakeConfig(1, 55.f, 0.f, false, false);
+		Pairs.Add({"эталон AB (ИИ vs ИИ)", Ab.Fighters[0], Ab.Fighters[1], false});
+		printf("S-76: вариант судейства любителей (не включён), %d боёв на пару, 55 с; единогласных 5:0 среди решений, по парам и всего; "
+			   "победитель по очкам ≠ варианта «сейчас»; ориентир реальности ~69%%\n", N);
+		TArray<int32> BaseWin;
+		TArray<int32> BaseHits;
+		int32 Bad = 0;
+		for (const FVar& V : Vars)
+		{
+			printf("  %-28s", V.Name);
+			int32 DecAll = 0, UnaAll = 0, Flip = 0, Idx = 0;
+			for (const FPairRun& P : Pairs)
+			{
+				int32 Dec = 0, Una = 0;
+				for (int32 K = 0; K < N; ++K, ++Idx)
+				{
+					FFightConfig C;
+					C.Seed = BotSeed(K);
+					C.Rounds = 3;
+					C.RoundSeconds = 55.f;
+					C.BreakSeconds = 0.f;
+					C.Fighters[0] = P.R;
+					C.Fighters[1] = P.B;
+					C.Fighters[0].bAiControlled = !P.bBot;
+					C.Fighters[1].bAiControlled = true;
+					C.AmJudgeClear = V.Clear;
+					C.AmJudgeNoise = V.Noise;
+					C.AmJudgeLean = V.Lean;
+					FBoxingFightCore Core;
+					Core.Init(C);
+					FFightBot Bot;
+					Bot.Reset(EFightBotSkill::Average, C.Seed, 0);
+					TArray<FFightBotCmd> Cmds;
+					int32 Hits = 0;
+					for (int32 Step = 0; Step < 60 * 60 * 30 && !Core.IsOver(); ++Step)
+					{
+						if (P.bBot)
+						{
+							Cmds.Reset();
+							bool bHeld = false;
+							EFightAction Held = EFightAction::StepBack;
+							Bot.Think(Core.GetSnapshot(), 1.f / 60.f, Cmds, bHeld, Held);
+							for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+							if (bHeld) Core.ApplyAction(0, Held);
+						}
+						Core.Tick(1.f / 60.f);
+						for (const FFightEvent& E : Core.PollEvents()) Hits += E.Kind == EFightEventKind::Hit ? (E.Attacker == 0 ? 1 : 1000) : 0;
+					}
+					const FFightResult& R = Core.GetResult();
+					if (&V == &Vars[0])
+					{
+						BaseWin.Add(R.WinnerIndex);
+						BaseHits.Add(Hits);
+					}
+					else
+					{
+						Flip += BaseWin[Idx] != R.WinnerIndex;
+						Bad += BaseHits[Idx] != Hits; // поток боя обязан совпасть
+					}
+					if (R.Method != EFightMethod::Decision) continue;
+					++Dec;
+					int32 For = 0;
+					for (int32 J = 0; J < R.NumJudges; ++J)
+					{
+						const FJudgeCard& Tc = R.JudgeTotals[J];
+						const int32 Pick = Tc.Red > Tc.Blue ? 0 : (Tc.Blue > Tc.Red ? 1 : R.TieNominee[J]);
+						For += Pick == R.WinnerIndex;
+					}
+					Una += For == R.NumJudges;
+				}
+				printf(" %3.0f%%", Dec ? 100.0 * Una / Dec : 0.0);
+				DecAll += Dec;
+				UnaAll += Una;
+			}
+			printf(" | всего %3.0f%% единогласных, победитель сменился в %.1f%% боёв\n", DecAll ? 100.0 * UnaAll / DecAll : 0.0, 100.0 * Flip / FMath::Max(1, Idx));
+		}
+		printf("  (пары по порядку:");
+		for (const FPairRun& P : Pairs) printf(" %s;", P.Name);
+		printf(") поток боя у вариантов = «сейчас»: %s\n", Bad ? "НЕТ" : "да");
+		return Bad ? 1 : 0;
+	}
+
+	// S-76: клинч — инварианты. Бот average против прессинга/объёмника (там клинчей больше всего), N боёв: в сцепке удары не
+	// стартуют, «Брейк!» — ровно один на клинч и после него пара расходится до CLINCH_SEP (1.35 м) без телепортов, клинч
+	// кончается за ≤ 2.2 с; в автопилоте клинча нет; бой детерминирован.
+	int32 ClinchCheck(int32 N)
+	{
+		int32 Clinches = 0, Breaks = 0, Ends = 0, PunchInClinch = 0, Viol = 0, Fights = 0;
+		double MaxDur = 0, MaxStep = 0, MinSepAfter = 9, SumDur = 0;
+		for (int32 StyleK = 0; StyleK < 2; ++StyleK)
+		{
+			FFighterSetup Me = SetupOf(GWebRef[0].A), Ai = SetupOf(GWebRef[0].A);
+			Ai.Style = StyleK == 0 ? EBoxStyle::Pressure : EBoxStyle::Volume;
+			for (int32 K = 0; K < N; ++K)
+			{
+				FFightConfig C;
+				C.Seed = BotSeed(K);
+				C.Rounds = 3;
+				C.RoundSeconds = 55.f;
+				C.BreakSeconds = 0.f;
+				C.Fighters[0] = Me;
+				C.Fighters[0].bAiControlled = false;
+				C.Fighters[1] = Ai;
+				C.Fighters[1].bAiControlled = true;
+				FBoxingFightCore Core;
+				Core.Init(C);
+				FFightBot Bot;
+				Bot.Reset(EFightBotSkill::Average, C.Seed, 0);
+				TArray<FFightBotCmd> Cmds;
+				bool bWas = false, bBroke = false;
+				double Start = 0, X[2] = {0, 0}, Z[2] = {0, 0};
+				bool bPunchWas[2] = {false, false};
+				int32 SepCheck = 0;
+				for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+				{
+					Cmds.Reset();
+					bool bHeld = false;
+					EFightAction Held = EFightAction::StepBack;
+					const FFightSnapshot S0 = Core.GetSnapshot();
+					Bot.Think(S0, 1.f / 60.f, Cmds, bHeld, Held);
+					for (int32 I = 0; I < Cmds.Num(); ++I) Core.ApplyAction(0, Cmds[I].Action, Cmds[I].Target);
+					if (bHeld) Core.ApplyAction(0, Held);
+					Core.Tick(1.f / 60.f);
+					const FFightSnapshot S = Core.GetSnapshot();
+					for (const FFightEvent& E : Core.PollEvents())
+					{
+						if (E.Kind == EFightEventKind::Clinch) ++Clinches, bBroke = false;
+						if (E.Kind == EFightEventKind::Break) { ++Breaks; Viol += bBroke ? 1 : 0; bBroke = true; }
+					}
+					if (S.bClinch)
+					{
+						if (!bWas) Start = Core.GetFightTime();
+						for (int32 I = 0; I < 2; ++I)
+						{
+							// Новый удар в сцепке (старт = bPunching появился) — нарушение.
+							if (S.Fighters[I].bPunching && !bPunchWas[I] && S.ClinchTime > 0.05f) ++PunchInClinch;
+							if (bWas) MaxStep = FMath::Max(MaxStep, HypotD(S.Fighters[I].X - X[I], S.Fighters[I].Z - Z[I]));
+						}
+					}
+					else if (bWas && S.Phase == EFightPhase::Fighting)
+					{
+						++Ends;
+						const double Dur = Core.GetFightTime() - Start;
+						MaxDur = FMath::Max(MaxDur, Dur);
+						SumDur += Dur;
+						SepCheck = 1;
+					}
+					if (SepCheck == 1 && !S.bClinch)
+					{
+						MinSepAfter = FMath::Min(MinSepAfter, double(S.Distance));
+						SepCheck = 0;
+					}
+					bWas = S.bClinch && S.Phase == EFightPhase::Fighting;
+					for (int32 I = 0; I < 2; ++I)
+					{
+						X[I] = S.Fighters[I].X;
+						Z[I] = S.Fighters[I].Z;
+						bPunchWas[I] = S.Fighters[I].bPunching;
+					}
+				}
+				++Fights;
+			}
+		}
+		// Автопилот: клинча нет (паритет с вебом).
+		int32 AutoClinch = 0;
+		for (uint32 Seed = 1; Seed <= 50; ++Seed)
+		{
+			FFightConfig C = MakeConfig(Seed, 55.f, 0.f, true, false);
+			C.Fighters[1].Style = EBoxStyle::Pressure;
+			C.Fighters[0].Style = EBoxStyle::Volume;
+			FBoxingFightCore Core;
+			Core.Init(C);
+			for (int32 Step = 0; Step < 60 * 60 * 60 && !Core.IsOver(); ++Step)
+			{
+				Core.Tick(1.f / 60.f);
+				for (const FFightEvent& E : Core.PollEvents()) AutoClinch += E.Kind == EFightEventKind::Clinch;
+			}
+		}
+		const double Lim = (1.35 - 1.0) / 0.6 / 60.0 + 1e-4; // разведение: пара — (CLINCH_SEP − CLINCH_DIST) за CLINCH_SEP_S, на тик
+		const bool bOk = Clinches > 0 && Ends <= Breaks && Breaks <= Clinches && PunchInClinch == 0 && Viol == 0 &&
+			MaxDur <= 2.2 && MaxStep <= Lim && MinSepAfter >= 1.3 && AutoClinch == 0;
+		printf("клинч (S-76): %d боёв (average против прессинга/объёмника): клинчей %d (%.2f за бой), «брейк» %d, разведено %d, средняя длина %.2f с, макс. %.2f с; "
+			   "ударов в сцепке %d; макс. сдвиг за тик в клинче %.4f м; дистанция после разведения ≥ %.2f м; в автопилоте клинчей %d — %s\n",
+			Fights, Clinches, double(Clinches) / FMath::Max(1, Fights), Breaks, Ends, Ends ? SumDur / Ends : 0.0, MaxDur, PunchInClinch, MaxStep, MinSepAfter,
+			AutoClinch, bOk ? "OK" : "FAIL");
+		return bOk ? 0 : 1;
+	}
+
+	int32 StyleTable(int32 N, bool bCheck, float RoundSec = 55.f)
+	{
+		static const char* StyleName[7] = {"technical", "volume", "puncher", "pressure", "counter", "speed", "balanced"};
+		const EFightBotSkill Skills[] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong, EFightBotSkill::Masher,
+			EFightBotSkill::JabSpam, EFightBotSkill::Turtle, EFightBotSkill::Runner};
+		constexpr int32 NumSkills = int32(sizeof(Skills) / sizeof(Skills[0]));
+		const FRefProf& Even = GWebRef[0].A; // равные 70/70
+		printf("S-76: бот × стиль ИИ, равные 70/70, 3 р. × %.0f с, %d боёв (доля побед бота)%s:\n", RoundSec, N,
+			G_StyleNoClinch ? ", без клинча" : "");
+		printf("  %-10s", "стиль");
+		for (int32 K = 0; K < NumSkills; ++K) printf(" %8s", FFightBot::SkillName(Skills[K]));
+		printf(" | почерк ИИ против average: уд/мин, силовых, корпус, серий≥3/бой, контр-попаданий/бой, дистанция, клинчей/бой | бегун у канатов, "
+			   "дистанция | черепахе пробил блок/бой\n");
+		int32 Bad = 0;
+		for (int32 S = 0; S < 7; ++S)
+		{
+			FFighterSetup Me = SetupOf(Even);
+			FFighterSetup Ai = SetupOf(Even);
+			Ai.Style = static_cast<EBoxStyle>(S);
+			double Rate[NumSkills];
+			FStyleFeel Feel, RunFeel, TurtleFeel;
+			printf("  %-10s", StyleName[S]);
+			for (int32 K = 0; K < NumSkills; ++K)
+			{
+				FStyleFeel* F = Skills[K] == EFightBotSkill::Average ? &Feel
+					: (Skills[K] == EFightBotSkill::Runner ? &RunFeel : (Skills[K] == EFightBotSkill::Turtle ? &TurtleFeel : nullptr));
+				const FBotTally T = RunStyleSeries(Skills[K], Me, Ai, N, F, RoundSec);
+				Rate[K] = T.Rate();
+				printf(" %7.1f%%", Rate[K] * 100);
+			}
+			const double Min = Feel.Ticks / 60.0 / 60.0;
+			printf(" | %4.1f  %3.0f%%  %3.0f%%  %4.1f  %4.1f  %.2f м  %3.1f | %3.0f%%  %.2f м | %4.1f\n", Feel.AiPunches / FMath::Max(1e-9, Min),
+				100.0 * Feel.AiPower / FMath::Max(1, Feel.AiPunches), 100.0 * Feel.AiBody / FMath::Max(1, Feel.AiPunches),
+				double(Feel.Series3) / FMath::Max(1, Feel.Fights), double(Feel.AiCounterHits) / FMath::Max(1, Feel.Fights),
+				Feel.DistSum / FMath::Max(1.0, Feel.Ticks), double(Feel.Clinches) / FMath::Max(1, Feel.Fights),
+				100.0 * RunFeel.HumanRope / FMath::Max(1.0, RunFeel.Ticks), RunFeel.DistSum / FMath::Max(1.0, RunFeel.Ticks),
+				double(TurtleFeel.GuardBreaks) / FMath::Max(1, TurtleFeel.Fights));
+			// Ориентир: average 40–55%, novice < average < strong, спам и абьюз ≤ 10%.
+			const bool bOk = Rate[1] >= 0.40 && Rate[1] <= 0.55 && Rate[0] < Rate[1] && Rate[1] < Rate[2] && Rate[3] <= 0.10 && Rate[4] <= 0.10 &&
+				Rate[5] <= 0.10 && Rate[6] <= 0.10;
+			if (!bOk) ++Bad;
+			if (!bOk && bCheck) printf("  !! %s вне ориентира\n", StyleName[S]);
+		}
+		if (!bCheck) return 0;
+		printf("ИИ стилей против человека (S-76): average 40–55%% против каждого стиля, novice < average < strong, спам/абьюз ≤ 10%% — %s\n", Bad ? "MISMATCH" : "OK");
+		return Bad ? 1 : 0;
+	}
+
 	// Досрочки профи по весу: топ-10 каждого дивизиона ростера (близкие соседи и перевес через одного/двух), ИИ против ИИ.
 	struct FBand
 	{
@@ -976,12 +1338,14 @@ namespace
 		// Бот «человека» против равного в профи (10 р., 75 кг): не безнадёжно и не тривиально, досрочки есть, спам не побеждает.
 		const FRefProf& Even = GWebRef[8].A; // равные 75/75 (профиль эталона веба)
 		FFighterSetup Me = SetupOf(Even), Ai = SetupOf(Even);
+		// S-76: 240 боёв на уровень (было 80): ИИ стилей против человека сменил поток боя, и на 80 боях доля спама/среднего
+		// гуляла ±10 п. (масштаб ДИ) — проверка ловила шум, а не баланс.
 		const EFightBotSkill Skills[4] = {EFightBotSkill::Novice, EFightBotSkill::Average, EFightBotSkill::Strong, EFightBotSkill::Masher};
 		FBotTally Tl[4];
-		printf("бот «человека» против равного 75/75 в профи (10 р. × %.0f с, %d боёв):\n", RoundSec, N * 5);
+		printf("бот «человека» против равного 75/75 в профи (10 р. × %.0f с, %d боёв):\n", RoundSec, N * 15);
 		for (int32 K = 0; K < 4; ++K)
 		{
-			Tl[K] = RunBotSetups(Skills[K], Me, Ai, N * 5, RoundSec, 10, true);
+			Tl[K] = RunBotSetups(Skills[K], Me, Ai, N * 15, RoundSec, 10, true);
 			printf("  %-8s побед %3.0f%%  KO %d RSC %d решений %d (ничьих %d), проиграл досрочно %d, нокдаунов %d/%d, три одинаковые карты %.0f%% решений\n",
 				FFightBot::SkillName(Skills[K]), Tl[K].Rate() * 100, Tl[K].Ko, Tl[K].Rsc, Tl[K].Decisions, Tl[K].Draws, Tl[K].LossStop, Tl[K].KdFor,
 				Tl[K].KdAgainst, Tl[K].Decisions ? 100.0 * Tl[K].SameCards / Tl[K].Decisions : 0.0);
@@ -1016,7 +1380,35 @@ int main(int Argc, char** Argv)
 		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
 		if (Argc >= 4) for (const char* C = Argv[3]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
 		const float Rs = Sec > 0 ? float(Sec) : 55.f;
+		G_StyleNoClinch = Argc >= 5 && Argv[4][0] == 'n';
 		return Argv[1][0] == 'q' ? QaTable(N > 0 ? N : 50, Rs) : ProStoppageTable(N > 0 ? N : 20, Rs);
+	}
+	// S-76: sim.exe clinch <N> — инварианты клинча.
+	if (Argc >= 2 && Argv[1][0] == 'c')
+	{
+		int32 N = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		return ClinchCheck(N > 0 ? N : 150);
+	}
+	// S-76: sim.exe styles <N> [раунд, с] [noclinch] — бот × стиль ИИ (равные 70/70) + почерк стиля.
+	if (Argc >= 2 && Argv[1][0] == 's')
+	{
+		int32 N = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		int32 Sec = 0;
+		for (int32 A = 3; A < Argc; ++A)
+		{
+			if (Argv[A][0] == 'n') G_StyleNoClinch = true;
+			for (const char* C = Argv[A]; *C >= '0' && *C <= '9'; ++C) Sec = Sec * 10 + (*C - '0');
+		}
+		return StyleTable(N > 0 ? N : 200, true, Sec > 0 ? float(Sec) : 55.f);
+	}
+	// S-76: sim.exe vjudges <N> — вариант судейства любителей (не включён): доля единогласных при разных порогах/разбросе/вкусе.
+	if (Argc >= 2 && Argv[1][0] == 'v')
+	{
+		int32 N = 0;
+		if (Argc >= 3) for (const char* C = Argv[2]; *C >= '0' && *C <= '9'; ++C) N = N * 10 + (*C - '0');
+		return JudgeVariantTable(N > 0 ? N : 200);
 	}
 	// S-65: sim.exe judges <N> — судейство любителей по World Boxing на парах QA.
 	if (Argc >= 2 && Argv[1][0] == 'j')
@@ -1223,6 +1615,11 @@ int main(int Argc, char** Argv)
 	// --- 10. S-65: судейство любителей по World Boxing (5 судей, без 10-10, подпись = факт карт) и «шансы при твоей игре» ---
 	Fails += AmateurJudgingTable(100, true);
 	Fails += PlayerForecastTable(120, true);
+
+	// --- 11. S-76: ИИ стилей против человека — бот × стиль (average 40–55% против каждого, порядок уровней, спам/абьюз ≤ 10%) ---
+	Fails += StyleTable(300, true);
+	Fails += ClinchCheck(150);
+	Fails += JudgeVariantTable(40); // вариант судейства (выкл.): поток боя у вариантов бой-в-бой как «сейчас»
 
 	Fails += CheckGeometry();
 	Fails += G_Fail ? 1 : 0;

@@ -98,6 +98,10 @@ namespace BoxRef
 		TArray<FV> LyingLimbs;
 		FDown Down;
 		FOver Over;
+		// UE (S-76/S-75): клинч ядра — подходит к паре сбоку (с дальней от камеры стороны); bBreak — «Брейк!»: руки между
+		// бойцами и в стороны (разводит).
+		bool bClinch = false;
+		bool bBreak = false;
 	};
 
 	struct FArm
@@ -230,8 +234,11 @@ namespace BoxRef
 			Corner,
 			Count,
 			Stop,
-			Announce
+			Announce,
+			Clinch // S-76/S-75: подходит к сцепке, «Брейк!» — разводит
 		};
+		double BreakT = -1; // с с команды «Брейк!» (−1 — нет)
+		int32 ClinchSide = 0; // сторона от оси пары (знак), выбирается на входе в клинч
 		struct FGest
 		{
 			FArm Arms[2];

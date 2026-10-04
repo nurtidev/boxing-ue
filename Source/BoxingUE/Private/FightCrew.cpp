@@ -211,11 +211,13 @@ void BoxCrew::FMood::Kick(const FKick& K)
 	{
 		Cheer = FMath::Max(Cheer, K.Cheer);
 		CheerT = 0.f;
+		CheerOsc = CheerW < 0.05f ? 0.f : CheerOsc; // S-78: жест уже идёт — качание не начинается заново
 	}
 	if (K.Worry > Worry * 0.8f)
 	{
 		Worry = FMath::Max(Worry, K.Worry);
 		WorryT = 0.f;
+		WorryOsc = WorryW < 0.05f ? 0.f : WorryOsc;
 	}
 }
 
@@ -223,6 +225,8 @@ void BoxCrew::FMood::Update(float Dt, bool bRest, bool bSeated)
 {
 	CheerT += Dt;
 	WorryT += Dt;
+	CheerOsc += Dt;
+	WorryOsc += Dt;
 	if (CheerT > 1.2f) Cheer = FMath::Max(0.f, Cheer - Dt * 1.4f);
 	if (WorryT > 1.4f) Worry = FMath::Max(0.f, Worry - Dt * 1.2f);
 	if (bRest)
@@ -232,6 +236,9 @@ void BoxCrew::FMood::Update(float Dt, bool bRest, bool bSeated)
 	auto Step = [Dt](float Cur, float Want, float Rate) {
 		return Want > Cur ? FMath::Min(Want, Cur + Rate * Dt) : FMath::Max(Want, Cur - Rate * Dt);
 	};
+	// S-78: видимая доля жеста — плавно (была скачком в кадр всплеска).
+	CheerW = Step(CheerW, FMath::Min(1.f, Cheer * 1.4f), FMath::Min(1.f, Cheer * 1.4f) > CheerW ? MOOD_IN_RATE : MOOD_OUT_RATE);
+	WorryW = Step(WorryW, FMath::Min(1.f, Worry * 1.4f), FMath::Min(1.f, Worry * 1.4f) > WorryW ? MOOD_IN_RATE : MOOD_OUT_RATE);
 	Up = Step(Up, bRest ? 1.f : 0.f, bRest ? UP_RATE : DOWN_RATE);
 	Lean = Step(Lean, bSeated && Up > 0.85f ? 1.f : 0.f, LEAN_RATE);
 	Stool = Step(Stool, bRest && (bSeated || Up > 0.6f) ? 1.f : 0.f, STOOL_RATE);
@@ -259,6 +266,41 @@ void BoxCrew::ArmDirs(const FArm& A, int32 Side, const FVector& F, const FVector
 	OutFore = (Out * C + (-U * FMath::Cos(Fe) + F * FMath::Sin(Fe)) * S).GetSafeNormal();
 }
 
+FQuat BoxCrew::LimitRotation(const FQuat& Prev, const FQuat& Want, float MaxRadPerSec, float Dt)
+{
+	if (Dt <= 0.f)
+	{
+		return Prev; // повторная оценка той же позы — не шаг
+	}
+	if (Dt > LIMIT_MAX_DT)
+	{
+		return Want;
+	}
+	const float Ang = static_cast<float>(Prev.AngularDistance(Want));
+	const float Max = MaxRadPerSec * Dt;
+	return Ang <= Max ? Want : FQuat::Slerp(Prev, Want, Max / Ang).GetNormalized();
+}
+
+FVector BoxCrew::StoolSpot(const FVector& In, const FVector& Boxer, const FVector& Post, const FVector& Seat, float SitW, float ClearCm)
+{
+	// До посадки: точка угла, но не ближе ClearCm к бойцу (по горизонтали) — выталкивается к столбу (за спину севшего).
+	FVector A = In;
+	const FVector D(In.X - Boxer.X, In.Y - Boxer.Y, 0.f);
+	if (D.Size() < ClearCm)
+	{
+		FVector Dir(Post.X - Boxer.X, Post.Y - Boxer.Y, 0.f);
+		Dir = Dir.GetSafeNormal();
+		if (!Dir.IsNearlyZero())
+		{
+			A = FVector(Boxer.X + Dir.X * ClearCm, Boxer.Y + Dir.Y * ClearCm, In.Z);
+		}
+	}
+	// Садится — въезжает под таз.
+	const float K = FMath::Clamp(SitW, 0.f, 1.f);
+	const float E = K * K * (3.f - 2.f * K);
+	return FVector(FMath::Lerp(A.X, Seat.X, E), FMath::Lerp(A.Y, Seat.Y, E), In.Z);
+}
+
 void BoxCrew::CutmanScript(float RestT, float& OutBottle, float& OutWipe)
 {
 	// Цикл 7 с: 0.3–3.3 — бутылка к губам, 3.7–6.6 — протирает лицо (по 0.45 с на подход/отход).
@@ -282,18 +324,18 @@ BoxCrew::FBody BoxCrew::Pose(ERole Role, const FMood& M, float T, float Phase, f
 	FArm R = bCoach ? Ledge : Down;
 	float Lean = 0.08f + Breathe;
 	// «Да!» — кулак вверх с качанием, кивок; тревога — руки к лицу (тренер показывает гард) / катмен за голову.
-	const float Ch = FMath::Min(1.f, M.Cheer * 1.4f);
-	const float Nod = Ch * FMath::Sin(M.CheerT * 10.f) * 0.16f * FMath::Exp(-M.CheerT * 1.6f);
+	const float Ch = M.CheerW; // S-78: плавная доля (не скачок)
+	const float Nod = Ch * FMath::Sin(M.CheerOsc * 10.f) * 0.16f * FMath::Exp(-M.CheerOsc * 1.6f);
 	if (Ch > 0.01f)
 	{
-		const float Pump = FMath::Sin(M.CheerT * 11.f) * 0.28f * FMath::Exp(-M.CheerT * 1.2f);
+		const float Pump = FMath::Sin(M.CheerOsc * 11.f) * 0.28f * FMath::Exp(-M.CheerOsc * 1.2f);
 		R = MixArm(R, FArm{2.55f + Pump, 0.35f, 0.7f + Pump}, Ch);
 		L = MixArm(L, FArm{bCoach ? 1.6f : 0.6f, 0.3f, 1.2f}, Ch * 0.6f);
 	}
-	const float Wo = FMath::Min(1.f, M.Worry * 1.4f);
+	const float Wo = M.WorryW;
 	if (Wo > 0.01f)
 	{
-		const float Wave = FMath::Sin(M.WorryT * 9.f) * 0.18f * FMath::Exp(-M.WorryT * 0.9f);
+		const float Wave = FMath::Sin(M.WorryOsc * 9.f) * 0.18f * FMath::Exp(-M.WorryOsc * 0.9f);
 		const FArm G = bCoach ? FArm{1.25f + Wave, 0.15f, 1.55f} : FArm{2.3f, 0.55f, 2.25f};
 		L = MixArm(L, G, Wo);
 		FArm G2 = G;
@@ -318,7 +360,7 @@ BoxCrew::FBody BoxCrew::Pose(ERole Role, const FMood& M, float T, float Phase, f
 			CutmanScript(M.RestT, B.Bottle, B.Wipe);
 			B.Bottle *= K;
 			B.Wipe *= K;
-			Lean += 0.12f * FMath::Max(B.Bottle, B.Wipe); // тянется через канат к лицу
+			Lean += 0.12f * B.Wipe + 0.3f * B.Bottle; // тянется через канат к лицу (S-78: с бутылкой — ниже, иначе не дотягивался)
 		}
 	}
 	// Поднимается/спускается — руки к себе (не тянуться сквозь канаты).
@@ -349,6 +391,8 @@ void FCrewPoseFx::Resolve(const FBoneContainer& Bones)
 	}
 	Serial = Bones.GetSerialNumber();
 	ContainerPtr = &Bones;
+	LimitBones.Reset(); // S-78: индексы костей — заново
+	LimitRate.Reset();
 	Spine[0] = FightCrewImpl::FindBone(Bones, TEXT("spine_02"));
 	Spine[1] = FightCrewImpl::FindBone(Bones, TEXT("spine_03"));
 	Spine[2] = FightCrewImpl::FindBone(Bones, TEXT("spine_04"));
@@ -452,12 +496,62 @@ void FCrewVisualRootNode::CacheBones_AnyThread(const FAnimationCacheBonesContext
 void FCrewVisualRootNode::Update_AnyThread(const FAnimationUpdateContext& Context)
 {
 	Retarget.Update_AnyThread(Context);
+	Dt += Context.GetDeltaTime();
 }
 
 void FCrewVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
 {
 	Retarget.Evaluate_AnyThread(Output);
 	Fx.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform());
+	Fx.LimitSpeed(Output.Pose, Dt); // S-78: без рывков позы (подъём на апрон, всплеск реакции)
+	Dt = 0.f;
+}
+
+void FCrewPoseFx::LimitSpeed(FCompactPose& Pose, float Dt)
+{
+	static const bool bOff = FParse::Param(FCommandLine::Get(), TEXT("BoxCrewNoLimit")); // A/B
+	if (bOff)
+	{
+		return;
+	}
+	const FBoneContainer& Bones = Pose.GetBoneContainer();
+	if (LimitBones.Num() == 0)
+	{
+		struct FB { const TCHAR* Name; float Rate; };
+		static const FB List[] = {
+			{TEXT("spine_01"), 6.f}, {TEXT("spine_02"), 6.f}, {TEXT("spine_03"), 6.f}, {TEXT("spine_04"), 6.f}, {TEXT("spine_05"), 6.f},
+			{TEXT("neck_01"), 8.f}, {TEXT("head"), 10.f},
+			{TEXT("clavicle_l"), 8.f}, {TEXT("clavicle_r"), 8.f}, {TEXT("upperarm_l"), 9.f}, {TEXT("upperarm_r"), 9.f},
+			{TEXT("lowerarm_l"), 11.f}, {TEXT("lowerarm_r"), 11.f}, {TEXT("hand_l"), 12.f}, {TEXT("hand_r"), 12.f},
+			{TEXT("thigh_l"), 9.f}, {TEXT("thigh_r"), 9.f}, {TEXT("calf_l"), 12.f}, {TEXT("calf_r"), 12.f},
+			{TEXT("foot_l"), 14.f}, {TEXT("foot_r"), 14.f},
+		};
+		for (const FB& B : List)
+		{
+			const FCompactPoseBoneIndex I = FightCrewImpl::FindBone(Bones, B.Name);
+			if (FightCrewImpl::Ok(I))
+			{
+				LimitBones.Add(I.GetInt());
+				LimitRate.Add(B.Rate);
+			}
+		}
+		LimitPrev.SetNum(LimitBones.Num());
+		bLimitPrev = false;
+	}
+	for (int32 K = 0; K < LimitBones.Num(); ++K)
+	{
+		const FCompactPoseBoneIndex I(LimitBones[K]);
+		if (I.GetInt() >= Pose.GetNumBones())
+		{
+			bLimitPrev = false;
+			return;
+		}
+		const FQuat Want = Pose[I].GetRotation();
+		const FQuat Q = bLimitPrev ? BoxCrew::LimitRotation(LimitPrev[K], Want, LimitRate[K], Dt) : Want;
+		Pose[I].SetRotation(Q);
+		LimitPrev[K] = Q;
+	}
+	bLimitPrev = true;
 }
 
 void FCrewVisualProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutNodes)
@@ -837,8 +931,11 @@ void AFightCrewMember::Tick(float DeltaSeconds)
 		const FVector Ff = D.FighterFwd.GetSafeNormal2D();
 		const FVector Mouth = D.Fighter + Ff * 11.f - FVector(0.f, 0.f, 9.f);
 		const FVector Shoulder = GetFeet() + FVector(0.f, 0.f, 140.f * GetActorScale3D().Z);
-		// Кость кисти — у запястья: бутылка в кулаке впереди неё, кисть не доходит до губ ~13 см.
-		PoseFrame.IkTarget[0] = Mouth + (Shoulder - Mouth).GetSafeNormal() * 13.f;
+		// Кость кисти — у запястья: бутылка в кулаке впереди неё, кисть не доходит до губ ~13 см. S-78: кисть — ПЕРЕД лицом
+		// (со стороны катмена чуть-чуть) и ниже губ: было «от губ к плечу катмена» — он сбоку, и бутылка оказывалась у уха.
+		const FVector ToMe = FVector(Shoulder.X - Mouth.X, Shoulder.Y - Mouth.Y, 0.f).GetSafeNormal();
+		const FVector SideC = ToMe - Ff * FVector::DotProduct(ToMe, Ff);
+		PoseFrame.IkTarget[0] = Mouth + (Ff * 0.6f + SideC * 0.7f).GetSafeNormal() * 11.f - FVector(0.f, 0.f, 4.f);
 		PoseFrame.IkW[0] = B.Bottle;
 		const float Wipe = FMath::Sin(D.Time * 5.5f);
 		const FVector Side(Ff.Y, -Ff.X, 0.f);
@@ -1100,11 +1197,11 @@ void ABoxingCornerCrew::UpdateStool(int32 C, float DeltaSeconds)
 	FVector In = StoolAt[C][0];
 	if (const ABoxerCharacter* B = GM->GetBoxer(C))
 	{
-		if (B->GetSitWeight() > 0.05f)
-		{
-			const FVector P = B->GetActorLocation() - B->GetActorForwardVector().GetSafeNormal2D() * 6.f;
-			In = FVector(P.X, P.Y, In.Z);
-		}
+		// S-78: до посадки стул не ближе STOOL_CLEAR_CM к бойцу (за ним, к столбу) — не в ногах идущего в угол; садится —
+		// въезжает под таз (было: стул ехал в точку угла, где боец ещё стоял, ноги — сквозь табурет).
+		const FVector Bp = B->GetActorLocation();
+		const FVector Seat = Bp - B->GetActorForwardVector().GetSafeNormal2D() * 6.f;
+		In = BoxCrew::StoolSpot(In, Bp, StoolAt[C][1], Seat, B->GetSitWeight(), BoxCrew::STOOL_CLEAR_CM);
 		// Высота сиденья — по тазу севшего (кость pelvis видимого меша минус полтолщины ягодиц).
 		if (B->GetSitWeight() > 0.9f)
 		{

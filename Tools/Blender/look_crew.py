@@ -507,8 +507,9 @@ def main():
     push_out_near(tee, [full, face], 0.006)
     worst_gap(tee, full)
     towel = make_towel(full)
-    O["transfer_weights"](towel, full)
-    push_out_near(towel, [tee], 0.010)
+    # S-77 (QA-13): веса с футболки, а не с тела — полотенце едет вместе с тканью и не проходит сквозь неё
+    O["transfer_weights"](towel, tee)
+    push_out_near(towel, [tee], 0.016)
     worst_gap(towel, full)
     tee_towel = O["join"]([tee, towel], "tee_towel")
     body_cut = O["make_ref_body"](full, rig, "am")

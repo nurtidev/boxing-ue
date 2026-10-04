@@ -55,6 +55,22 @@ namespace BoxCrew
 	constexpr float STOOL_MESH_CM = 52.f;
 	// Катмен в перерыве — ближе к столбу, чем маркер CornerCrew_<угол>_Cutman_Rest (см): дотянуться до губ бойца.
 	constexpr float CUTMAN_REST_IN = 50.f;
+	// S-78: набор/спад видимой доли жеста реакции (1/с).
+	constexpr float MOOD_IN_RATE = 4.f;
+	constexpr float MOOD_OUT_RATE = 2.5f;
+	// S-78: стул до посадки — не ближе к бойцу (см, по горизонтали от центра капсулы), чтобы не стоял ногами сквозь него;
+	// садится — въезжает под таз.
+	constexpr float STOOL_CLEAR_CM = 48.f;
+
+	// S-78: предел угловой скорости локальных поворотов костей углового (рад/с) — рывки позы GASP (подъём на апрон,
+	// смена состояния) и жестов сглаживаются, нормальная ходьба/жесты (≤ 5–7 рад/с) не задеваются. Шаг без предела, если
+	// кадр длиннее LIMIT_MAX_DT (после скрытия на повтор и т. п.) — поза ставится сразу.
+	BOXINGUE_API FQuat LimitRotation(const FQuat& Prev, const FQuat& Want, float MaxRadPerSec, float Dt);
+	constexpr float LIMIT_MAX_DT = 0.25f;
+
+	// S-78: куда стул до/во время посадки: точка угла In, но не ближе ClearCm к бойцу Boxer (выталкивается к столбу Post);
+	// SitW 0..1 — садится: въезжает под таз (Seat).
+	BOXINGUE_API FVector StoolSpot(const FVector& In, const FVector& Boxer, const FVector& Post, const FVector& Seat, float SitW, float ClearCm);
 
 	// Место на кадре между боевой точкой A (пол у помоста) и точкой перерыва B (апрон): по горизонтали — smoothstep,
 	// по высоте — с опережением (сначала поднялся, потом подошёл к канатам; вниз — наоборот). crewPlace веба.
@@ -88,6 +104,12 @@ namespace BoxCrew
 		float Lean = 0.f;  // 0 — стоит, 1 — наклонился к сидящему бойцу
 		float Stool = 0.f; // 0 — стула нет, 1 — стоит в углу
 		float RestT = 0.f; // с с посадки бойца (сценарий катмена: бутылка → протирает)
+		// S-78: видимая доля «да!»/тревоги — набирается за ~0.25 с (было — скачком в кадр: кисти прыгали на 70–95 см) и
+		// время качания жеста (сбрасывается, только если жест начинается с нуля: повторный всплеск не дёргает руки).
+		float CheerW = 0.f;
+		float WorryW = 0.f;
+		float CheerOsc = 99.f;
+		float WorryOsc = 99.f;
 
 		void Kick(const FKick& K);
 		// bRest — перерыв (наверх), bSeated — боец сел (наклон, стул).
@@ -156,6 +178,15 @@ private:
 	FCompactPoseBoneIndex Upper[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
 	FCompactPoseBoneIndex Lower[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
 	FCompactPoseBoneIndex Hand[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
+	// S-78: предел скорости костей (корпус, руки, ноги) — прошлый кадр.
+	TArray<int32> LimitBones;
+	TArray<float> LimitRate;
+	TArray<FQuat> LimitPrev;
+	bool bLimitPrev = false;
+
+public:
+	// Dt — шаг анимации (0 — повторная оценка той же позы).
+	void LimitSpeed(FCompactPose& Pose, float Dt);
 };
 
 struct FCrewVisualRootNode : public FAnimNode_Base
@@ -163,6 +194,7 @@ struct FCrewVisualRootNode : public FAnimNode_Base
 	FAnimNode_RetargetPoseFromMesh Retarget;
 	FCrewPoseFx Fx;
 	FCrewPoseFrame Frame;
+	float Dt = 0.f; // S-78
 
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;

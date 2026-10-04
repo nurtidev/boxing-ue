@@ -32,9 +32,14 @@
 #include "Subsystems/WorldSubsystem.h"
 #include "FightTypes.h"
 #include "BoxerFeel.h"
+#include "ImpactSpray.h"
+#include "Blueprint/UserWidget.h"
 #include "FightFx.generated.h"
 
 class ABoxerCharacter;
+class UTextBlock;
+class UBorder;
+class UProgressBar;
 class ABoxingFightGameMode;
 class UBoxingFightAudio;
 class APlayerController;
@@ -136,7 +141,9 @@ namespace BoxFx
 	constexpr float KD_SHOT_DIST = 300.f;   // см от лежащего
 	constexpr float KD_SHOT_HEIGHT = 185.f; // над полом
 	constexpr float KD_SHOT_LIM = 420.f;    // камера не дальше апрона (канаты 305; сторону канатов у камеры прячет контроллер)
-	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook);
+	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook,
+		const FVector* PrefCam = nullptr); // S-78: PrefCam — нынешняя камера: сторона ближе к ней (без облёта ринга на полкруга)
+	constexpr float KD_SHOT_TURN_COST = 0.25f; // S-78: цена градуса облёта от нынешней камеры
 	// Кадр перерыва (restShot + walkToCornerShot веба): Corner 0 — красный (−,−), 1 — синий; At — где сейчас боец (идёт к углу
 	// — кадр едет с ним); Aspect — ширина/высота вьюпорта (портрет — дальше, широкий — угол левее центра).
 	// S-62: HeightScale — рост бойца / 178: высокий (198 см) целиком в кадре, голова не под панелью HUD (дальше и выше).
@@ -149,7 +156,64 @@ namespace BoxFx
 		FVector& OutCam, FVector& OutLook, const FVector& WinnerFwd = FVector::ZeroVector); // WinnerFwd — куда он смотрит: камера спереди-сбоку
 
 	float WrapDeg(float A);
+
+	// S-75: подсказки защиты по событиям ядра (DEF_CUE веба, InteractiveFight.tsx) — с точки зрения игрока Me.
+	enum class EDefCue : uint8
+	{
+		None,
+		Slip,       // мой нырок удался: «Уклон! Бей в ответ» — держится контр-окно ядра
+		Counter,    // моя контра прошла
+		Broke,      // я пробил блок соперника
+		GuardBreak, // мой блок пробит
+		Caught,     // пойман на выходе из нырка
+		Clinch,     // S-76: клинч (пара сцепилась)
+		Break,      // S-76: рефери — «Брейк!»
+	};
+	EDefCue DefenseCueFor(const FFightEvent& E, int32 Me);
+	const TCHAR* DefenseCueText(EDefCue C);
+	// Сколько держится (с): уклон — контр-окно ядра 0.62 с, прочие — 1 с (setCue веба).
+	float DefenseCueSeconds(EDefCue C);
+	bool DefenseCueGood(EDefCue C);
+	constexpr float COUNTER_WINDOW_S = 0.62f; // COUNTER_WINDOW ядра
+	// Контра — акцент: короткий стоп-кадр даже на среднем попадании и наезд камеры.
+	constexpr float COUNTER_STOP_MS = 35.f;
+	constexpr float COUNTER_PUNCH_IN = 0.35f;
+	float CounterStopMs(float StopMs, bool bCounter);
+
+	// S-78 (QA: камера пролетала над сидящим бойцом, ныряла сверху на нокдауне/KO). Смешивание двух кадров камеры «по орбите»
+	// вокруг точки взгляда: точки взгляда — линейно, смещение камеры — курс (кратчайший путь), наклон и расстояние — линейно.
+	// Прямая интерполяция мест камеры вела её над головой бойца (наклон до −82°, 2300°/с).
+	void BlendView(const FVector& CamA, const FVector& LookA, const FVector& CamB, const FVector& LookB, float T, FVector& OutCam, FVector& OutLook);
+	// Ограничитель итогового кадра: наклон взгляда в [CAM_PITCH_MIN, CAM_PITCH_MAX], поворот (курс и наклон отдельно — не через
+	// «макушку») не быстрее CAM_MAX_TURN_DPS; камера прыгнула дальше CAM_CUT_CM за кадр — склейка, ограничения поворота нет.
+	constexpr float CAM_PITCH_MIN_DEG = -45.f;
+	constexpr float CAM_PITCH_MAX_DEG = 20.f;
+	constexpr float CAM_MAX_TURN_DPS = 160.f;
+	constexpr float CAM_CUT_CM = 60.f;
+	// Prev — прошлое направление (нулевой — нет); возвращает единичное направление. bCut — склейка (только наклон).
+	FVector LimitViewDir(const FVector& Prev, const FVector& Want, float Dt, bool bCut, bool* bOutTurnLimited = nullptr, bool* bOutPitchLimited = nullptr);
 }
+
+// S-75: крупная подпись защиты по событию (порт DEF_CUE веба) — сверху по центру, над бойцами, не на HUD-панелях;
+// у «Уклон! Бей в ответ» — полоска контр-окна. Собирается в C++ (без WBP), ввод не принимает. Ведёт UBoxingFightFx.
+UCLASS()
+class BOXINGUE_API UBoxingDefenseCueWidget : public UUserWidget
+{
+	GENERATED_BODY()
+
+public:
+	// Text пусто — скрыть. Alpha 0..1 (появление/угасание), Pop — масштаб «удара» (1 — покой), Window — доля контр-окна (< 0 — без полоски).
+	void Show(const FString& Text, const FLinearColor& Color, float Alpha, float Pop, float Window);
+
+protected:
+	virtual void NativeOnInitialized() override;
+
+private:
+	UPROPERTY(Transient) TObjectPtr<UBorder> Panel;
+	UPROPERTY(Transient) TObjectPtr<UTextBlock> Label;
+	UPROPERTY(Transient) TObjectPtr<UProgressBar> WindowBar;
+	FString Shown;
+};
 
 // Запись одного бойца в кадре повтора.
 struct FBoxReplayFighter
@@ -208,11 +272,20 @@ public:
 
 	UPROPERTY(Transient)
 	TObjectPtr<UBoxingFightAudio> Audio;
+	// S-75: подпись защиты (создаётся при первой подсказке).
+	UPROPERTY(Transient)
+	TObjectPtr<UBoxingDefenseCueWidget> CueWidget;
+
+	// S-75: текущая подсказка защиты (для HUD/отладки): вид и сколько осталось (с).
+	BoxFx::EDefCue GetDefenseCue(float& OutLeft) const { OutLeft = CueLeft; return CueLeft > 0.f ? Cue : BoxFx::EDefCue::None; }
 
 	bool bEnabled = true;
 	BoxFx::FProfile Profile;
 
 private:
+	// S-74: брызги пота в точке контакта (ImpactSpray.h; реализация SpawnSpray — ImpactSpray.cpp).
+	FBoxImpactSpray Spray;
+	void SpawnSpray(const FFightEvent& E, ABoxingFightGameMode* GM, BoxSpray::EKind SprayKind, float Mag);
 	void SetFightersFrozen(bool bFrozen);
 	void ApplyHaptic(BoxFx::EHaptic H);
 	void UpdateTimeDilation();
@@ -231,6 +304,50 @@ private:
 	int32 FxShotsLeft = 0; // -BoxFxShots=N: серии скриншотов на первых N хит-стопах/нокдаунах
 	int32 FxShotIndex = 0;
 	TArray<TPair<double, FString>> PendingShots;
+	// S-75 (отладка): -BoxDefShots=N — серии кадров защиты: N на вид (блок, начало нырка, провал, контра, пробит/пойман)
+	// → Docs/screens/<-BoxShotPrefix, иначе feel6_def>_<вид>_NN_tNNN.png.
+	int32 DefShotsLeft[7] = {0, 0, 0, 0, 0, 0, 0};
+	int32 DefShotIndex[7] = {0, 0, 0, 0, 0, 0, 0};
+	FString DefShotPrefix;
+	float PrevSlipAmt[2] = {0.f, 0.f};
+	void QueueDefShots(int32 Slot, const TCHAR* Kind, std::initializer_list<float> Offsets);
+	// S-75: подсказка защиты (реальное время).
+	BoxFx::EDefCue Cue = BoxFx::EDefCue::None;
+	float CueLeft = 0.f;
+	float CueAge = 0.f;
+	float CueDur = 0.f;
+	bool bNoCue = false; // -BoxNoDefCue
+	void UpdateCue(float RealDt);
+	// S-75 (замер, -BoxFxLog): после нырка/блока 0.3 с — мин. расстояние фронта кулака атакующего до центра головы и до
+	// ближайшей перчатки защищающегося (видимый меш). «FX DEF СВОДКА» при выходе.
+	struct FDefProbe
+	{
+		int32 Att = 0;
+		bool bSlip = false;
+		float Left = 0.f;
+		float HeadMin = 1e6f;
+		float GloveMin = 1e6f;
+	};
+	TArray<FDefProbe> DefProbes;
+	void UpdateDefProbes(float RealDt);
+	// S-78: ограничитель кадра и автопроверка камеры («FX CAM СВОДКА» в логе при выходе; -BoxFxLog — эпизоды).
+	FVector CamPrevPos = FVector::ZeroVector;
+	FVector CamPrevDir = FVector::ZeroVector;
+	double CamPrevClock = -1.0;
+	struct FCamStats
+	{
+		int32 Frames = 0;
+		int32 Cuts = 0;
+		int32 TurnLimited = 0;
+		int32 PitchLimited = 0;
+		float WantTurnMax = 0.f;
+		float WantPitchMin = 0.f;
+		int32 FastFinal = 0;
+		int32 SteepFinal = 0;
+		float FinalTurnMax = 0.f;
+		float FinalPitchMin = 0.f;
+	} CamStats;
+	void LimitCamera(FVector& Cam, FVector& Look);
 
 	// хит-стоп
 	float Freeze = 0.f; // сек реального времени

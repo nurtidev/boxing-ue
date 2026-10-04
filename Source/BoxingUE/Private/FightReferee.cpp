@@ -330,6 +330,92 @@ void FRefereePoseFx::Apply(FCompactPose& Pose, const FRefereePoseFrame& Fr, cons
 	RotateCS(Pose, SpineTop, Turn(F, L, Fr.HeadYaw * 0.15f));
 	RotateCS(Pose, Neck, Turn(F, L, Fr.HeadYaw * 0.35f) * Turn(U, F, Nod * 0.4f));
 	RotateCS(Pose, Head, Turn(F, L, Fr.HeadYaw * 0.5f) * Turn(U, F, Nod * 0.6f));
+
+	// --- S-78: голова не повёрнута относительно груди больше HEAD_TWIST_MAX (GASP доворачивает таз и грудь с запаздыванием
+	// за курсом, а голова уже там) — излишек снимается шеей вокруг оси груди ---
+	if (Ok(SpineTop) && Ok(Neck) && Ok(Head) && Ok(Upper[0]) && Ok(Upper[1]))
+	{
+		if (!bTwistCal)
+		{
+			// Поза привязки: «вперёд» компонента = вверх × (левое плечо − правое).
+			const FBoneContainer& Bones = Pose.GetBoneContainer();
+			auto RefCS = [&Bones](FCompactPoseBoneIndex I)
+			{
+				FTransform T = Bones.GetRefPoseTransform(I);
+				FCompactPoseBoneIndex P = Bones.GetParentBoneIndex(I);
+				while (P.GetInt() != INDEX_NONE)
+				{
+					T = T * Bones.GetRefPoseTransform(P);
+					P = Bones.GetParentBoneIndex(P);
+				}
+				return T;
+			};
+			const FVector Up(0.f, 0.f, 1.f);
+			FVector Lt = RefCS(Upper[0]).GetLocation() - RefCS(Upper[1]).GetLocation();
+			Lt.Z = 0.f;
+			const FVector Fw = FVector::CrossProduct(Up, Lt.GetSafeNormal()).GetSafeNormal();
+			const FQuat Ch = RefCS(SpineTop).GetRotation();
+			const FQuat Hd = RefCS(Head).GetRotation();
+			ChestFwdL = Ch.UnrotateVector(Fw);
+			ChestUpL = Ch.UnrotateVector(Up);
+			HeadFwdL = Hd.UnrotateVector(Fw);
+			bTwistCal = !Fw.IsNearlyZero();
+		}
+		if (bTwistCal)
+		{
+			const FQuat Ch = CS(Pose, SpineTop).GetRotation();
+			const FVector Cu = Ch.RotateVector(ChestUpL);
+			const float Tw = BoxRefPose::TwistAbout(Cu, Ch.RotateVector(ChestFwdL), CS(Pose, Head).GetRotation().RotateVector(HeadFwdL));
+			const float Ex = BoxRefPose::TwistExcess(Tw, BoxRefPose::HEAD_TWIST_MAX);
+			if (Ex != 0.f)
+			{
+				RotateCS(Pose, Neck, FQuat(Cu.GetSafeNormal(), -Ex));
+			}
+		}
+	}
+}
+
+void FRefereePoseFx::HoldPelvis(FCompactPose& Pose, float Dt)
+{
+	static const bool bOff = FParse::Param(FCommandLine::Get(), TEXT("BoxRefNoHold")); // A/B
+	if (bOff || !Ok(Pelvis))
+	{
+		return;
+	}
+	const float Z = static_cast<float>(CS(Pose, Pelvis).GetLocation().Z);
+	StandZ = StandZ < 0.f ? Z : BoxRefPose::StandHeight(StandZ, Z, Dt);
+	const float Want = BoxRefPose::HeldPelvisZ(StandZ, Z, BoxRefPose::PELVIS_SAG_MAX);
+	if (Want > Z + 0.01f)
+	{
+		Pose[Pelvis].AddToTranslation(ParentRotCS(Pose, Pelvis).UnrotateVector(FVector(0.f, 0.f, Want - Z)));
+	}
+}
+
+float BoxRefPose::StandHeight(float Stand, float Z, float Dt)
+{
+	return Z >= Stand ? Z : Stand - FMath::Min(Stand - Z, STAND_DECAY * FMath::Max(0.f, Dt));
+}
+
+float BoxRefPose::HeldPelvisZ(float Stand, float Z, float SagMax)
+{
+	return FMath::Max(Z, Stand - SagMax);
+}
+
+float BoxRefPose::TwistAbout(const FVector& Axis, const FVector& From, const FVector& To)
+{
+	const FVector A = Axis.GetSafeNormal();
+	const FVector F = (From - A * FVector::DotProduct(From, A)).GetSafeNormal();
+	const FVector T = (To - A * FVector::DotProduct(To, A)).GetSafeNormal();
+	if (A.IsNearlyZero() || F.IsNearlyZero() || T.IsNearlyZero())
+	{
+		return 0.f;
+	}
+	return FMath::Atan2(static_cast<float>(FVector::DotProduct(FVector::CrossProduct(F, T), A)), static_cast<float>(FVector::DotProduct(F, T)));
+}
+
+float BoxRefPose::TwistExcess(float Twist, float Max)
+{
+	return Twist > Max ? Twist - Max : (Twist < -Max ? Twist + Max : 0.f);
 }
 
 void FRefereeVisualRootNode::Initialize_AnyThread(const FAnimationInitializeContext& Context)
@@ -353,6 +439,7 @@ void FRefereeVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
 {
 	Retarget.Evaluate_AnyThread(Output);
 	Fx.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform());
+	Fx.HoldPelvis(Output.Pose, Dt); // S-78: без глубокого приседа GASP
 	Feet.Apply(Output.Pose, FeetFrame, Output.AnimInstanceProxy->GetComponentTransform(), Dt); // S-70: ступни
 	Dt = 0.f;
 }

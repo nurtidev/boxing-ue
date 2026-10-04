@@ -18,6 +18,16 @@
 #include "Misc/Paths.h"
 #include "UnrealClient.h"
 #include "UISettings.h"
+#include "UIWidgetBase.h" // S-75: BoxUi (цвета, шрифт) для подписи защиты
+#include "Blueprint/WidgetTree.h"
+#include "Brushes/SlateRoundedBoxBrush.h"
+#include "Components/Border.h"
+#include "Components/CanvasPanel.h"
+#include "Components/CanvasPanelSlot.h"
+#include "Components/ProgressBar.h"
+#include "Components/TextBlock.h"
+#include "Components/VerticalBox.h"
+#include "Components/VerticalBoxSlot.h"
 
 // =============================================================================================
 // Чистая логика (порт web/src/ui/fightFx.ts)
@@ -154,7 +164,8 @@ namespace BoxFx
 		return FMath::UnwindDegrees(A);
 	}
 
-	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook)
+	void KnockdownShot(const FVector& Body, const FVector& Stand, const FVector& RingCenter, int32& Side, FVector& OutCam, FVector& OutLook,
+		const FVector* PrefCam)
 	{
 		FVector V = Stand - Body;
 		V.Z = 0.f;
@@ -182,6 +193,15 @@ namespace BoxFx
 				float Score = FMath::Abs(Off - KD_SHOT_STAND_DEG) + (Off > KD_SHOT_STAND_DEG + 8.f ? 60.f : 0.f);
 				Score += Inside(C, 0.f) ? 0.f : 1000.f;
 				Score += 0.01f * static_cast<float>(FVector::Dist2D(C, RingCenter));
+				if (PrefCam)
+				{
+					// S-78 (QA: на KO камера облетала ринг на полкруга и смотрела в трибуну) — сторона ближе к нынешней камере.
+					const FVector Cur = (Body - *PrefCam).GetSafeNormal2D();
+					if (!Cur.IsNearlyZero())
+					{
+						Score += KD_SHOT_TURN_COST * FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(FVector::DotProduct(D, Cur)), -1.f, 1.f)));
+					}
+				}
 				if (Score < BestScore)
 				{
 					BestScore = Score;
@@ -282,6 +302,132 @@ namespace BoxFx
 	}
 }
 
+// S-75: подсказки защиты (порт setCue веба: attack.ts / guard.ts, тексты — DEF_CUE InteractiveFight.tsx).
+namespace BoxFx
+{
+	EDefCue DefenseCueFor(const FFightEvent& E, int32 Me)
+	{
+		if (Me < 0)
+		{
+			return EDefCue::None;
+		}
+		if (E.Kind == EFightEventKind::Slipped)
+		{
+			return E.Defender == Me ? EDefCue::Slip : EDefCue::None;
+		}
+		if (E.Kind == EFightEventKind::Clinch)
+		{
+			return EDefCue::Clinch;
+		}
+		if (E.Kind == EFightEventKind::Break)
+		{
+			return EDefCue::Break;
+		}
+		if (E.Kind != EFightEventKind::Hit)
+		{
+			return EDefCue::None;
+		}
+		if (E.bCounter && E.Attacker == Me)
+		{
+			return EDefCue::Counter;
+		}
+		if (E.bGuardBreak)
+		{
+			return E.Defender == Me ? EDefCue::GuardBreak : EDefCue::Broke;
+		}
+		if (E.bCaught && E.Defender == Me)
+		{
+			return EDefCue::Caught;
+		}
+		return EDefCue::None;
+	}
+
+	const TCHAR* DefenseCueText(EDefCue C)
+	{
+		switch (C)
+		{
+		case EDefCue::Slip: return TEXT("Уклон! Бей в ответ");
+		case EDefCue::Counter: return TEXT("Контра!");
+		case EDefCue::Broke: return TEXT("Блок пробит — добивай");
+		case EDefCue::GuardBreak: return TEXT("Твой блок пробит!");
+		case EDefCue::Caught: return TEXT("Пойман на нырке");
+		case EDefCue::Clinch: return TEXT("Клинч");
+		case EDefCue::Break: return TEXT("Брейк!");
+		default: return TEXT("");
+		}
+	}
+
+	float DefenseCueSeconds(EDefCue C)
+	{
+		return C == EDefCue::None ? 0.f : (C == EDefCue::Slip ? COUNTER_WINDOW_S : 1.f);
+	}
+
+	bool DefenseCueGood(EDefCue C)
+	{
+		return C == EDefCue::Slip || C == EDefCue::Counter || C == EDefCue::Broke;
+	}
+
+	float CounterStopMs(float StopMs, bool bCounter)
+	{
+		return bCounter ? FMath::Max(StopMs, COUNTER_STOP_MS) : StopMs;
+	}
+
+	void BlendView(const FVector& CamA, const FVector& LookA, const FVector& CamB, const FVector& LookB, float T, FVector& OutCam, FVector& OutLook)
+	{
+		T = FMath::Clamp(T, 0.f, 1.f);
+		OutLook = FMath::Lerp(LookA, LookB, T);
+		const FVector Oa = CamA - LookA;
+		const FVector Ob = CamB - LookB;
+		const float La = Oa.Size(), Lb = Ob.Size();
+		if (La < 1.f || Lb < 1.f)
+		{
+			OutCam = FMath::Lerp(CamA, CamB, T);
+			return;
+		}
+		const float Ya = FMath::Atan2(Oa.Y, Oa.X), Yb = FMath::Atan2(Ob.Y, Ob.X);
+		const float Pa = FMath::Asin(FMath::Clamp(Oa.Z / La, -1.f, 1.f)), Pb = FMath::Asin(FMath::Clamp(Ob.Z / Lb, -1.f, 1.f));
+		const float Yaw = Ya + FMath::DegreesToRadians(WrapDeg(FMath::RadiansToDegrees(Yb - Ya))) * T;
+		const float Pit = FMath::Lerp(Pa, Pb, T);
+		const float Len = FMath::Lerp(La, Lb, T);
+		OutCam = OutLook + FVector(FMath::Cos(Pit) * FMath::Cos(Yaw), FMath::Cos(Pit) * FMath::Sin(Yaw), FMath::Sin(Pit)) * Len;
+	}
+
+	FVector LimitViewDir(const FVector& Prev, const FVector& Want, float Dt, bool bCut, bool* bOutTurnLimited, bool* bOutPitchLimited)
+	{
+		const FVector W = Want.GetSafeNormal();
+		float Yaw = FMath::RadiansToDegrees(FMath::Atan2(W.Y, W.X));
+		float Pit = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(W.Z, -1.f, 1.f)));
+		const float PitC = FMath::Clamp(Pit, CAM_PITCH_MIN_DEG, CAM_PITCH_MAX_DEG);
+		if (bOutPitchLimited)
+		{
+			*bOutPitchLimited = PitC != Pit;
+		}
+		Pit = PitC;
+		bool bTurn = false;
+		const FVector P = Prev.GetSafeNormal();
+		if (!bCut && !P.IsNearlyZero() && Dt > 0.f)
+		{
+			const float PrevYaw = FMath::RadiansToDegrees(FMath::Atan2(P.Y, P.X));
+			const float PrevPit = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(P.Z, -1.f, 1.f)));
+			const float Max = CAM_MAX_TURN_DPS * Dt;
+			const float Dy = WrapDeg(Yaw - PrevYaw);
+			const float Dp = Pit - PrevPit;
+			if (FMath::Abs(Dy) > Max || FMath::Abs(Dp) > Max)
+			{
+				bTurn = true;
+				Yaw = PrevYaw + FMath::Clamp(Dy, -Max, Max);
+				Pit = PrevPit + FMath::Clamp(Dp, -Max, Max);
+			}
+		}
+		if (bOutTurnLimited)
+		{
+			*bOutTurnLimited = bTurn;
+		}
+		const float Yr = FMath::DegreesToRadians(Yaw), Pr = FMath::DegreesToRadians(Pit);
+		return FVector(FMath::Cos(Pr) * FMath::Cos(Yr), FMath::Cos(Pr) * FMath::Sin(Yr), FMath::Sin(Pr));
+	}
+}
+
 namespace
 {
 	const TCHAR* KindName(BoxFx::EKind K)
@@ -325,6 +471,19 @@ namespace
 		int32 ReplayFrames = 0;
 	};
 	FFxStats GStats;
+	// S-75: замер защиты (-BoxFxLog).
+	struct FDefStats
+	{
+		int32 Slips = 0;
+		float SlipHeadSum = 0.f;
+		float SlipHeadWorst = 1e6f;
+		int32 SlipTouch = 0;
+		int32 Blocks = 0;
+		float BlockGloveSum = 0.f;
+		float BlockHeadSum = 0.f;
+		int32 BlockHeadFirst = 0;
+	};
+	FDefStats GDefStats;
 }
 
 // =============================================================================================
@@ -361,6 +520,17 @@ void UBoxingFightFx::OnWorldBeginPlay(UWorld& InWorld)
 	FParse::Value(Cmd, TEXT("BoxReplayShots="), ReplayShotsLeft);
 	FParse::Value(Cmd, TEXT("BoxReplaySkipAt="), ReplaySkipAt);
 	FParse::Value(Cmd, TEXT("BoxFxShots="), FxShotsLeft);
+	{
+		int32 Def = 0;
+		FParse::Value(Cmd, TEXT("BoxDefShots="), Def);
+		for (int32& L : DefShotsLeft)
+		{
+			L = Def;
+		}
+		DefShotPrefix = TEXT("feel6_def");
+		FParse::Value(Cmd, TEXT("BoxShotPrefix="), DefShotPrefix);
+		bNoCue = FParse::Param(Cmd, TEXT("BoxNoDefCue"));
+	}
 	GStats = FFxStats();
 	if (bEnabled)
 	{
@@ -380,6 +550,21 @@ void UBoxingFightFx::Deinitialize()
 		UE_LOG(LogTemp, Log, TEXT("FX СВОДКА: хит-стопов %d (ср. %.0f мс, макс. %.0f мс), slow-mo %d, толчков камеры %d (тяжёлых с наездом %d), вибраций %d, гонгов %d, повторов %d (кадров записи %d)"),
 			GStats.Stops, GStats.Stops ? GStats.StopMsSum / GStats.Stops : 0.f, GStats.StopMsMax, GStats.Slows, GStats.Kicks, GStats.Jolts,
 			GStats.Haptics, GStats.Bells, GStats.Replays, GStats.ReplayFrames);
+	}
+	if (bEnabled && CamStats.Frames > 0)
+	{
+		// S-78: автопроверка камеры (ориентир QA camcheck: поворот > 240°/с без склейки, наклон).
+		UE_LOG(LogTemp, Log, TEXT("FX CAM СВОДКА: кадров %d, склеек %d; ограничитель: поворот %d кадров (запрошено до %.0f°/с), наклон %d кадров (запрошено до %.0f°); итог: поворот > 240°/с вне склеек — %d кадров (макс. %.0f°/с), наклон < −50° — %d (мин. %.0f°)"),
+			CamStats.Frames, CamStats.Cuts, CamStats.TurnLimited, CamStats.WantTurnMax, CamStats.PitchLimited, CamStats.WantPitchMin,
+			CamStats.FastFinal, CamStats.FinalTurnMax, CamStats.SteepFinal, CamStats.FinalPitchMin);
+	}
+	if (bLog && (GDefStats.Slips + GDefStats.Blocks) > 0)
+	{
+		// S-75: нырок — кулак мимо головы (мин. фронт кулака → центр головы); блок — кулак в перчатку, а не в голову.
+		UE_LOG(LogTemp, Log, TEXT("FX DEF СВОДКА: нырков %d — кулак→голова мин. ср. %.1f см, худший %.1f см, ближе 17 см (задел голову) %d; блоков %d — кулак→перчатка ср. %.1f см, кулак→голова ср. %.1f см, ближе к голове, чем к перчатке, %d"),
+			GDefStats.Slips, GDefStats.Slips ? GDefStats.SlipHeadSum / GDefStats.Slips : 0.f, GDefStats.SlipHeadWorst, GDefStats.SlipTouch,
+			GDefStats.Blocks, GDefStats.Blocks ? GDefStats.BlockGloveSum / GDefStats.Blocks : 0.f, GDefStats.Blocks ? GDefStats.BlockHeadSum / GDefStats.Blocks : 0.f,
+			GDefStats.BlockHeadFirst);
 	}
 	if (Audio)
 	{
@@ -484,12 +669,82 @@ void UBoxingFightFx::ApplyHaptic(BoxFx::EHaptic H)
 	}
 }
 
+void UBoxingFightFx::QueueDefShots(int32 Slot, const TCHAR* Kind, std::initializer_list<float> Offsets)
+{
+	if (DefShotsLeft[Slot] <= 0)
+	{
+		return;
+	}
+	--DefShotsLeft[Slot];
+	const int32 N = ++DefShotIndex[Slot];
+	for (const float D : Offsets)
+	{
+		// S-76: клинч — feel6_clinch_* (как просил продюсер), с -BoxShotPrefix=X — X_clinch_*.
+		const FString Pre = Slot >= 5 ? (DefShotPrefix == TEXT("feel6_def") ? FString(TEXT("feel6")) : DefShotPrefix) : DefShotPrefix;
+		const TPair<double, FString> Shot(Clock + D, FString::Printf(TEXT("%s_%s_%02d_t%03d"), *Pre, Kind, N, FMath::RoundToInt(D * 1000.f)));
+		int32 At = PendingShots.Num();
+		while (At > 0 && PendingShots[At - 1].Key > Shot.Key)
+		{
+			--At;
+		}
+		PendingShots.Insert(Shot, At);
+	}
+}
+
 void UBoxingFightFx::OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM)
 {
 	Mode = GM;
 	if (!bEnabled || !GM)
 	{
 		return;
+	}
+	// S-75: подсказка защиты игроку (крупная подпись, UpdateCue) — новая перебивает старую.
+	{
+		const BoxFx::EDefCue C = BoxFx::DefenseCueFor(E, GM->GetPlayerIndex());
+		if (C != BoxFx::EDefCue::None && !bNoCue)
+		{
+			Cue = C;
+			CueDur = BoxFx::DefenseCueSeconds(C);
+			CueLeft = CueDur;
+			CueAge = 0.f;
+			if (bLog)
+			{
+				UE_LOG(LogTemp, Log, TEXT("FX cue «%s» t=%.2f"), BoxFx::DefenseCueText(C), E.Time);
+			}
+		}
+	}
+	// S-75 (отладка): серии кадров защиты.
+	if (E.Kind == EFightEventKind::Blocked)
+	{
+		QueueDefShots(0, TEXT("block"), {0.f, 0.05f, 0.12f, 0.25f});
+	}
+	if (bLog && (E.Kind == EFightEventKind::Blocked || E.Kind == EFightEventKind::Slipped) && E.Attacker >= 0 && E.Target == EPunchTarget::Head)
+	{
+		FDefProbe P;
+		P.Att = E.Attacker;
+		P.bSlip = E.Kind == EFightEventKind::Slipped;
+		P.Left = 0.3f;
+		DefProbes.Add(P);
+	}
+	else if (E.Kind == EFightEventKind::Slipped)
+	{
+		QueueDefShots(2, TEXT("whiff"), {0.f, 0.08f, 0.18f, 0.32f, 0.5f});
+	}
+	else if (E.Kind == EFightEventKind::Hit && E.bCounter)
+	{
+		QueueDefShots(3, TEXT("counter"), {0.f, 0.06f, 0.16f});
+	}
+	else if (E.Kind == EFightEventKind::Hit && (E.bGuardBreak || E.bCaught))
+	{
+		QueueDefShots(4, E.bGuardBreak ? TEXT("guardbreak") : TEXT("caught"), {0.f, 0.06f, 0.16f, 0.32f});
+	}
+	else if (E.Kind == EFightEventKind::Clinch)
+	{
+		QueueDefShots(5, TEXT("clinch_hold"), {0.25f, 0.7f});
+	}
+	else if (E.Kind == EFightEventKind::Break)
+	{
+		QueueDefShots(6, TEXT("clinch_break"), {0.f, 0.2f, 0.45f, 0.8f});
 	}
 	BoxFx::EKind Kind = BoxFx::KindOf(E.Kind);
 	const bool bBody = E.Target == EPunchTarget::Body;
@@ -551,7 +806,9 @@ void UBoxingFightFx::OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM
 	const float Mag = E.Magnitude;
 
 	// --- хит-стоп ---
-	const float StopMs = BoxFx::HitStopMs(Kind, Mag, Profile);
+	// S-75: контра (удар в контр-окне после удачного уклона) — короткий стоп-кадр и на среднем попадании.
+	const bool bCounterLand = Kind == BoxFx::EKind::Land && E.bCounter;
+	const float StopMs = BoxFx::CounterStopMs(BoxFx::HitStopMs(Kind, Mag, Profile), bCounterLand);
 	if (StopMs > 0.f)
 	{
 		Freeze = FMath::Max(Freeze, StopMs / 1000.f);
@@ -587,7 +844,11 @@ void UBoxingFightFx::OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM
 		}
 	}
 	// --- камера ---
-	const BoxFx::FCamKick K = BoxFx::CameraKick(Kind, Mag);
+	BoxFx::FCamKick K = BoxFx::CameraKick(Kind, Mag);
+	if (bCounterLand)
+	{
+		K.PunchIn = FMath::Max(K.PunchIn, BoxFx::COUNTER_PUNCH_IN); // S-75: контра — наезд камеры
+	}
 	if (K.Shake > 0.f || K.PunchIn > 0.f)
 	{
 		++GStats.Kicks;
@@ -612,11 +873,16 @@ void UBoxingFightFx::OnFightEvent(const FFightEvent& E, ABoxingFightGameMode* GM
 	}
 	// --- вибрация ---
 	ApplyHaptic(BoxFx::HapticFor(Kind, Who, Mag, GM->GetPlayerIndex()));
+	// --- S-74: брызги пота в точке контакта ---
+	if ((Kind == BoxFx::EKind::Land || Kind == BoxFx::EKind::Block) && E.Attacker >= 0 && E.Defender >= 0)
+	{
+		SpawnSpray(E, GM, Kind == BoxFx::EKind::Block ? BoxSpray::EKind::Block : (bBody ? BoxSpray::EKind::Body : BoxSpray::EKind::Head), Mag);
+	}
 
 	// --- звук ---
 	switch (Kind)
 	{
-	case BoxFx::EKind::Land: Audio->Punch(Mag, bBody); break;
+	case BoxFx::EKind::Land: Audio->Punch(bCounterLand ? FMath::Max(Mag, BoxFx::HEAVY_MAG) : Mag, bBody); break; // S-75: контра — с НЧ-слоем
 	case BoxFx::EKind::Block: Audio->Block(Mag); break;
 	case BoxFx::EKind::Miss: Audio->Whiff(); break;
 	case BoxFx::EKind::Kd:
@@ -709,6 +975,20 @@ void UBoxingFightFx::OnSnapshot(const FFightSnapshot& Snap, ABoxingFightGameMode
 	PrevPhase = Snap.Phase;
 	PrevStage = Snap.Stage.Kind;
 	PrevRound = Snap.Round;
+	// S-75 (отладка): начало нырка — серия кадров (кулак соперника проходит мимо головы). Вне боя — подсказку гасим.
+	for (int32 I = 0; I < 2; ++I)
+	{
+		const float S = Snap.Fighters[I].Slip;
+		if (S != 0.f && PrevSlipAmt[I] == 0.f)
+		{
+			QueueDefShots(1, I == 0 ? TEXT("slip_red") : TEXT("slip_blue"), {0.f, 0.08f, 0.16f, 0.24f, 0.34f});
+		}
+		PrevSlipAmt[I] = S;
+	}
+	if (Snap.Phase != EFightPhase::Fighting)
+	{
+		CueLeft = FMath::Min(CueLeft, 0.2f);
+	}
 }
 
 void UBoxingFightFx::UpdateTimeDilation()
@@ -729,6 +1009,32 @@ void UBoxingFightFx::UpdateTimeDilation()
 
 bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 {
+	// S-74 (отладка): -BoxFaceCam=БОЕЦ,ДИСТ,УГОЛ — портрет лица: камера перед головой бойца (по курсу, УГОЛ — вбок от лица),
+	// крупно мимика и повреждения (камера боя на лицо не смотрит: голова за перчатками).
+	static const TArray<float> FaceCam = [] {
+		TArray<float> V;
+		FString S;
+		if (FParse::Value(FCommandLine::Get(), TEXT("BoxFaceCam="), S, false))
+		{
+			TArray<FString> Parts;
+			S.ParseIntoArray(Parts, TEXT(","));
+			for (const FString& P : Parts) V.Add(FCString::Atof(*P));
+		}
+		return V;
+	}();
+	if (FaceCam.Num() >= 3 && Mode.IsValid())
+	{
+		const ABoxerCharacter* B = Mode->GetBoxer(FMath::Clamp(static_cast<int32>(FaceCam[0]), 0, 1));
+		const USkeletalMeshComponent* M = B ? B->GetFeelMesh() : nullptr;
+		if (M && M->GetBoneIndex(TEXT("head")) != INDEX_NONE)
+		{
+			const FVector H = M->GetBoneLocation(TEXT("head")) + FVector(0.f, 0.f, 6.f);
+			const FVector F = B->GetActorForwardVector().GetSafeNormal2D().RotateAngleAxis(FaceCam[2], FVector::UpVector);
+			Cam = H + F * FaceCam[1] + FVector(0.f, 0.f, -2.f);
+			Look = H;
+			return true;
+		}
+	}
 	if (bShotCam)
 	{
 		Cam = ShotCam; // S-71: кадр скриншота угловых
@@ -760,30 +1066,30 @@ bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 		ReplaySpan += (Span - ReplaySpan) * K;
 		const float Dist = 255.f + FMath::Max(0.f, ReplaySpan - 130.f) * 0.7f;
 		const float Ax = FMath::Atan2(F.F[1].Loc.Y - F.F[0].Loc.Y, F.F[1].Loc.X - F.F[0].Loc.X) + HALF_PI - 0.25f + Replay.Orbit;
-		Cam = FVector(ReplayMid.X + FMath::Cos(Ax) * Dist, ReplayMid.Y + FMath::Sin(Ax) * Dist, Floor + 142.f);
-		Look = FVector(ReplayMid.X, ReplayMid.Y, Floor + 80.f);
+		// S-78 (QA косм. 15): голова атакующего у верхнего края под плашкой «ПОВТОР» — камера чуть дальше и выше, взгляд выше.
+		const float DistR = Dist * 1.12f;
+		Cam = FVector(ReplayMid.X + FMath::Cos(Ax) * DistR, ReplayMid.Y + FMath::Sin(Ax) * DistR, Floor + 150.f);
+		Look = FVector(ReplayMid.X, ReplayMid.Y, Floor + 100.f);
 		bOverride = true;
 	}
 	else
 	{
 		// Перерыв: камера ведёт игрока к его углу (restShot веба), нокдаун — мягкий наезд на лежащего.
+		// S-78: смешивание «по орбите» вокруг точки взгляда (BoxFx::BlendView), а не прямой линией через бойца.
 		if (RestMix > 1e-3f)
 		{
 			const float R = RestMix * RestMix * (3.f - 2.f * RestMix);
-			Cam = FMath::Lerp(Cam, RestCam, R);
-			Look = FMath::Lerp(Look, RestLook, R);
+			BoxFx::BlendView(Cam, Look, RestCam, RestLook, R, Cam, Look);
 		}
 		if (DownMix > 1e-3f)
 		{
 			const float D = DownMix * DownMix * (3.f - 2.f * DownMix);
-			Cam = FMath::Lerp(Cam, KdCam, D);
-			Look = FMath::Lerp(Look, KdLook, D);
+			BoxFx::BlendView(Cam, Look, KdCam, KdLook, D, Cam, Look);
 		}
 		if (ResultMix > 1e-3f)
 		{
 			const float Rm = ResultMix * ResultMix * (3.f - 2.f * ResultMix);
-			Cam = FMath::Lerp(Cam, ResultCam, Rm);
-			Look = FMath::Lerp(Look, ResultLook, Rm);
+			BoxFx::BlendView(Cam, Look, ResultCam, ResultLook, Rm, Cam, Look);
 		}
 		// Наезд: камера ближе к паре (от точки взгляда) и чуть ниже; толчок по вектору удара гаснет вместе с наездом.
 		const float Zoom = 1.f - 0.12f * PunchIn * PunchIn;
@@ -804,12 +1110,166 @@ bool UBoxingFightFx::ModifyCamera(FVector& Cam, FVector& Look, float& HFovDeg)
 		Cam += Right * Jx + FVector(0.f, 0.f, Jy);
 		Look += Right * (Jx * 0.5f);
 	}
+	LimitCamera(Cam, Look); // S-78
 	return bOverride;
+}
+
+void UBoxingFightFx::LimitCamera(FVector& Cam, FVector& Look)
+{
+	static const bool bNoLimit = FParse::Param(FCommandLine::Get(), TEXT("BoxCamNoLimit")); // A/B: без ограничителя
+	const float Dt = CamPrevClock < 0.0 ? 0.f : static_cast<float>(Clock - CamPrevClock);
+	const bool bFirst = CamPrevDir.IsNearlyZero();
+	const bool bCut = bFirst || FVector::Dist(Cam, CamPrevPos) > BoxFx::CAM_CUT_CM;
+	const FVector Want = (Look - Cam).GetSafeNormal();
+	auto Angles = [](const FVector& D, float& Y, float& P)
+	{
+		Y = FMath::RadiansToDegrees(FMath::Atan2(D.Y, D.X));
+		P = FMath::RadiansToDegrees(FMath::Asin(FMath::Clamp(D.Z, -1.f, 1.f)));
+	};
+	float Wy = 0.f, Wp = 0.f, Py = 0.f, Pp = 0.f;
+	Angles(Want, Wy, Wp);
+	if (!bFirst)
+	{
+		Angles(CamPrevDir, Py, Pp);
+	}
+	bool bTurn = false, bPitch = false;
+	FVector Dir = Want;
+	if (!bNoLimit && !Want.IsNearlyZero())
+	{
+		Dir = BoxFx::LimitViewDir(CamPrevDir, Want, Dt, bCut, &bTurn, &bPitch);
+		Look = Cam + Dir * FMath::Max(50.f, static_cast<float>(FVector::Dist(Look, Cam)));
+	}
+	// Автопроверка (как camcheck QA): запрошенное и итоговое.
+	++CamStats.Frames;
+	CamStats.Cuts += (bCut && !bFirst) ? 1 : 0;
+	CamStats.TurnLimited += bTurn ? 1 : 0;
+	CamStats.PitchLimited += bPitch ? 1 : 0;
+	CamStats.WantPitchMin = FMath::Min(CamStats.WantPitchMin, Wp);
+	float Fy = 0.f, Fp = 0.f;
+	Angles(Dir, Fy, Fp);
+	CamStats.FinalPitchMin = FMath::Min(CamStats.FinalPitchMin, Fp);
+	CamStats.SteepFinal += Fp < -50.f ? 1 : 0;
+	if (!bFirst && !bCut && Dt > 1e-3f)
+	{
+		const float WantRate = FMath::Max(FMath::Abs(BoxFx::WrapDeg(Wy - Py)), FMath::Abs(Wp - Pp)) / Dt;
+		const float FinalRate = FMath::Max(FMath::Abs(BoxFx::WrapDeg(Fy - Py)), FMath::Abs(Fp - Pp)) / Dt;
+		CamStats.WantTurnMax = FMath::Max(CamStats.WantTurnMax, WantRate);
+		CamStats.FinalTurnMax = FMath::Max(CamStats.FinalTurnMax, FinalRate);
+		CamStats.FastFinal += FinalRate > 240.f ? 1 : 0;
+		if (bLog && (bTurn || bPitch) && WantRate > 240.f)
+		{
+			UE_LOG(LogTemp, Log, TEXT("FX cam-limit: запрошено %.0f°/с, наклон %.0f° → итог %.0f°/с, %.0f°"), WantRate, Wp, FinalRate, Fp);
+		}
+	}
+	if (Dt > 1e-5f || bFirst)
+	{
+		CamPrevClock = Clock;
+	}
+	CamPrevPos = Cam;
+	CamPrevDir = Dir;
 }
 
 // ---------------------------------------------------------------------------------------------
 // Тик (реальное время)
 // ---------------------------------------------------------------------------------------------
+
+void UBoxingFightFx::UpdateDefProbes(float RealDt)
+{
+	ABoxingFightGameMode* GM = Mode.Get();
+	for (int32 I = DefProbes.Num() - 1; I >= 0; --I)
+	{
+		FDefProbe& P = DefProbes[I];
+		const ABoxerCharacter* A = GM ? GM->GetBoxer(P.Att) : nullptr;
+		const ABoxerCharacter* D = GM ? GM->GetBoxer(1 - P.Att) : nullptr;
+		const USkeletalMeshComponent* DM = D ? D->GetFeelMesh() : nullptr;
+		if (A && DM && DM->GetBoneIndex(TEXT("head")) != INDEX_NONE)
+		{
+			const FBoxerFeelDebug Dbg = A->GetFeelDebug();
+			if (Dbg.AimW > 0.f && !Dbg.FistFront.IsNearlyZero())
+			{
+				const FVector Head = DM->GetBoneLocation(TEXT("head")) + FVector::UpVector * D->HeadCenterUpCm;
+				P.HeadMin = FMath::Min(P.HeadMin, static_cast<float>(FVector::Dist(Dbg.FistFront, Head)));
+				for (const TCHAR* Sfx : {TEXT("_l"), TEXT("_r")})
+				{
+					const FName H(*(FString(TEXT("hand")) + Sfx)), L(*(FString(TEXT("lowerarm")) + Sfx));
+					if (DM->GetBoneIndex(H) != INDEX_NONE && DM->GetBoneIndex(L) != INDEX_NONE)
+					{
+						const FVector Hp = DM->GetBoneLocation(H);
+						const FVector Glove = Hp + (Hp - DM->GetBoneLocation(L)).GetSafeNormal() * 6.f;
+						P.GloveMin = FMath::Min(P.GloveMin, static_cast<float>(FVector::Dist(Dbg.FistFront, Glove)));
+					}
+				}
+			}
+		}
+		P.Left -= RealDt;
+		if (P.Left > 0.f)
+		{
+			continue;
+		}
+		if (P.HeadMin < 1e5f)
+		{
+			if (P.bSlip)
+			{
+				++GDefStats.Slips;
+				GDefStats.SlipHeadSum += P.HeadMin;
+				GDefStats.SlipHeadWorst = FMath::Min(GDefStats.SlipHeadWorst, P.HeadMin);
+				GDefStats.SlipTouch += P.HeadMin < 17.f ? 1 : 0;
+			}
+			else
+			{
+				++GDefStats.Blocks;
+				GDefStats.BlockGloveSum += P.GloveMin;
+				GDefStats.BlockHeadSum += P.HeadMin;
+				GDefStats.BlockHeadFirst += P.HeadMin < P.GloveMin ? 1 : 0;
+			}
+			UE_LOG(LogTemp, Log, TEXT("FX def %s [%d]: кулак→голова %.1f см, кулак→перчатка %.1f см"), P.bSlip ? TEXT("нырок") : TEXT("блок"), P.Att,
+				P.HeadMin, P.GloveMin);
+		}
+		DefProbes.RemoveAt(I);
+	}
+}
+
+void UBoxingFightFx::UpdateCue(float RealDt)
+{
+	if (CueLeft > 0.f)
+	{
+		CueLeft = FMath::Max(0.f, CueLeft - RealDt);
+		CueAge += RealDt;
+	}
+	const bool bShow = CueLeft > 0.f && !Replay.bPlaying;
+	if (!CueWidget)
+	{
+		if (!bShow)
+		{
+			return;
+		}
+		APlayerController* PC = GetWorld() ? GetWorld()->GetFirstPlayerController() : nullptr;
+		if (!PC)
+		{
+			return;
+		}
+		CueWidget = CreateWidget<UBoxingDefenseCueWidget>(PC, UBoxingDefenseCueWidget::StaticClass());
+		if (!CueWidget)
+		{
+			return;
+		}
+		CueWidget->AddToViewport(5); // над HUD боя (0), под паузой (20) и итогом (10)
+	}
+	if (!bShow)
+	{
+		CueWidget->Show(FString(), FLinearColor::White, 0.f, 1.f, -1.f);
+		return;
+	}
+	// Появление 0.06 с с «ударом» масштаба 1.25 → 1 за 0.15 с; угасание — последние 0.25 с (уклон — держится всё окно).
+	const float In = FMath::Clamp(CueAge / 0.06f, 0.f, 1.f);
+	const float Out = FMath::Clamp(CueLeft / (Cue == BoxFx::EDefCue::Slip ? 0.1f : 0.25f), 0.f, 1.f);
+	const float PopT = FMath::Clamp(CueAge / 0.15f, 0.f, 1.f);
+	const float Pop = 1.f + 0.25f * (1.f - PopT) * (1.f - PopT) * (Cue == BoxFx::EDefCue::Counter ? 1.6f : 1.f);
+	const bool bNeutral = Cue == BoxFx::EDefCue::Clinch || Cue == BoxFx::EDefCue::Break;
+	const FLinearColor Col = Cue == BoxFx::EDefCue::Counter ? BoxUi::Gold
+		: (bNeutral ? BoxUi::Text : (BoxFx::DefenseCueGood(Cue) ? BoxUi::Good : BoxUi::Bad));
+	CueWidget->Show(BoxFx::DefenseCueText(Cue), Col, In * Out, Pop, Cue == BoxFx::EDefCue::Slip ? CueLeft / FMath::Max(1e-3f, CueDur) : -1.f);
+}
 
 void UBoxingFightFx::Tick(float DeltaTime)
 {
@@ -821,6 +1281,8 @@ void UBoxingFightFx::Tick(float DeltaTime)
 	const float Real = FMath::Clamp(static_cast<float>(W->DeltaRealTimeSeconds), 0.f, 0.1f);
 	const float Game = W->GetDeltaSeconds();
 	Clock += Real;
+	UpdateCue(Real); // S-75
+	UpdateDefProbes(Real);
 	// Отладочные серии скриншотов (-BoxFxShots=N): не больше одного запроса за кадр.
 	if (PendingShots.Num() > 0 && Clock >= PendingShots[0].Key)
 	{
@@ -863,6 +1325,7 @@ void UBoxingFightFx::Tick(float DeltaTime)
 	{
 		Audio->Update(Real);
 	}
+	Spray.Update(Game); // S-74: брызги (игровое время: slow-mo замедляет)
 	if (Replay.bPlaying)
 	{
 		UpdateReplay(Real);
@@ -1163,7 +1626,9 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 		const FVector StandRef = (Snap.Stage.Kind == ERingStageKind::Neutral && Snap.Stage.bHasTarget[Si])
 			? GM->FightToWorld(Snap.Stage.TargetX[Si], Snap.Stage.TargetZ[Si]) : S->GetActorLocation();
 		const int32 WasSide = KdSide;
-		BoxFx::KnockdownShot(Body, StandRef, RC, KdSide, KdCam, KdLook);
+		const APlayerController* KdPc = GetWorld()->GetFirstPlayerController();
+		const FVector CurCam = KdPc && KdPc->PlayerCameraManager ? KdPc->PlayerCameraManager->GetCameraLocation() : FVector::ZeroVector;
+		BoxFx::KnockdownShot(Body, StandRef, RC, KdSide, KdCam, KdLook, KdPc && KdPc->PlayerCameraManager ? &CurCam : nullptr);
 		if (bLog && KdSide != WasSide)
 		{
 			UE_LOG(LogTemp, Log, TEXT("FX kd-cam: лежит %d тело (%.0f, %.0f), стоящий → (%.0f, %.0f), угол %d, камера (%.0f, %.0f, %.0f)"), Dn, Body.X - RC.X, Body.Y - RC.Y,
@@ -1194,7 +1659,7 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 		BoxFx::RestShot(GM->GetPlayerIndex(), Aspect, Pl->GetActorLocation(), RC, RestCam, RestLook, Pl->Preset.HeightCm > 0.f ? Pl->Preset.HeightCm / 178.f : 1.f,
 			Pl->GetSitWeight());
 	}
-	RestMix += ((bRest ? 1.f : 0.f) - RestMix) * (1.f - FMath::Exp(-(bRest ? 1.4f : 2.6f) * RealDt));
+	RestMix += ((bRest ? 1.f : 0.f) - RestMix) * (1.f - FMath::Exp(-(bRest ? 1.4f : 1.6f) * RealDt)); // S-78: выход из угла плавнее (было 2.6)
 	if (!bRest && RestMix < 0.01f)
 	{
 		RestMix = 0.f;
@@ -1238,5 +1703,86 @@ void UBoxingFightFx::UpdateShots(float RealDt)
 	if (!bResult && ResultMix < 0.01f)
 	{
 		ResultMix = 0.f;
+	}
+}
+
+// =============================================================================================
+// S-75: подпись защиты (UBoxingDefenseCueWidget)
+// =============================================================================================
+
+void UBoxingDefenseCueWidget::NativeOnInitialized()
+{
+	Super::NativeOnInitialized();
+	SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (!WidgetTree || WidgetTree->RootWidget)
+	{
+		return;
+	}
+	UCanvasPanel* Root = WidgetTree->ConstructWidget<UCanvasPanel>();
+	WidgetTree->RootWidget = Root;
+	UVerticalBox* Col = WidgetTree->ConstructWidget<UVerticalBox>();
+	Label = WidgetTree->ConstructWidget<UTextBlock>();
+	Label->SetFont(BoxUi::Font(40, true));
+	Label->SetJustification(ETextJustify::Center);
+	Label->SetShadowOffset(FVector2D(2.f, 2.f));
+	Label->SetShadowColorAndOpacity(FLinearColor(0.f, 0.f, 0.f, 0.85f));
+	if (UVerticalBoxSlot* S = Col->AddChildToVerticalBox(Label))
+	{
+		S->SetHorizontalAlignment(HAlign_Center);
+	}
+	WindowBar = WidgetTree->ConstructWidget<UProgressBar>();
+	WindowBar->SetFillColorAndOpacity(BoxUi::Good);
+	FProgressBarStyle St = WindowBar->GetWidgetStyle();
+	St.BackgroundImage = FSlateRoundedBoxBrush(BoxUi::WithAlpha(BoxUi::Bg, 0.6f), 3.f);
+	St.FillImage = FSlateRoundedBoxBrush(FLinearColor::White, 3.f);
+	WindowBar->SetWidgetStyle(St);
+	if (UVerticalBoxSlot* S = Col->AddChildToVerticalBox(WindowBar))
+	{
+		S->SetHorizontalAlignment(HAlign_Fill);
+		S->SetPadding(FMargin(24.f, 8.f, 24.f, 0.f));
+	}
+	Panel = WidgetTree->ConstructWidget<UBorder>();
+	Panel->SetBrush(FSlateRoundedBoxBrush(BoxUi::WithAlpha(BoxUi::Bg, 0.55f), 12.f));
+	Panel->SetPadding(FMargin(28.f, 10.f, 28.f, 12.f));
+	Panel->SetContent(Col);
+	Panel->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
+	// Сверху по центру, под панелями бойцов и табло раунда HUD: над головами бойцов, не на них.
+	UCanvasPanelSlot* PS = Root->AddChildToCanvas(Panel);
+	PS->SetAnchors(FAnchors(0.5f, 0.2f));
+	PS->SetAlignment(FVector2D(0.5f, 0.5f));
+	PS->SetAutoSize(true);
+	PS->SetOffsets(FMargin(0.f));
+	Panel->SetVisibility(ESlateVisibility::Collapsed);
+}
+
+void UBoxingDefenseCueWidget::Show(const FString& Text, const FLinearColor& Color, float Alpha, float Pop, float Window)
+{
+	if (!Panel || !Label || !WindowBar)
+	{
+		return;
+	}
+	if (Text.IsEmpty() || Alpha <= 0.01f)
+	{
+		Panel->SetVisibility(ESlateVisibility::Collapsed);
+		return;
+	}
+	Panel->SetVisibility(ESlateVisibility::HitTestInvisible);
+	if (Shown != Text)
+	{
+		Shown = Text;
+		Label->SetText(FText::FromString(Text));
+	}
+	Label->SetColorAndOpacity(FSlateColor(Color));
+	Panel->SetRenderOpacity(Alpha);
+	Panel->SetRenderScale(FVector2D(Pop, Pop));
+	if (Window >= 0.f)
+	{
+		WindowBar->SetVisibility(ESlateVisibility::HitTestInvisible);
+		WindowBar->SetPercent(FMath::Clamp(Window, 0.f, 1.f));
+		WindowBar->SetFillColorAndOpacity(Color);
+	}
+	else
+	{
+		WindowBar->SetVisibility(ESlateVisibility::Collapsed);
 	}
 }

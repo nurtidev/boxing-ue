@@ -51,6 +51,9 @@ class FRefereePoseFx
 {
 public:
 	void Apply(FCompactPose& Pose, const FRefereePoseFrame& Frame, const FTransform& CompToWorld);
+	// S-78: таз не проседает больше PELVIS_SAG_MAX ниже «стоя» (GASP на переступании и развороте приседает на 8–11 см,
+	// колени наружу); ступни потом ставит FBoxerFootIk. Dt — шаг анимации.
+	void HoldPelvis(FCompactPose& Pose, float Dt);
 
 private:
 	void Resolve(const FBoneContainer& Bones);
@@ -70,7 +73,30 @@ private:
 	FCompactPoseBoneIndex Foot[2] = {FCompactPoseBoneIndex(INDEX_NONE), FCompactPoseBoneIndex(INDEX_NONE)};
 	// Пальцы: [кисть][палец][фаланга 0..2].
 	int32 Finger[2][5][3] = {};
+	// S-78: «вперёд» головы и груди и «вверх» груди в осях их костей (из позы привязки) — предел поворота головы.
+	bool bTwistCal = false;
+	FVector HeadFwdL = FVector::ForwardVector;
+	FVector ChestFwdL = FVector::ForwardVector;
+	FVector ChestUpL = FVector::UpVector;
+	float StandZ = -1.f; // S-78: высота таза «стоя» (компонент), тает вниз медленно
 };
+
+namespace BoxRefPose
+{
+	// S-78: поворот головы относительно груди не больше этого (рад) — GASP разворачивает таз/грудь с запаздыванием за
+	// курсом, а голова уже смотрит туда (QA: 118–157° на выходе из углов и в перерыве).
+	constexpr float HEAD_TWIST_MAX = 0.85f;
+	// S-78: насколько таз может опуститься ниже «стоя» (см) и как быстро «стоя» тает вниз (см/с).
+	constexpr float PELVIS_SAG_MAX = 3.5f;
+	constexpr float STAND_DECAY = 1.5f;
+	// Высота таза: новая «стоя» (растёт сразу, тает медленно) и куда поднять таз (не ниже Stand − SagMax).
+	BOXINGUE_API float StandHeight(float Stand, float Z, float Dt);
+	BOXINGUE_API float HeldPelvisZ(float Stand, float Z, float SagMax);
+	// Знаковый угол (рад) от From к To вокруг оси Axis (оба проецируются ⟂ Axis); 0 — вырождено.
+	BOXINGUE_API float TwistAbout(const FVector& Axis, const FVector& From, const FVector& To);
+	// Сколько повернуть голову обратно (рад, вокруг той же оси), чтобы |поворот| ≤ Max.
+	BOXINGUE_API float TwistExcess(float Twist, float Max);
+}
 
 struct FRefereeVisualRootNode : public FAnimNode_Base
 {

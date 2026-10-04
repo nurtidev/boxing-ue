@@ -19,6 +19,7 @@
 #include "AnimNodes/AnimNode_RetargetPoseFromMesh.h"
 #include "BoxerFeel.h"
 #include "BoxerSit.h"
+#include "FaceFx.h"
 #include "BoxerAnimInstances.generated.h"
 
 class ABoxerCharacter;
@@ -110,6 +111,8 @@ struct FBoxerVisualRootNode : public FAnimNode_Base
 	// S-71: посадка на стул в перерыве — поверх слоя «ощущения» (BoxerSit.h).
 	FBoxerSitFx SitFx;
 	FBoxerSitFrame SitFrame;
+	// S-74: мимика — кривые RigLogic лица (CTRL_expressions_*) в позе тела; лицо копирует их вместе с позой.
+	FBoxerFaceCurves Face;
 
 	virtual void Initialize_AnyThread(const FAnimationInitializeContext& Context) override;
 	virtual void CacheBones_AnyThread(const FAnimationCacheBonesContext& Context) override;

@@ -4,6 +4,8 @@
 #include "Components/SkeletalMeshComponent.h"
 #include "Retargeter/IKRetargeter.h"
 #include "AnimationRuntime.h"
+#include "Misc/CommandLine.h"
+#include "Misc/Parse.h"
 
 // Доступ к FAnimInstanceProxy::DefaultLinkedInstanceInputNode (private, сеттера нет). Меш кладёт входную позу
 // пост-процесса только в этот узел (USkeletalMeshComponent::EvaluatePostProcessMeshInstance), а у нативного
@@ -114,7 +116,22 @@ void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
 		// Корень слоя (spine_01) — поворот в пространстве меша: корпус держит ориентацию клипа поверх таза локомоции.
 		const FCompactPoseBoneIndex Root = Mask.Root;
 		const FCompactPoseBoneIndex Par = Out.GetParentBoneIndex(Root);
-		const FQuat UpperRootCS = CSOf(Out, Root).GetRotation();
+		FQuat UpperRootCS = CSOf(Out, Root).GetRotation();
+		// S-78 (блокер QA «корпус скручен до 180°»): GASP на развороте капсулы держит кость root с отставанием (offset root
+		// bone) — ноги и таз ещё смотрят по-старому, а корпус из монтажа в пространстве меша уже по капсуле. Поворот корпуса —
+		// относительно root ВХОДНОЙ позы (только курс): тело разворачивается целиком, без скрутки. -BoxUpperMeshSpace — как было.
+		static const bool bMeshSpace = FParse::Param(FCommandLine::Get(), TEXT("BoxUpperMeshSpace"));
+		if (!bMeshSpace)
+		{
+			const FCompactPoseBoneIndex R0(0);
+			const FQuat D = CSOf(In, R0).GetRotation() * CSOf(Out, R0).GetRotation().Inverse();
+			const FVector RootFwd = D.RotateVector(FVector::ForwardVector);
+			const float Yaw = FMath::Atan2(RootFwd.Y, RootFwd.X);
+			if (FMath::Abs(Yaw) > 1e-3f)
+			{
+				UpperRootCS = (FQuat(FVector::UpVector, Yaw) * UpperRootCS).GetNormalized();
+			}
+		}
 		const FQuat BaseParentCS = Par.GetInt() != INDEX_NONE ? CSOf(In, Par).GetRotation() : FQuat::Identity;
 		FTransform RootMS = Out[Root];
 		RootMS.SetRotation((BaseParentCS.Inverse() * UpperRootCS).GetNormalized());
@@ -158,6 +175,7 @@ void FBoxerLayerRootNode::Evaluate_AnyThread(FPoseContext& Output)
 		Debug = FBoxerFeelDebug();
 		Fx.Apply(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug);
 		Feet.Apply(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), Dt, &Debug); // S-70: ступни
+		Fx.PublishBody(Out, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug); // S-78: тело — сопернику
 		Dt = 0.f;
 	}
 }
@@ -266,6 +284,11 @@ void FBoxerVisualRootNode::Evaluate_AnyThread(FPoseContext& Output)
 	Feet.Apply(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform(), Dt, &Debug); // S-70: ступни
 	Dt = 0.f; // повторная оценка без обновления (пауза) — стоп-кадр, не шаг
 	SitFx.Apply(Output.Pose, SitFrame, Output.AnimInstanceProxy->GetComponentTransform()); // S-71: сидя на стуле в перерыве
+	Fx.PublishBody(Output.Pose, Frame, Output.AnimInstanceProxy->GetComponentTransform(), &Debug); // S-78: тело — сопернику
+	for (int32 I = 0; I < Face.Num; ++I) // S-74: мимика
+	{
+		Output.Curve.Set(Face.Names[I], Face.Values[I]);
+	}
 }
 
 void FBoxerVisualProxy::GetCustomNodes(TArray<FAnimNode_Base*>& OutNodes)
@@ -284,6 +307,7 @@ void FBoxerVisualProxy::PreUpdate(UAnimInstance* InAnimInstance, float DeltaSeco
 		{
 			Root.Frame = B->GetFeelFrame();
 			Root.SitFrame = B->GetSitFrame(); // S-71
+			Root.Face = B->GetFaceCurves();   // S-74
 		}
 	}
 }

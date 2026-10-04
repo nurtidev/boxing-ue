@@ -37,6 +37,13 @@
 #     Переключение — по тегам (API для GameMode — Docs/PERF.md «Оформление профи»):
 #       SetActorHiddenInGame(bPro) у ArenaAmateur, SetActorHiddenInGame(!bPro) у ArenaPro.
 #     Канвас профи — без коллизии (пол даёт канвас любителей, он и скрытым держит коллизию).
+# S-77 (живой зал, материалы CC0 — Docs/ASSETS.md, Docs/PERF.md):
+#   * публика и судьи — люди MakeHuman (Nanite ISM по вариантам /Game/Boxing/Environment/Crowd/SM_Crowd_*, материал
+#     M_Crowd: палитра × PerInstanceRandom, WPO-покачивание и поза «болеют» по MPC_Crowd.Excite). Сначала
+#     Tools/Blender/crowd_people.py + ring_crowd_import.py. Судьи — на стульях за столами (ноги под столом).
+#   * фактура канваса/юбки/подушек/канатов — look_materials.apply_ring() (RING_DETAIL=0 — без).
+#   * RING_MAP=/Game/BoxingLocal/Tmp/<имя> — собрать копию (из L_Ring, с его WorldSettings), когда L_Ring держит
+#     запущенная игра; RING_DELETE_OLD=0 — не удалять прежние MI цилиндров публики (нужны копии старого уровня).
 # Переключатели сборки (окружение): RING_NANITE=0 — без Nanite; RING_TRUSS_SHADOWS=1 — тени у фермы;
 #   RING_FILL_SHADOWS=1 — VSM-тени у заполняющих; RING_FILL_CONTACT=<длина контактных теней>;
 #   RING_LUMEN_FG=<качество final gather>.
@@ -90,7 +97,7 @@ LUMEN_FG = float(os.environ.get("RING_LUMEN_FG", "1.0"))
 TRUSS_LIGHTS = int(os.environ.get("RING_TRUSS_LIGHTS", "12"))
 TRUSS_CONE = float(os.environ.get("RING_TRUSS_CONE", "22"))     # внешний конус при 12 источниках (было 30: пятно света — экран ринга целиком, 12 полноэкранных проходов)
 
-MAP_PATH = "/Game/Boxing/Maps/L_Ring"
+MAP_PATH = os.environ.get("RING_MAP", "/Game/Boxing/Maps/L_Ring")   # S-77: RING_MAP=/Game/BoxingLocal/Tmp/... — собрать копию (L_Ring занят игрой)
 MAT_DIR = "/Game/Boxing/Materials"
 BASE_MAT = MAT_DIR + "/M_BoxingBase"
 
@@ -290,6 +297,10 @@ def mi(name, color, rough=0.8, metal=0.0, spec=0.5, emissive=None, estrength=0.0
 # ---------------------------------------------------------------- уровень
 def open_or_create_level():
     les = unreal.get_editor_subsystem(unreal.LevelEditorSubsystem)
+    if MAP_PATH != "/Game/Boxing/Maps/L_Ring" and not eal.does_asset_exist(MAP_PATH):
+        # копия для проверки: берём L_Ring (его WorldSettings — режим игры боя), потом пересобираем акторы
+        eal.duplicate_asset("/Game/Boxing/Maps/L_Ring", MAP_PATH)
+        eal.save_asset(MAP_PATH, only_if_is_dirty=False)
     if eal.does_asset_exist(MAP_PATH):
         les.load_level(MAP_PATH)
         n = 0
@@ -495,13 +506,26 @@ M = {
     "seat_pro": mi("Seat_Pro", "#4a0d16", rough=0.6),
     "screen_pro": mi("Screen_Pro", "#05070c", rough=0.3, emissive="#6a1018", estrength=600.0),
 }
-SHIRTS = ["#e9e9e9", "#1c1c1f", "#2b2f3a", "#b3242c", "#2346a6", "#3a6fd1", "#6c7686", "#d9c9a3",
-          "#1f6b4a", "#e0b42a", "#8a1d2b", "#394a73", "#503a2c", "#00a3c4", "#c45a1c"]
-SKINS = ["#e8c3a0", "#d9aa82", "#c68f66", "#a8734e", "#7a5236", "#f0cfb0"]
-M_SHIRT = [mi("Crowd_Shirt%02d" % i, c, rough=0.85) for i, c in enumerate(SHIRTS)]
-M_SKIN = [mi("Crowd_Skin%d" % i, c, rough=0.6) for i, c in enumerate(SKINS)]
-M_JUDGE = mi("Crowd_Judge", "#f3f4f6", rough=0.8)
-M_JURY = mi("Crowd_Jury", "#9fc1e6", rough=0.8)
+# S-77: публика — люди MakeHuman (CC0) из Tools/Blender/crowd_people.py → ring_crowd_import.py (/Game/Boxing/Environment/Crowd):
+# один Nanite-меш на вариант (сидя/стоя, мужчины/женщины), окраска и анимация — в M_Crowd (палитра × PerInstanceRandom,
+# WPO: покачивание + «болеют» по MPC_Crowd.Excite). Прежние цилиндры/сферы (MI_Crowd_Shirt*/Skin*) удаляются.
+CROWD_DIR = ENV_DIR + "/Crowd"
+CROWD_SIT = ["M_Sit_A", "M_Sit_B", "M_Sit_C", "M_Sit_D", "F_Sit_A", "F_Sit_B"]
+CROWD_SIT_W = [1.0, 0.8, 0.9, 0.8, 1.0, 0.8]          # доли вариантов
+CROWD_STAND = ["M_Stand", "F_Stand"]
+# вперёд от точки опоры до носков, см (crowd_people.json → front_cm): сидящий садится так, чтобы колени были над краем
+# ступени, голени — на ряд ниже
+CROWD_FRONT = {"M_Sit_A": 64.9, "M_Sit_B": 63.1, "M_Sit_C": 57.7, "M_Sit_D": 75.7, "F_Sit_A": 58.5, "F_Sit_B": 58.8}
+M_CROWD = {k: eal.load_asset("%s/MI_Crowd_%s" % (CROWD_DIR, k)) for k in ("Sit", "Stand", "Judge", "Jury")}
+if not all(M_CROWD.values()):
+    raise RuntimeError("нет материалов публики — сначала Tools/EditorScripts/ring_crowd_import.py")
+OLD_CROWD_MI = ["Crowd_Shirt%02d" % i for i in range(15)] + ["Crowd_Skin%d" % i for i in range(6)] + ["Crowd_Judge", "Crowd_Jury"]
+# S-77: фактура CC0 на канвасе/юбке/подушках/канатах (look_materials.py: мастер M_BoxingBase с Detail, MI ринга)
+if os.environ.get("RING_DETAIL", "1") == "1":
+    import sys as _sys
+    _sys.path.insert(0, os.path.join(unreal.Paths.convert_relative_path_to_full(unreal.Paths.project_dir()), "Tools", "EditorScripts"))
+    import look_materials
+    look_materials.apply_ring()
 log("материалы готовы")
 
 NCUBE = nanite_copy(CUBE, "SM_NaniteCube")
@@ -662,8 +686,7 @@ for (nx, ny), (tx, ty) in SIDES:
 # трибуны, кресла, публика (детерминированно, свой RNG — как в web)
 rng = random.Random(2026 ^ 0x51a7d5)
 tiers, seats_b, seats_r = [], [], []
-bodies = {i: [] for i in range(len(SHIRTS))}
-heads = {i: [] for i in range(len(SKINS))}
+people = {v: [] for v in CROWD_SIT + CROWD_STAND}
 for (nx, ny), (tx, ty) in SIDES:
     yaw = math.degrees(math.atan2(-ny, -nx))  # лицом к рингу
     along_x = abs(tx) > 0.5
@@ -688,14 +711,18 @@ for (nx, ny), (tx, ty) in SIDES:
             fill = 0.42 + 0.4 * centre - r * 0.02
             if rng.random() > fill:
                 continue
-            px = nx * (d + ROW_D * 0.52) + tx * (u + rng.uniform(-6, 6))
-            py = ny * (d + ROW_D * 0.52) + ty * (u + rng.uniform(-6, 6))
-            s = rng.uniform(0.9, 1.08)
-            pyaw = yaw + rng.uniform(-14, 14)
-            standing = rng.random() < 0.08
-            zc = top + (36 + (30 if standing else 0)) * s
-            bodies[rng.randrange(len(SHIRTS))].append(T((px, py, zc), (42 * s, 26 * s, (62 + (30 if standing else 0)) * s), yaw=pyaw + 90))
-            heads[rng.randrange(len(SKINS))].append(T((px, py, zc + (43 + (15 if standing else 0)) * s), (21 * s, 21 * s, 24 * s), yaw=pyaw))
+            jit = u + rng.uniform(-6, 6)
+            sc = rng.uniform(0.92, 1.07)
+            pyaw = yaw + rng.uniform(-12, 12)
+            if rng.random() < 0.08:
+                # стоит (у своего места, лицом к рингу)
+                v = CROWD_STAND[rng.randrange(len(CROWD_STAND))]
+                dd, z = d + ROW_D * 0.5, top
+            else:
+                # сидит на ступени: носки на 8 см за краем ступени (голени — на ряд ниже), спиной не в спинку кресла
+                v = rng.choices(CROWD_SIT, weights=CROWD_SIT_W)[0]
+                dd, z = min(d + CROWD_FRONT[v] * sc - 8, d + 58), top + 1.5
+            people[v].append(unreal.Transform(V(nx * dd + tx * jit, ny * dd + ty * jit, z), R(yaw=pyaw), V(sc, sc, sc)))
 ism("Arena_Tiers_A", NCUBE, M["tier_a"], [t for o, t in tiers if o == 0], folder="Arena/Stands", shadows=True)
 ism("Arena_Tiers_B", NCUBE, M["tier_b"], [t for o, t in tiers if o == 1], folder="Arena/Stands", shadows=True)
 variant(ism("Arena_Tiers_SeatsBlue", NCUBE, M["seat_blue"], seats_b, folder="Arena/Stands"), False)
@@ -703,19 +730,18 @@ variant(ism("Arena_Tiers_SeatsRed", NCUBE, M["seat_red"], seats_r, folder="Arena
 variant(ism("Arena_Tiers_SeatsMain_Pro", NCUBE, M["seat_pro"], seats_b, folder="Arena/Stands"), True)
 variant(ism("Arena_Tiers_SeatsAccent_Pro", NCUBE, M["pad_white_pro"], seats_r, folder="Arena/Stands"), True)
 n_people = 0
-for i, lst in bodies.items():
-    ism("Crowd_Body_%02d" % i, NCYL, M_SHIRT[i], lst, folder="Arena/Crowd")
+for v, lst in people.items():
+    ism("Crowd_" + v, "%s/SM_Crowd_%s" % (CROWD_DIR, v), M_CROWD["Stand" if v in CROWD_STAND else "Sit"], lst, folder="Arena/Crowd")
     n_people += len(lst)
-for i, lst in heads.items():
-    ism("Crowd_Head_%d" % i, NSPHERE, M_SKIN[i], lst, folder="Arena/Crowd")
 log("публика: %d человек, кресел %d" % (n_people, len(seats_b) + len(seats_r)))
 
 # судьи и жюри у помоста
 tD, pD = EDGE + 100, EDGE + 155
-judges, jury, judge_heads = [], [], []
+judges, jury, chairs = {}, {}, []
+OFFICIAL_VARIANTS = ["M_Sit_A", "M_Sit_D", "F_Sit_A", "M_Sit_B", "F_Sit_B", "M_Sit_A", "F_Sit_A"]
 
 
-def officials(n, t, u, w, who, lst):
+def officials(n, t, u, w, who, dst):
     nx, ny = n
     tx, ty = t
     yaw = math.degrees(math.atan2(-ny, -nx))
@@ -726,8 +752,11 @@ def officials(n, t, u, w, who, lst):
     for i in range(who):
         v = u + (0 if who == 1 else (i - (who - 1) / 2.0) * 80)
         px, py = nx * pD + tx * v, ny * pD + ty * v
-        lst.append(T((px, py, FLOOR + 78), (42, 26, 62), yaw=yaw + 90))
-        judge_heads.append(T((px, py, FLOOR + 121), (21, 21, 24), yaw=yaw))
+        # S-77: человек сидит на стуле за столом (ноги — под столом), стул — сиденье и спинка
+        var = OFFICIAL_VARIANTS[(len(chairs) // 2) % len(OFFICIAL_VARIANTS)]
+        dst.setdefault(var, []).append(unreal.Transform(V(px, py, FLOOR + 47), R(yaw=yaw), V(1, 1, 1)))
+        chairs.append(T((px + nx * 6, py + ny * 6, FLOOR + 23), (44, 44, 46), yaw=yaw))
+        chairs.append(T((px + nx * 27, py + ny * 27, FLOOR + 72), (44, 4, 50) if along_x else (4, 44, 50), yaw=0))
 
 
 officials((1, 0), (0, 1), 0, 90, 1, judges)
@@ -736,9 +765,11 @@ officials((0, 1), (-1, 0), 0, 90, 1, judges)
 officials((0, -1), (1, 0), -230, 90, 1, judges)
 officials((0, -1), (1, 0), 230, 90, 1, judges)
 officials((0, -1), (1, 0), 0, 200, 2, jury)
-ism("Officials_Judges", NCYL, M_JUDGE, judges, folder="Arena/Officials")
-ism("Officials_Jury", NCYL, M_JURY, jury, folder="Arena/Officials")
-ism("Officials_Heads", NSPHERE, M_SKIN[1], judge_heads, folder="Arena/Officials")
+for v, lst in judges.items():
+    ism("Officials_Judges_" + v, "%s/SM_Crowd_%s" % (CROWD_DIR, v), M_CROWD["Judge"], lst, folder="Arena/Officials")
+for v, lst in jury.items():
+    ism("Officials_Jury_" + v, "%s/SM_Crowd_%s" % (CROWD_DIR, v), M_CROWD["Jury"], lst, folder="Arena/Officials")
+ism("Officials_Chairs", NCUBE, M["table"], chairs, folder="Arena/Officials")
 
 # табло на торцевых стенах (±Y)
 for sgn in (-1, 1):
@@ -934,3 +965,9 @@ cine("ArenaCam", (0, 1000, 330), (0, -1850, 420), 18.0)  # через ринг �
 unreal.get_editor_subsystem(unreal.LevelEditorSubsystem).save_current_level()
 log("уровень сохранён: " + MAP_PATH)
 log("ГОТОВО")
+
+# S-77: прежние материалы цилиндров публики больше никем не используются
+for _old in (OLD_CROWD_MI if os.environ.get("RING_DELETE_OLD", "1") == "1" else []):
+    _p = "%s/MI_%s" % (MAT_DIR, _old)
+    if eal.does_asset_exist(_p):
+        log("удалён устаревший %s: %s" % (_p, eal.delete_asset(_p)))

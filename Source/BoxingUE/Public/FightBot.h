@@ -20,6 +20,10 @@ enum class EFightBotSkill : uint8
 	Average, // web BOTS.average — «средний игрок»
 	Strong,  // web BOTS.good
 	Masher,  // web BOTS.spam — молотит одну за другой, без защиты и отдыха
+	// S-76: абьюз-боты (проверка ИИ стилей: «одна кнопка», «черепаха», «бегун» не должны побеждать равного).
+	JabSpam, // одна кнопка: только джеб, как только можно, без защиты; далеко — шаг вперёд
+	Turtle,  // вечный блок: держит блок весь бой, раз в 1.5–2.5 с опускает руки на один кросс (когда соперник не бьёт)
+	Runner,  // бегун: держит дальнюю дистанцию (≥ 1.6 м) шагами назад и по дуге, с края — джеб и снова назад
 };
 
 struct FFightBotParams
@@ -74,4 +78,8 @@ private:
 	bool bReactSlip = false;
 	double NextStep = 0;
 	bool bBlockHeld = false;
+	int32 RunDir = 1; // бегун: сторона дуги (меняется у канатов)
+
+	// S-76: абьюз-боты (JabSpam/Turtle/Runner) — свои простые правила вместо реакции «человека».
+	void ThinkAbuser(const FFightSnapshot& S, TArray<FFightBotCmd>& Out, bool& bHeld, EFightAction& HeldStep);
 };

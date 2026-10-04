@@ -71,6 +71,31 @@ bool FBoxingFightCrewTest::RunTest(const FString& Parameters)
 		for (int32 I = 0; I < 120; ++I) M.Update(1.f / 60.f, false, false);
 		TestTrue(TEXT("бой: снова у помоста"), M.Up == 0.f);
 	}
+	// --- S-78: жест реакции набирается плавно, повторный всплеск не дёргает руки; предел скорости костей; стул не в ногах ---
+	{
+		FMood M;
+		M.Kick({0, 1.f, 0.f});
+		M.Update(1.f / 60.f, false, false);
+		TestTrue(TEXT("S-78: в кадр всплеска жест не скачком"), M.CheerW > 0.f && M.CheerW < 0.1f);
+		const FBody B0 = Pose(ERole::Coach, FMood(), 0.f, 0.f, 0.f, 0.f);
+		const FBody B1 = Pose(ERole::Coach, M, 0.f, 0.f, 0.f, 0.f);
+		TestTrue(TEXT("S-78: рука в кадр всплеска почти на месте"), FMath::Abs(B1.Arm[1].Fwd - B0.Arm[1].Fwd) < 0.15f);
+		for (int32 I = 0; I < 20; ++I) M.Update(1.f / 60.f, false, false);
+		const float Osc = M.CheerOsc;
+		M.Kick({0, 1.f, 0.f});
+		TestTrue(TEXT("S-78: повторный всплеск не сбрасывает качание"), M.CheerOsc == Osc && M.CheerW > 0.9f);
+		const FQuat A = FQuat::Identity, Bq(FVector::UpVector, 2.f);
+		const FQuat L = LimitRotation(A, Bq, 9.f, 1.f / 60.f);
+		TestTrue(TEXT("S-78: предел скорости — 9 рад/с"), FMath::IsNearlyEqual(static_cast<float>(A.AngularDistance(L)), 0.15f, 1e-3f));
+		TestTrue(TEXT("S-78: длинный кадр — сразу"), LimitRotation(A, Bq, 9.f, 0.5f).Equals(Bq, 1e-4f));
+		TestTrue(TEXT("S-78: повторная оценка — стоит"), LimitRotation(A, Bq, 9.f, 0.f).Equals(A, 1e-4f));
+		const FVector In(-263.f, -263.f, 0.f), Post(-343.f, -343.f, 0.f);
+		const FVector Bx(-258.f, -258.f, 90.f);
+		const FVector S0 = StoolSpot(In, Bx, Post, Bx, 0.f, STOOL_CLEAR_CM);
+		TestTrue(TEXT("S-78: стоит в углу — стул за ним, не в ногах"), FVector::Dist2D(S0, Bx) >= STOOL_CLEAR_CM - 0.1f && FVector::Dist2D(S0, Post) < FVector::Dist2D(Bx, Post));
+		TestTrue(TEXT("S-78: сел — стул под тазом"), FVector::Dist2D(StoolSpot(In, Bx, Post, Bx, 1.f, STOOL_CLEAR_CM), Bx) < 0.1f);
+		TestTrue(TEXT("S-78: далеко от угла — стул в углу"), StoolSpot(In, FVector(0.f, 0.f, 90.f), Post, FVector::ZeroVector, 0.f, STOOL_CLEAR_CM).Equals(In, 0.01f));
+	}
 	// --- сценарий катмена: бутылка, потом протирает — не одновременно ---
 	{
 		float B = 0.f, W = 0.f;

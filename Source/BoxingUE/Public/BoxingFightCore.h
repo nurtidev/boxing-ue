@@ -162,6 +162,17 @@ private:
 		double RestStam0 = 0, RestStam1 = 0, RestWear0 = 0, RestWear1 = 0;
 		TArray<int32> Recent;     // последние удары человека «вид*2+цель» (чтение ИИ)
 		TArray<double> SlipTimes; // моменты последних уклонов человека
+		// S-76: почерк стиля ИИ против ЧЕЛОВЕКА (серии, ответы, «ударь-уйди»). В автопилоте (ИИ против ИИ) не трогаются.
+		int32 SeriesLeft = 0;     // ударов серии ещё впереди
+		int32 SeriesIdx = 0;      // номер удара в серии (0 — первый)
+		double SeriesNext = 0;    // когда начать следующую серию
+		EPunchKind SeriesPrev = EPunchKind::Jab;
+		EPunchArm SeriesPrevArm = EPunchArm::Lead;
+		bool bCounterShot = false; // следующий удар — ответ (на удар/промах человека): силовой у панчера и контровика
+		bool bJabNext = false;     // следующий удар — стоп-джеб навстречу шагу человека
+		bool bExitAfter = false;   // после серии — шаг с линии («ударь-уйди» технаря/скоростного)
+		// Клинч (S-76): последний удар (для «оба бьют вплотную»).
+		double LastPunchAt = -9;
 
 		double Fatigue() const;
 		double StamCap() const;
@@ -259,6 +270,19 @@ private:
 	EPunchKind AiPickType(int32 Me);
 	void AiFootwork(int32 Me);
 	void AiReactToPunch(int32 AiIdx, int32 HumanIdx, int32 Reps);
+	// S-76: ИИ против человека — почерк стиля (в вебе нет; автопилот идёт прежним AiThink, паритет бит-в-бит).
+	bool VsHuman(int32 Me) const { return bAi[Me] && !bAi[1 - Me]; }
+	void AiThinkVsHuman(int32 Me);
+	bool AiOpening(int32 Me) const;
+	EPunchKind AiPickVsHuman(int32 Me, bool bOpening, EPunchArm& OutArm, bool& bHasArm);
+	void AiAnswerHuman(int32 AiIdx, int32 HumanIdx);
+	void AiDefended(int32 AiIdx, bool bSlip);
+	void AiStopJab(int32 AiIdx);
+
+	// --- клинч (S-76; в вебе нет) ---
+	void UpdateClinch(double Dt);
+	void BeginClinch(int32 By);
+	bool InClinch() const { return ClinchKind != 0; }
 
 	FFightEvent& PushEvent(EFightEventKind Kind, int32 Attacker, int32 Defender, double Mag);
 
@@ -311,6 +335,10 @@ private:
 	bool bPro = false;
 	double ProShotSev = 0;      // тяжесть удара, уронившего «от удара» (для шанса KO), 0 — нокдаун от давления/flash
 	double JudgeLean[3] = {0, 0, 0}; // вкус судьи профи: −… объём, +… мощь
+	// Вариант судейства любителей (S-76, по умолчанию выкл.): порог «явного» раунда, разброс, вкус каждого из 5 судей.
+	double AmClear = 4.5, AmNoise = 1.6;
+	double AmLean[MAX_JUDGES] = {0, 0, 0, 0, 0};
+	bool bAmVariant = false;
 	FStageState Stage;
 	double ResumeGap = 1.15;
 	bool bHasLying = false;
@@ -318,6 +346,15 @@ private:
 	double RestT = 0;
 	double LastMissAt[2] = {-1, -1};
 	double Form[2] = {1, 1};
+	// Клинч (S-76): 0 — нет, 1 — сцепились (рефери идёт разнимать), 2 — «Брейк!», расходятся. Только при человеке в бою
+	// (FFightConfig::bClinch): в автопилоте клинча нет — паритет с вебом/simulate бит-в-бит.
+	bool bClinchOn = false;
+	int32 ClinchKind = 0;
+	int32 ClinchBy = -1;
+	double ClinchT = 0;       // сек с начала клинча (боевое время)
+	double ClinchHeat = 0;    // «вязкость» размена вплотную: копится, пока оба бьют на ближней, тает иначе
+	double ClinchReadyAt = 0; // кулдаун после разведения
+	double ClinchSep = 0;     // дистанция, до которой рефери разводит
 
 	TArray<FFightEvent> Events;
 	FFightResult Result;

@@ -213,6 +213,11 @@ def main():
         mats["cap_" + c] = kit("Crew_BottleCap_" + c, col["cap"], 0.4, 0.5)
         mats["seat_" + c] = kit("Stool_Seat_" + c, col["seat"], 0.45, 0.5, 0.15)
 
+    if os.environ.get("CREW_ONLY") == "tee":   # S-77 (QA-13): только перевыгрузить футболку+полотенце (BP/стул не трогать)
+        m = L["import_skm"]("crew_tee_towel.fbx", LOCAL_DIR, "SKM_CrewTeeTowel", skel)
+        eal.save_loaded_asset(m)
+        log("только SKM_CrewTeeTowel")
+        return
     stool = import_static("crew_stool.fbx", "SM_CornerStool")
     bottle = import_static("crew_bottle.fbx", "SM_CrewBottle")
     set_static_mats(stool, {"StoolSeat": mats["seat_Red"], "StoolMetal": mats["metal"]})

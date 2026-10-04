@@ -6,7 +6,10 @@
 #include "Misc/CommandLine.h"
 #include "Misc/Parse.h"
 
-namespace
+namespace BoxerFeelImpl {}
+using namespace BoxerFeelImpl; // S-74: свои хелперы — именованным пространством (unity-сборка: у соседних .cpp свои анонимные Ok/CS/…)
+
+namespace BoxerFeelImpl
 {
 	struct FSpring
 	{
@@ -82,17 +85,17 @@ namespace
 	FQuat ParentRotCS(const FCompactPose& P, FCompactPoseBoneIndex I)
 	{
 		const FCompactPoseBoneIndex Par = P.GetParentBoneIndex(I);
-		return Par.GetInt() != INDEX_NONE ? CS(P, Par).GetRotation() : FQuat::Identity;
+		return Par.GetInt() != INDEX_NONE ? BoxerFeelImpl::CS(P, Par).GetRotation() : FQuat::Identity;
 	}
 
 	// Повернуть кость вокруг оси компонента (D — поворот в осях компонента), дети следуют.
 	void RotateCS(FCompactPose& P, FCompactPoseBoneIndex I, const FQuat& D)
 	{
-		if (!Ok(I))
+		if (!BoxerFeelImpl::Ok(I))
 		{
 			return;
 		}
-		const FQuat Qp = ParentRotCS(P, I);
+		const FQuat Qp = BoxerFeelImpl::ParentRotCS(P, I);
 		P[I].SetRotation((Qp.Inverse() * D * Qp * P[I].GetRotation()).GetNormalized());
 	}
 
@@ -132,6 +135,20 @@ FBoxReactKick BoxerFeel::ReactionKick(EBoxFeelEvent Kind, EBoxFeelPunch Punch, b
 	const float Side = bRear ? -1.f : 1.f;
 	const bool bHook = Punch == EBoxFeelPunch::Hook;
 
+	if (Kind == EBoxFeelEvent::Whiff)
+	{
+		// S-75: «провалился» (свой удар ушёл в нырок): корпус и голова вперёд по инерции, полшага вперёд, доворот за
+		// рукой (правая — корпус уходит влево, левая — вправо), колени подсели. Каналы — в осях самого атакующего.
+		const float Hard = Punch == EBoxFeelPunch::Straight ? 0.7f : 1.f; // джеб «проваливает» меньше силовых
+		K[C::TorsoPitch] = -0.2f * Hard;
+		K[C::HeadPitch] = -0.08f * Hard;
+		K[C::Back] = -0.07f * Hard;
+		K[C::TorsoYaw] = (bRear ? 0.12f : -0.08f) * Hard;
+		K[C::TorsoRoll] = (bRear ? -0.05f : 0.05f) * Hard;
+		K[C::Knee] = 0.06f * Hard;
+		K.bValid = true;
+		return K;
+	}
 	if (Kind == EBoxFeelEvent::Miss)
 	{
 		// Промах «в лоб»: голова уходит с линии наружу от бьющей руки; нырок уже виден — без реакции.
@@ -151,10 +168,12 @@ FBoxReactKick BoxerFeel::ReactionKick(EBoxFeelEvent Kind, EBoxFeelPunch Punch, b
 	}
 	if (Kind == EBoxFeelEvent::Block)
 	{
-		// В перчатки: руки вдавливает в лицо, корпус откидывает, полшага назад.
+		// В перчатки: руки вдавливает к лицу (FBoxerGuardState::Push), подбородок прячется, корпус чуть сжимается
+		// (колени), полшага назад. S-75: голова больше не запрокидывается (было +0.07 — читалось как попадание).
 		const float B = FMath::Min(1.3f, 0.45f + 0.6f * FMath::Max(0.f, Mag));
-		K[C::HeadPitch] = 0.07f * B;
-		K[C::TorsoPitch] = 0.06f * B;
+		K[C::HeadPitch] = -0.03f * B;
+		K[C::TorsoPitch] = 0.03f * B;
+		K[C::Knee] = 0.04f * B;
 		K[C::TorsoYaw] = bHook ? 0.06f * Side * B : 0.f;
 		K[C::Back] = 0.035f * B;
 		K[C::Side] = bHook ? 0.015f * Side * B : 0.f;
@@ -210,22 +229,96 @@ FBoxReactKick BoxerFeel::ReactionKick(EBoxFeelEvent Kind, EBoxFeelPunch Punch, b
 	return K;
 }
 
-void BoxerFeel::PunchEnvelopes(float Phase, float ContactFrac, float& OutAim, float& OutReach)
+void BoxerFeel::PunchEnvelopes(float Phase, float ContactFrac, float& OutAim, float& OutReach, bool bSnap)
 {
 	const float C = FMath::Clamp(ContactFrac, 0.05f, 0.95f);
 	const float P = FMath::Clamp(Phase, 0.f, 1.f);
 	if (P < C)
 	{
 		const float U = P / C;
-		OutAim = Smooth(0.15f, 0.75f, U);
-		OutReach = Smooth(0.5f, 1.f, U);
+		// S-75: контра — рука на линии почти сразу, «дотянуться» начинается раньше (замах короче на глаз; контакт — тот же).
+		OutAim = bSnap ? BoxerFeelImpl::Smooth(0.f, 0.45f, U) : BoxerFeelImpl::Smooth(0.15f, 0.75f, U);
+		OutReach = bSnap ? BoxerFeelImpl::Smooth(0.3f, 0.9f, U) : BoxerFeelImpl::Smooth(0.5f, 1.f, U);
 	}
 	else
 	{
 		const float V = (P - C) / (1.f - C);
-		OutAim = 1.f - Smooth(0.25f, 0.95f, V);
-		OutReach = 1.f - Smooth(0.1f, 0.6f, V);
+		OutAim = 1.f - BoxerFeelImpl::Smooth(0.25f, 0.95f, V);
+		OutReach = 1.f - BoxerFeelImpl::Smooth(0.1f, 0.6f, V);
 	}
+}
+
+float BoxerFeel::BendAngle(const FVector& Axis, const FVector& Bend, const FVector& FootFwd, bool& bValid)
+{
+	const FVector Ax = Axis.GetSafeNormal();
+	const FVector B = (Bend - Ax * FVector::DotProduct(Bend, Ax)).GetSafeNormal();
+	const FVector F = (FootFwd - Ax * FVector::DotProduct(FootFwd, Ax)).GetSafeNormal();
+	bValid = !Ax.IsNearlyZero() && !B.IsNearlyZero() && !F.IsNearlyZero();
+	if (!bValid)
+	{
+		return 0.f;
+	}
+	return FMath::Atan2(static_cast<float>(FVector::DotProduct(FVector::CrossProduct(F, B), Ax)), static_cast<float>(FVector::DotProduct(F, B)));
+}
+
+FVector BoxerFeel::BendOf(const FVector& A, const FVector& B, const FVector& C, float MinCm)
+{
+	const FVector D = (C - A).GetSafeNormal();
+	if (D.IsNearlyZero())
+	{
+		return FVector::ZeroVector;
+	}
+	const FVector V = B - A;
+	const FVector N = V - D * FVector::DotProduct(V, D);
+	return N.Size() < MinCm ? FVector::ZeroVector : N.GetSafeNormal();
+}
+
+FVector BoxerFeel::KneeBendDir(const FVector& Hip, const FVector& ClipKnee, const FVector& Goal, const FVector& FootFwd, float L1, float L2,
+	float ClipShare, bool bGuard, float KneeMaxDevRad, const FVector& Inward, float KneeMaxInRad)
+{
+	const FVector D = (Goal - Hip).GetSafeNormal();
+	if (D.IsNearlyZero())
+	{
+		return FVector::ZeroVector;
+	}
+	const FVector V1 = ClipKnee - Hip;
+	FVector Nc = V1 - D * FVector::DotProduct(V1, D);
+	const float NcLen = static_cast<float>(Nc.Size());
+	Nc = Nc.GetSafeNormal();
+	FVector FF = FootFwd - D * FVector::DotProduct(FootFwd, D);
+	FF = FF.GetSafeNormal();
+	float Bent = FMath::Min(1.f, NcLen / FMath::Max(1e-3f, 0.04f * (L1 + L2))) * 0.6f * FMath::Clamp(ClipShare, 0.f, 1.f);
+	if (bGuard && !FF.IsNearlyZero() && !Nc.IsNearlyZero())
+	{
+		// Колено клипа назад от носка (≥ 90°) — не в счёт, в пределах 60° — целиком, между — плавно.
+		Bent *= BoxerFeelImpl::Smooth(0.f, 0.5f, static_cast<float>(FVector::DotProduct(Nc, FF)));
+	}
+	FVector N = Nc * Bent + FF * (1.f - Bent);
+	N -= D * FVector::DotProduct(N, D);
+	N = N.GetSafeNormal();
+	if (N.IsNearlyZero())
+	{
+		N = !FF.IsNearlyZero() ? FF : Nc;
+	}
+	if (bGuard && !FF.IsNearlyZero() && !N.IsNearlyZero())
+	{
+		// Не дальше KneeMaxDevRad от курса ступни: колено над носком, ни назад, ни внутрь.
+		bool bOk = false;
+		const float A = BendAngle(D, N, FF, bOk);
+		float Lim = KneeMaxDevRad;
+		if (bOk && !Inward.IsNearlyZero())
+		{
+			// Какой знак угла — внутрь (к другой ноге): поворот носка на +угол сдвигает колено к Inward?
+			const FVector Plus = FQuat(D, 0.3f).RotateVector(FF);
+			const float InSign = FVector::DotProduct(Plus - FF, Inward) > 0.f ? 1.f : -1.f;
+			Lim = FMath::Sign(A) == InSign ? FMath::Min(KneeMaxDevRad, KneeMaxInRad) : KneeMaxDevRad;
+		}
+		if (bOk && FMath::Abs(A) > Lim)
+		{
+			N = FQuat(D, FMath::Sign(A) * Lim).RotateVector(FF).GetSafeNormal();
+		}
+	}
+	return N;
 }
 
 FVector BoxerFeel::GuardPush(const FVector& Glove, const FVector& A, const FVector& B, float Clear, float MaxCm)
@@ -351,7 +444,7 @@ void FBoxerReactionRig::Kick(const FBoxReactKick& K)
 	{
 		if (K.V[C] != 0.f)
 		{
-			Vel[C] += K.V[C] * GSprings[C].W / PeakFactor(GSprings[C].Z);
+			Vel[C] += K.V[C] * GSprings[C].W / BoxerFeelImpl::PeakFactor(GSprings[C].Z);
 		}
 	}
 }
@@ -430,45 +523,49 @@ void FBoxerPoseFx::Resolve(const FBoneContainer& Bones)
 	}
 	Serial = Bones.GetSerialNumber();
 	ContainerPtr = &Bones;
-	Pelvis = Find(Bones, TEXT("pelvis"));
-	Spine[0] = Find(Bones, TEXT("spine_03"));
-	Spine[1] = Find(Bones, TEXT("spine_04"));
-	Spine[2] = Find(Bones, TEXT("spine_05"));
-	if (!Ok(Spine[2]))
+	Pelvis = BoxerFeelImpl::Find(Bones, TEXT("pelvis"));
+	Spine[0] = BoxerFeelImpl::Find(Bones, TEXT("spine_03"));
+	Spine[1] = BoxerFeelImpl::Find(Bones, TEXT("spine_04"));
+	Spine[2] = BoxerFeelImpl::Find(Bones, TEXT("spine_05"));
+	if (!BoxerFeelImpl::Ok(Spine[2]))
 	{
 		// Скелет UE4/Manny-подобный с тремя позвонками.
-		Spine[0] = Find(Bones, TEXT("spine_01"));
-		Spine[1] = Find(Bones, TEXT("spine_02"));
-		Spine[2] = Find(Bones, TEXT("spine_03"));
+		Spine[0] = BoxerFeelImpl::Find(Bones, TEXT("spine_01"));
+		Spine[1] = BoxerFeelImpl::Find(Bones, TEXT("spine_02"));
+		Spine[2] = BoxerFeelImpl::Find(Bones, TEXT("spine_03"));
 	}
-	Neck = Find(Bones, TEXT("neck_01"));
-	Head = Find(Bones, TEXT("head"));
+	Neck = BoxerFeelImpl::Find(Bones, TEXT("neck_01"));
+	Head = BoxerFeelImpl::Find(Bones, TEXT("head"));
 	const TCHAR* Sfx[2] = {TEXT("_l"), TEXT("_r")};
 	for (int32 S = 0; S < 2; ++S)
 	{
-		Thigh[S] = Find(Bones, *(FString(TEXT("thigh")) + Sfx[S]));
-		Calf[S] = Find(Bones, *(FString(TEXT("calf")) + Sfx[S]));
-		Foot[S] = Find(Bones, *(FString(TEXT("foot")) + Sfx[S]));
-		UpperArm[S] = Find(Bones, *(FString(TEXT("upperarm")) + Sfx[S]));
-		LowerArm[S] = Find(Bones, *(FString(TEXT("lowerarm")) + Sfx[S]));
-		Hand[S] = Find(Bones, *(FString(TEXT("hand")) + Sfx[S]));
+		Thigh[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("thigh")) + Sfx[S]));
+		Calf[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("calf")) + Sfx[S]));
+		Foot[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("foot")) + Sfx[S]));
+		UpperArm[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("upperarm")) + Sfx[S]));
+		LowerArm[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("lowerarm")) + Sfx[S]));
+		Hand[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("hand")) + Sfx[S]));
+		Clav[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("clavicle")) + Sfx[S])); // S-75
 	}
 }
 
 void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const FTransform& CompToWorld, FBoxerFeelDebug* OutDebug)
 {
 	Resolve(Pose.GetBoneContainer());
-	if (!Ok(Pelvis))
+	if (!BoxerFeelImpl::Ok(Pelvis))
 	{
 		return;
 	}
-	if (OutDebug && Ok(Head) && Ok(Spine[0]) && Ok(Hand[0]) && Ok(Hand[1]))
+	// S-75: плотный блок / пробитый блок — до записи «сырых» перчаток: соперник целится в перчатки там, где они в блоке.
+	ApplyGuard(Pose, Frame, CompToWorld);
+	ApplyClinch(Pose, Frame, CompToWorld); // S-76/S-75
+	if (OutDebug && BoxerFeelImpl::Ok(Head) && BoxerFeelImpl::Ok(Spine[0]) && BoxerFeelImpl::Ok(Hand[0]) && BoxerFeelImpl::Ok(Hand[1]))
 	{
 		OutDebug->bRaw = true;
-		OutDebug->RawHead = CompToWorld.TransformPosition(CS(Pose, Head).GetLocation());
-		OutDebug->RawChest = CompToWorld.TransformPosition(CS(Pose, Spine[0]).GetLocation());
-		OutDebug->RawHandL = CompToWorld.TransformPosition(CS(Pose, Hand[0]).GetLocation());
-		OutDebug->RawHandR = CompToWorld.TransformPosition(CS(Pose, Hand[1]).GetLocation());
+		OutDebug->RawHead = CompToWorld.TransformPosition(BoxerFeelImpl::CS(Pose, Head).GetLocation());
+		OutDebug->RawChest = CompToWorld.TransformPosition(BoxerFeelImpl::CS(Pose, Spine[0]).GetLocation());
+		OutDebug->RawHandL = CompToWorld.TransformPosition(BoxerFeelImpl::CS(Pose, Hand[0]).GetLocation());
+		OutDebug->RawHandR = CompToWorld.TransformPosition(BoxerFeelImpl::CS(Pose, Hand[1]).GetLocation());
 	}
 	auto R = [&Frame](EBoxReactChannel C) { return Frame.React[static_cast<int32>(C)]; };
 	const FVector F = CompToWorld.InverseTransformVectorNoScale(Frame.Fwd).GetSafeNormal();
@@ -478,9 +575,12 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 
 	// --- 1. Смещение таза: отшатывание + подшаг в удар + подсевшие колени ---
 	FVector Off = -F * (R(EBoxReactChannel::Back) * 100.f) + L * (R(EBoxReactChannel::Side) * 100.f);
+	// S-75: нырок — таз вбок, колени подсели (ниже), корпус в сторону и чуть вперёд (шаг 1б).
+	const BoxerFeel::FSlipPose SP = BoxerFeel::SlipPose(Frame.Slip);
+	Off += L * SP.SideCm;
 
 	const int32 Arm = Frame.bLeftArm ? 0 : 1;
-	const bool bAim = Frame.bAim && Frame.AimWeight > 0.f && Ok(UpperArm[Arm]) && Ok(LowerArm[Arm]) && Ok(Hand[Arm]);
+	const bool bAim = Frame.bAim && Frame.AimWeight > 0.f && BoxerFeelImpl::Ok(UpperArm[Arm]) && BoxerFeelImpl::Ok(LowerArm[Arm]) && BoxerFeelImpl::Ok(Hand[Arm]);
 	FVector Surface = FVector::ZeroVector;
 	FVector Approach = FVector::ForwardVector;
 	float Lunge = 0.f;
@@ -490,9 +590,9 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 	{
 		Surface = CompToWorld.InverseTransformPosition(Frame.AimSurface);
 		Approach = CompToWorld.InverseTransformVectorNoScale(Frame.AimApproach).GetSafeNormal();
-		const FVector S = CS(Pose, UpperArm[Arm]).GetLocation();
-		const FVector E = CS(Pose, LowerArm[Arm]).GetLocation();
-		const FVector H = CS(Pose, Hand[Arm]).GetLocation();
+		const FVector S = BoxerFeelImpl::CS(Pose, UpperArm[Arm]).GetLocation();
+		const FVector E = BoxerFeelImpl::CS(Pose, LowerArm[Arm]).GetLocation();
+		const FVector H = BoxerFeelImpl::CS(Pose, Hand[Arm]).GetLocation();
 		const float ArmLen = FVector::Dist(S, E) + FVector::Dist(E, H);
 		const FVector Th = Surface - Approach * Frame.FistReachCm;
 		// Прямые дотягиваются выпрямленной рукой; хук и апперкот держат согнутый локоть клипа — недостающее добирает подшаг.
@@ -524,32 +624,32 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 	}
 
 	// Колени: бедро вперёд, голень назад, стопа — обратно в пол; таз опускается на подъём ступней.
-	const float Knee = R(EBoxReactChannel::Knee);
-	if (FMath::Abs(Knee) > 1e-4f && Ok(Thigh[0]) && Ok(Thigh[1]))
+	const float Knee = R(EBoxReactChannel::Knee) + SP.Knee;
+	if (FMath::Abs(Knee) > 1e-4f && BoxerFeelImpl::Ok(Thigh[0]) && BoxerFeelImpl::Ok(Thigh[1]))
 	{
 		float Y0 = 0.f;
 		for (int32 S = 0; S < 2; ++S)
 		{
-			Y0 += Ok(Foot[S]) ? FVector::DotProduct(CS(Pose, Foot[S]).GetLocation(), U) : 0.f;
+			Y0 += BoxerFeelImpl::Ok(Foot[S]) ? FVector::DotProduct(BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation(), U) : 0.f;
 		}
-		const FQuat Fw = Turn(-U, F, Knee);       // бедро: «низ» к «вперёд»
-		const FQuat Bk = Turn(-U, F, -2.f * Knee); // голень назад
+		const FQuat Fw = BoxerFeelImpl::Turn(-U, F, Knee);       // бедро: «низ» к «вперёд»
+		const FQuat Bk = BoxerFeelImpl::Turn(-U, F, -2.f * Knee); // голень назад
 		for (int32 S = 0; S < 2; ++S)
 		{
-			RotateCS(Pose, Thigh[S], Fw);
-			RotateCS(Pose, Calf[S], Bk);
-			RotateCS(Pose, Foot[S], Fw);
+			BoxerFeelImpl::RotateCS(Pose, Thigh[S], Fw);
+			BoxerFeelImpl::RotateCS(Pose, Calf[S], Bk);
+			BoxerFeelImpl::RotateCS(Pose, Foot[S], Fw);
 		}
 		float Y1 = 0.f;
 		for (int32 S = 0; S < 2; ++S)
 		{
-			Y1 += Ok(Foot[S]) ? FVector::DotProduct(CS(Pose, Foot[S]).GetLocation(), U) : 0.f;
+			Y1 += BoxerFeelImpl::Ok(Foot[S]) ? FVector::DotProduct(BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation(), U) : 0.f;
 		}
 		Off -= U * FMath::Max(0.f, (Y1 - Y0) * 0.5f);
 	}
 	if (!Off.IsNearlyZero(0.01f))
 	{
-		const FQuat Qp = ParentRotCS(Pose, Pelvis);
+		const FQuat Qp = BoxerFeelImpl::ParentRotCS(Pose, Pelvis);
 		Pose[Pelvis].AddToTranslation(Qp.UnrotateVector(Off));
 	}
 	// S-70: наклон корпуса к цели (доля выноса удара), по позвонкам 0.4 / 0.35 / 0.25.
@@ -557,7 +657,15 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 	{
 		for (int32 I = 0; I < 3; ++I)
 		{
-			RotateCS(Pose, Spine[I], Turn(U, LeanDir, Lean * LEAN_SPLIT[I]));
+			BoxerFeelImpl::RotateCS(Pose, Spine[I], BoxerFeelImpl::Turn(U, LeanDir, Lean * LEAN_SPLIT[I]));
+		}
+	}
+	// --- 1б. S-75: нырок — корпус кренится в сторону ухода и чуть вперёд (голова уходит с линии вбок и вниз) ---
+	if (SP.Roll != 0.f || SP.Bend != 0.f)
+	{
+		for (int32 I = 0; I < 3; ++I)
+		{
+			BoxerFeelImpl::RotateCS(Pose, Spine[I], BoxerFeelImpl::Turn(U, Rt, SP.Roll * LEAN_SPLIT[I]) * BoxerFeelImpl::Turn(U, F, SP.Bend * LEAN_SPLIT[I]));
 		}
 	}
 
@@ -568,14 +676,14 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 		for (int32 I = 0; I < 3; ++I)
 		{
 			const float K = TORSO_SPLIT[I];
-			RotateCS(Pose, Spine[I], Turn(F, L, TY * K) * Turn(U, Rt, TR * K) * Turn(F, U, TP * K));
+			BoxerFeelImpl::RotateCS(Pose, Spine[I], BoxerFeelImpl::Turn(F, L, TY * K) * BoxerFeelImpl::Turn(U, Rt, TR * K) * BoxerFeelImpl::Turn(F, U, TP * K));
 		}
 	}
 	const float HP = R(EBoxReactChannel::HeadPitch), HR = R(EBoxReactChannel::HeadRoll), HY = R(EBoxReactChannel::HeadYaw);
 	if (HP != 0.f || HR != 0.f || HY != 0.f)
 	{
-		RotateCS(Pose, Neck, Turn(F, L, HY * NECK_SPLIT) * Turn(U, Rt, HR * NECK_SPLIT) * Turn(F, U, HP * NECK_SPLIT));
-		RotateCS(Pose, Head, Turn(F, L, HY * HEAD_SPLIT) * Turn(U, Rt, HR * HEAD_SPLIT) * Turn(F, U, HP * HEAD_SPLIT));
+		BoxerFeelImpl::RotateCS(Pose, Neck, BoxerFeelImpl::Turn(F, L, HY * NECK_SPLIT) * BoxerFeelImpl::Turn(U, Rt, HR * NECK_SPLIT) * BoxerFeelImpl::Turn(F, U, HP * NECK_SPLIT));
+		BoxerFeelImpl::RotateCS(Pose, Head, BoxerFeelImpl::Turn(F, L, HY * HEAD_SPLIT) * BoxerFeelImpl::Turn(U, Rt, HR * HEAD_SPLIT) * BoxerFeelImpl::Turn(F, U, HP * HEAD_SPLIT));
 	}
 
 	// --- 2б. S-62: удар соперника идёт мимо блока (не в перчатки) — моя перчатка на его пути отводится в сторону, а не
@@ -584,15 +692,15 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 	{
 		for (int32 S = 0; S < 2; ++S)
 		{
-			if ((bAim && S == Arm) || !Ok(UpperArm[S]) || !Ok(LowerArm[S]) || !Ok(Hand[S]))
+			if ((bAim && S == Arm) || !BoxerFeelImpl::Ok(UpperArm[S]) || !BoxerFeelImpl::Ok(LowerArm[S]) || !BoxerFeelImpl::Ok(Hand[S]))
 			{
 				continue;
 			}
-			const FTransform UcS = CS(Pose, UpperArm[S]);
-			const FTransform LcS = CS(Pose, LowerArm[S]);
+			const FTransform UcS = BoxerFeelImpl::CS(Pose, UpperArm[S]);
+			const FTransform LcS = BoxerFeelImpl::CS(Pose, LowerArm[S]);
 			const FVector Sh = UcS.GetLocation();
 			const FVector El = LcS.GetLocation();
-			const FVector Hd = CS(Pose, Hand[S]).GetLocation();
+			const FVector Hd = BoxerFeelImpl::CS(Pose, Hand[S]).GetLocation();
 			const float LenU = FVector::Dist(Sh, El);
 			const float LenL = FVector::Dist(El, Hd);
 			if (LenU < 1.f || LenL < 1.f)
@@ -615,8 +723,8 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 			const FQuat NewU = (Qu * UcS.GetRotation()).GetNormalized();
 			const FQuat Ql = FQuat::FindBetweenNormals(Qu.RotateVector(Hd - El).GetSafeNormal(), (NewH - NewE).GetSafeNormal());
 			const FQuat NewL = (Ql * Qu * LcS.GetRotation()).GetNormalized();
-			Pose[UpperArm[S]].SetRotation((ParentRotCS(Pose, UpperArm[S]).Inverse() * NewU).GetNormalized());
-			Pose[LowerArm[S]].SetRotation((ParentRotCS(Pose, LowerArm[S]).Inverse() * NewL).GetNormalized());
+			Pose[UpperArm[S]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, UpperArm[S]).Inverse() * NewU).GetNormalized());
+			Pose[LowerArm[S]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, LowerArm[S]).Inverse() * NewL).GetNormalized());
 			if (OutDebug)
 			{
 				OutDebug->GuardPushCm = FMath::Max(OutDebug->GuardPushCm, static_cast<float>(PushW.Size()));
@@ -624,12 +732,19 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 		}
 	}
 
+	// --- 2в. S-78: головы не входят друг в друга, лицо — в его корпус (BoxerContact.cpp) ---
+	ApplySeparation(Pose, Frame, CompToWorld, OutDebug);
+
 	// --- 3. Наведение бьющей руки: доворот на цель + кулак ровно до поверхности (упор, не насквозь) ---
+	if (!bAim)
+	{
+		PrevElbowBend[0] = PrevElbowBend[1] = FVector::ZeroVector; // S-74: метрика скачка — только внутри удара
+	}
 	if (bAim)
 	{
-		const FTransform UcS = CS(Pose, UpperArm[Arm]);
-		const FTransform LcS = CS(Pose, LowerArm[Arm]);
-		const FTransform HcS = CS(Pose, Hand[Arm]);
+		const FTransform UcS = BoxerFeelImpl::CS(Pose, UpperArm[Arm]);
+		const FTransform LcS = BoxerFeelImpl::CS(Pose, LowerArm[Arm]);
+		const FTransform HcS = BoxerFeelImpl::CS(Pose, Hand[Arm]);
 		const FVector S = UcS.GetLocation();
 		const FVector E = LcS.GetLocation();
 		const FVector H = HcS.GetLocation();
@@ -653,9 +768,21 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 			const FVector Goal = S + Dir * Len;
 
 			// Полюс — плоскость сгиба клипа (локоть); прямая рука — локоть вниз.
-			const FVector Mid = (S + H) * 0.5f;
-			FVector Pole = E - Mid;
-			Pole = Pole.SizeSquared() > 4.f ? E + Pole.GetSafeNormal() * 30.f : E - U * 30.f;
+			// S-74 (QA S-78 №10): у почти прямой руки сгиб клипа — шум, и полюс по нему переворачивал локоть на 115–174° за
+			// кадр в конце удара. Сгиб клипа берётся с весом по его величине (1 → 5 см отступа локтя от линии плечо–кисть) и
+			// не «внутрь/вверх»; остальное — устойчивое «вниз-наружу».
+			const FVector Dsh = (H - S).GetSafeNormal();
+			FVector ElbOff = (E - S) - Dsh * FVector::DotProduct(E - S, Dsh);
+			const float OffCm = static_cast<float>(ElbOff.Size());
+			const FVector Safe = (-U * 0.8f + (Arm == 0 ? L : Rt) * 0.6f).GetSafeNormal();
+			const FVector ClipDir = ElbOff.GetSafeNormal();
+			const float Rel = BoxerFeelImpl::Smooth(1.f, 5.f, OffCm) * BoxerFeelImpl::Smooth(-0.3f, 0.2f, static_cast<float>(FVector::DotProduct(ClipDir, Safe)));
+			FVector PoleDir = (Safe * (1.f - Rel) + ClipDir * Rel).GetSafeNormal();
+			if (PoleDir.IsNearlyZero())
+			{
+				PoleDir = Safe;
+			}
+			FVector Pole = E + PoleDir * 30.f;
 			// Хук: локоть сзади кулака по ходу удара (предплечье поперёк), чуть ниже; апперкот — локоть под кулаком.
 			if (Frame.PunchKind == 1)
 			{
@@ -673,21 +800,40 @@ void FBoxerPoseFx::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 			const FQuat Ql = FQuat::FindBetweenNormals(Qu.RotateVector(H - E).GetSafeNormal(), (NewH - NewE).GetSafeNormal());
 			const FQuat NewL = (Ql * Qu * LcS.GetRotation()).GetNormalized();
 			// Локальные: кость = Parent_CS⁻¹ · CS. Кисть наследует (локальная не меняется).
-			Pose[UpperArm[Arm]].SetRotation((ParentRotCS(Pose, UpperArm[Arm]).Inverse() * NewU).GetNormalized());
-			Pose[LowerArm[Arm]].SetRotation((ParentRotCS(Pose, LowerArm[Arm]).Inverse() * NewL).GetNormalized());
+			Pose[UpperArm[Arm]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, UpperArm[Arm]).Inverse() * NewU).GetNormalized());
+			Pose[LowerArm[Arm]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, LowerArm[Arm]).Inverse() * NewL).GetNormalized());
 
 			if (OutDebug)
 			{
-				const FVector HandNow = CS(Pose, Hand[Arm]).GetLocation();
+				const FVector HandNow = BoxerFeelImpl::CS(Pose, Hand[Arm]).GetLocation();
 				OutDebug->FistGapCm = FVector::DotProduct(Th - HandNow, Approach);
 				OutDebug->LungeCm = Lunge;
 				OutDebug->AimW = Frame.AimWeight;
 				OutDebug->ReachW = Frame.ReachWeight;
 				OutDebug->FistFront = CompToWorld.TransformPosition(HandNow + Dir * Frame.FistReachCm);
-				OutDebug->Elbow = CompToWorld.TransformPosition(CS(Pose, LowerArm[Arm]).GetLocation());
+				OutDebug->Elbow = CompToWorld.TransformPosition(BoxerFeelImpl::CS(Pose, LowerArm[Arm]).GetLocation());
+				// S-74: локоть после наведения — сгиб от сгиба клипа (переворот локтя) и вверх ли он смотрит.
+				const FVector Cb = BoxerFeel::BendOf(S, E, H, 4.f); // сгиб клипа — только заметный (почти прямая рука — шум)
+				const FVector Nb = BoxerFeel::BendOf(S, BoxerFeelImpl::CS(Pose, LowerArm[Arm]).GetLocation(), HandNow);
+				// Скачок сгиба за кадр (переворот локтя): прошлый кадр этой руки в том же ударе.
+				OutDebug->ElbowJumpDeg = KNEE_DEG_NONE;
+				if (!Nb.IsNearlyZero() && !PrevElbowBend[Arm].IsNearlyZero())
+				{
+					OutDebug->ElbowJumpDeg = FMath::RadiansToDegrees(FMath::Acos(FMath::Clamp(static_cast<float>(FVector::DotProduct(Nb, PrevElbowBend[Arm])), -1.f, 1.f)));
+				}
+				PrevElbowBend[Arm] = Nb;
+				PrevElbowBend[1 - Arm] = FVector::ZeroVector;
+				bool bOk = false;
+				const float A = (!Cb.IsNearlyZero() && !Nb.IsNearlyZero()) ? BoxerFeel::BendAngle(HandNow - S, Nb, Cb, bOk) : 0.f;
+				OutDebug->ElbowDeg = bOk ? FMath::RadiansToDegrees(A) : KNEE_DEG_NONE;
+				OutDebug->ElbowUp = static_cast<float>(FVector::DotProduct(Nb, U));
+				OutDebug->ElbowOut = static_cast<float>(FVector::DotProduct(Nb, Arm == 0 ? L : Rt));
+				OutDebug->ElbowKind = FMath::Clamp(Frame.PunchKind, 0, 2);
 			}
 		}
 	}
+	// --- 4. S-78: упор перчаток в его голову/шею/корпус (все руки), итоговое тело — сопернику (BoxerContact.cpp) ---
+	ApplyHandStop(Pose, Frame, CompToWorld, OutDebug);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -710,8 +856,8 @@ void FBoxerUpperMask::Resolve(const FBoneContainer& Bones, FName BlendRoot)
 	{
 		return;
 	}
-	const FCompactPoseBoneIndex ClavL = Find(Bones, TEXT("clavicle_l"));
-	const FCompactPoseBoneIndex ClavR = Find(Bones, TEXT("clavicle_r"));
+	const FCompactPoseBoneIndex ClavL = BoxerFeelImpl::Find(Bones, TEXT("clavicle_l"));
+	const FCompactPoseBoneIndex ClavR = BoxerFeelImpl::Find(Bones, TEXT("clavicle_r"));
 	// Родитель в компактной позе всегда раньше ребёнка — один проход сверху вниз.
 	for (int32 I = 0; I < Num; ++I)
 	{
@@ -735,7 +881,7 @@ void FBoxerUpperMask::Resolve(const FBoneContainer& Bones, FName BlendRoot)
 // S-70: ступни — планировщик BoxFoot + двухзвенная IK ног (порт plantFeet/legIk веба)
 // ---------------------------------------------------------------------------------------------
 
-namespace
+namespace BoxerFeelImpl
 {
 	// SkinnedFighter.tsx веба (м, рад, с) — 1:1.
 	constexpr float FOOT_STEP_LEAD = 0.09f;   // упреждение точки стойки по скорости корпуса (с)
@@ -761,6 +907,7 @@ namespace
 	constexpr float FOOT_STANCE_CROUCH = 0.06f; // м: таз ниже, чем у позы GASP (она «стоя») — колени согнуты
 	constexpr float FOOT_STANCE_LEAD_YAW = 0.45f;
 	constexpr float FOOT_STANCE_REAR_YAW = 0.95f;
+	constexpr float FOOT_LUNGE_ABSORB_K = 1.8f; // S-74: множитель порогов поглощения выпада (FootPlant LEAD/REAR_ABSORB)
 	constexpr float FOOT_HIP_BLADE = 0.35f; // таз боком (рад, + — вправо): корпус (spine_01 и выше) не трогаем
 	// Пивот ступни в ударе (рад веба, + — носок влево): задняя — на ударах правой, передняя — на левом хуке.
 	constexpr float TWIST_LEAD[4] = {0.f, 0.f, -0.45f, -0.2f}; // джеб, кросс, хук, апперкот
@@ -790,15 +937,43 @@ void FBoxerFootIk::Resolve(const FBoneContainer& Bones)
 	}
 	Serial = Bones.GetSerialNumber();
 	ContainerPtr = &Bones;
-	Pelvis = Find(Bones, TEXT("pelvis"));
-	Spine1 = Find(Bones, TEXT("spine_01"));
+	Pelvis = BoxerFeelImpl::Find(Bones, TEXT("pelvis"));
+	Spine1 = BoxerFeelImpl::Find(Bones, TEXT("spine_01"));
 	const TCHAR* Sfx[2] = {TEXT("_l"), TEXT("_r")};
 	for (int32 S = 0; S < 2; ++S)
 	{
-		Thigh[S] = Find(Bones, *(FString(TEXT("thigh")) + Sfx[S]));
-		Calf[S] = Find(Bones, *(FString(TEXT("calf")) + Sfx[S]));
-		Foot[S] = Find(Bones, *(FString(TEXT("foot")) + Sfx[S]));
-		Ball[S] = Find(Bones, *(FString(TEXT("ball")) + Sfx[S]));
+		Thigh[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("thigh")) + Sfx[S]));
+		Calf[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("calf")) + Sfx[S]));
+		Foot[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("foot")) + Sfx[S]));
+		Ball[S] = BoxerFeelImpl::Find(Bones, *(FString(TEXT("ball")) + Sfx[S]));
+	}
+	// S-74: ось коленной чашечки в осях бедра — из позы привязки: «вперёд» ступни (щиколотка → подушечка) поперёк бедра.
+	bKneeAxis = false;
+	auto RefCS = [&Bones](FCompactPoseBoneIndex I)
+	{
+		FTransform T = Bones.GetRefPoseTransform(I);
+		for (FCompactPoseBoneIndex P = Bones.GetParentBoneIndex(I); P.GetInt() != INDEX_NONE; P = Bones.GetParentBoneIndex(P))
+		{
+			T = T * Bones.GetRefPoseTransform(P);
+		}
+		return T;
+	};
+	if (BoxerFeelImpl::Ok(Thigh[0]) && BoxerFeelImpl::Ok(Thigh[1]) && BoxerFeelImpl::Ok(Calf[0]) && BoxerFeelImpl::Ok(Calf[1]) && BoxerFeelImpl::Ok(Foot[0]) && BoxerFeelImpl::Ok(Foot[1]) && BoxerFeelImpl::Ok(Ball[0]) && BoxerFeelImpl::Ok(Ball[1]))
+	{
+		bKneeAxis = true;
+		for (int32 S = 0; S < 2; ++S)
+		{
+			const FTransform Th = RefCS(Thigh[S]);
+			const FVector Ax = (RefCS(Calf[S]).GetLocation() - Th.GetLocation()).GetSafeNormal();
+			FVector Fw = RefCS(Ball[S]).GetLocation() - RefCS(Foot[S]).GetLocation();
+			Fw -= Ax * FVector::DotProduct(Fw, Ax);
+			if (Fw.SizeSquared() < 1.f)
+			{
+				bKneeAxis = false;
+				break;
+			}
+			KneeAxisLocal[S] = Th.GetRotation().UnrotateVector(Fw.GetSafeNormal());
+		}
 	}
 }
 
@@ -807,14 +982,14 @@ void FBoxerFootIk::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 	ApplyInner(Pose, Frame, C2W, Dt, OutDebug);
 	// Замер (-BoxFootLog): подушечки в мире ровно в этой оценке позы (тот же трансформ компонента, что у картинки).
 	++Seq;
-	if (OutDebug && Ok(Ball[0]) && Ok(Ball[1]))
+	if (OutDebug && BoxerFeelImpl::Ok(Ball[0]) && BoxerFeelImpl::Ok(Ball[1]))
 	{
 		OutDebug->bBallW = true;
 		OutDebug->EvalSeq = Seq;
 		OutDebug->EvalDt = Dt;
 		for (int32 S = 0; S < 2; ++S)
 		{
-			OutDebug->BallW[S] = C2W.TransformPosition(CS(Pose, Ball[S]).GetLocation());
+			OutDebug->BallW[S] = C2W.TransformPosition(BoxerFeelImpl::CS(Pose, Ball[S]).GetLocation());
 		}
 	}
 }
@@ -822,19 +997,22 @@ void FBoxerFootIk::Apply(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const
 void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, const FTransform& C2W, float Dt, FBoxerFeelDebug* OutDebug)
 {
 	Resolve(Pose.GetBoneContainer());
-	if (!Ok(Pelvis))
+	if (!BoxerFeelImpl::Ok(Pelvis))
 	{
 		return;
 	}
 	for (int32 S = 0; S < 2; ++S)
 	{
-		if (!Ok(Thigh[S]) || !Ok(Calf[S]) || !Ok(Foot[S]) || !Ok(Ball[S]))
+		if (!BoxerFeelImpl::Ok(Thigh[S]) || !BoxerFeelImpl::Ok(Calf[S]) || !BoxerFeelImpl::Ok(Foot[S]) || !BoxerFeelImpl::Ok(Ball[S]))
 		{
 			return;
 		}
 	}
 	Dt = FMath::Max(0.f, Dt);
 	const float DtS = FMath::Min(Dt, 0.1f); // сглаживание: длинный кадр не «перескакивает»
+	// S-74: защита колена от выворота (A/B: -BoxKneeGuard=0 — как в S-70).
+	static const bool bKneeGuardCfg = [] { int32 V = 1; FParse::Value(FCommandLine::Get(), TEXT("BoxKneeGuard="), V); return V != 0; }();
+	const bool bKneeGuard = bKneeGuardCfg;
 	const FVector UpCS = C2W.InverseTransformVectorNoScale(FVector::UpVector).GetSafeNormal();
 	const float Scale = FMath::Max(0.1f, static_cast<float>(C2W.GetScale3D().X));
 	const FQuat CQ = C2W.GetRotation();
@@ -844,12 +1022,12 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 	FQuat FootQCS[2];
 	for (int32 S = 0; S < 2; ++S)
 	{
-		const FTransform F = CS(Pose, Foot[S]);
+		const FTransform F = BoxerFeelImpl::CS(Pose, Foot[S]);
 		AnkCS[S] = F.GetLocation();
 		FootQCS[S] = F.GetRotation();
-		BallCS[S] = CS(Pose, Ball[S]).GetLocation();
+		BallCS[S] = BoxerFeelImpl::CS(Pose, Ball[S]).GetLocation();
 	}
-	const FVector PelCS = CS(Pose, Pelvis).GetLocation();
+	const FVector PelCS = BoxerFeelImpl::CS(Pose, Pelvis).GetLocation();
 	if (Frame.bFeetCalm && Dt > 0.f)
 	{
 		CalmTime += Dt;
@@ -868,7 +1046,7 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 	}
 
 	const bool bWant = Frame.bFeetOn && CalmTime >= FOOT_CALM_MIN;
-	IkW = SmoothTo(IkW, bWant ? 1.f : 0.f, bWant ? 6.f : 20.f, DtS);
+	IkW = BoxerFeelImpl::SmoothTo(IkW, bWant ? 1.f : 0.f, bWant ? 6.f : 20.f, DtS);
 	if (IkW < 0.02f)
 	{
 		// Лёжа / вставая / сидя — ноги клипа; встал — ступни заново встают в стойку (снимок без шагов).
@@ -883,8 +1061,8 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 
 	// --- 2. Точки стойки в мире ---
 	const FVector BodyW = C2W.GetLocation();
-	const FVector Fwd = FlatN(Frame.Fwd);
-	const FVector Right = FlatN(Frame.Right);
+	const FVector Fwd = BoxerFeelImpl::FlatN(Frame.Fwd);
+	const FVector Right = BoxerFeelImpl::FlatN(Frame.Right);
 	const float BodyYaw = FMath::Atan2(Fwd.Y, Fwd.X);
 	const float Rs = FMath::Max(0.5f, Frame.FeetScale);
 	FVector StAnkW[2], StBallW[2];
@@ -936,7 +1114,7 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 		}
 	}
 
-	WalkMix = SmoothTo(WalkMix, Frame.bFeetWalking ? 1.f : 0.f, 8.f, DtS);
+	WalkMix = BoxerFeelImpl::SmoothTo(WalkMix, Frame.bFeetWalking ? 1.f : 0.f, 8.f, DtS);
 	const float Wm = WalkMix;
 	const bool bWalking = Frame.bFeetWalking;
 	const float CrouchCm = Frame.bFeetPoseStance ? 0.f : FOOT_STANCE_CROUCH * Rs * 100.f * (1.f - Wm); // колени согнуты: таз ниже позы GASP (мир, см)
@@ -960,14 +1138,18 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 	const bool bPeak = OutDebug && OutDebug->bLungePeak && Frame.bFeetPunch && Frame.FeetPunchPhase < 0.5f;
 	const FVector PeakW = bPeak ? C2W.TransformVector(OutDebug->LungePeakCS) / 100.f : FVector::ZeroVector;
 	BoxFoot::FGaitOpts O;
+	// S-74: поглощение выпада коленом/пяткой — на FOOT_LUNGE_ABSORB_K больше, чем в вебе (A/B: -BoxLungeAbsorb=1): у UE
+	// наклон корпуса и подшаг крупнее, выпад-шаг «в пик и обратно» давал 2–4 лишних переноса на шаг ядра.
+	static const float AbsorbK = [] { float V = FOOT_LUNGE_ABSORB_K; FParse::Value(FCommandLine::Get(), TEXT("BoxLungeAbsorb="), V); return FMath::Clamp(V, 0.5f, 3.f); }();
+	const float RsA = Rs * AbsorbK;
 	for (int32 I = 0; I < 2; ++I)
 	{
 		BoxFoot::FV2 St, Sl;
-		BoxFoot::SplitLunge(I, LX, LY, Rs, St, Sl);
+		BoxFoot::SplitLunge(I, LX, LY, RsA, St, Sl);
 		if (bPeak)
 		{
 			BoxFoot::FV2 Pk, PkSl;
-			BoxFoot::SplitLunge(I, FVector::DotProduct(PeakW, Fwd), FVector::DotProduct(PeakW, Right), Rs, Pk, PkSl);
+			BoxFoot::SplitLunge(I, FVector::DotProduct(PeakW, Fwd), FVector::DotProduct(PeakW, Right), RsA, Pk, PkSl);
 			if (Pk.Len() > St.Len())
 			{
 				St = Pk;
@@ -1009,8 +1191,8 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 	for (int32 I = 0; I < 2; ++I)
 	{
 		const int32 S = SideOf[I];
-		const FVector H = CS(Pose, Thigh[S]).GetLocation();
-		const FVector K = CS(Pose, Calf[S]).GetLocation();
+		const FVector H = BoxerFeelImpl::CS(Pose, Thigh[S]).GetLocation();
+		const FVector K = BoxerFeelImpl::CS(Pose, Calf[S]).GetLocation();
 		LegLen[I] = FVector::Dist(H, K) + FVector::Dist(K, AnkCS[S]);
 		const BoxFoot::FFootNow F = BoxFoot::FootNow(Gait.Feet[I]);
 		const FVector T = C2W.InverseTransformPosition(FVector(F.X * 100.f, F.Y * 100.f, StAnkW[S].Z));
@@ -1042,13 +1224,13 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 	// Таз боком (боксёрская стойка): поворот таза вокруг вертикали; корпус (spine_01 и выше) остаётся, где был.
 	{
 		const float Blade = Frame.bFeetPoseStance ? 0.f : FOOT_HIP_BLADE * Mirror * (1.f - Wm) * IkW;
-		if (Ok(Spine1) && FMath::Abs(Blade) > 1e-4f)
+		if (BoxerFeelImpl::Ok(Spine1) && FMath::Abs(Blade) > 1e-4f)
 		{
-			const FTransform PelOld = CS(Pose, Pelvis);
-			const FTransform SpOld = CS(Pose, Spine1);
+			const FTransform PelOld = BoxerFeelImpl::CS(Pose, Pelvis);
+			const FTransform SpOld = BoxerFeelImpl::CS(Pose, Spine1);
 			const FQuat NewPelQ = (FQuat(UpCS, Blade) * PelOld.GetRotation()).GetNormalized();
-			Pose[Pelvis].SetRotation((ParentRotCS(Pose, Pelvis).Inverse() * NewPelQ).GetNormalized());
-			FTransform SpLocal = SpOld.GetRelativeTransform(CS(Pose, Pelvis));
+			Pose[Pelvis].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, Pelvis).Inverse() * NewPelQ).GetNormalized());
+			FTransform SpLocal = SpOld.GetRelativeTransform(BoxerFeelImpl::CS(Pose, Pelvis));
 			SpLocal.SetScale3D(Pose[Spine1].GetScale3D());
 			Pose[Spine1] = SpLocal;
 		}
@@ -1076,9 +1258,9 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 		WX *= FOOT_WEIGHT_SHIFT_MAX / WL;
 		WY *= FOOT_WEIGHT_SHIFT_MAX / WL;
 	}
-	WsX = SmoothTo(WsX, WX, 14.f, DtS);
-	WsY = SmoothTo(WsY, WY, 14.f, DtS);
-	Dip = SmoothTo(Dip, DipT * FOOT_STEP_DIP * Rs, 18.f, DtS);
+	WsX = BoxerFeelImpl::SmoothTo(WsX, WX, 14.f, DtS);
+	WsY = BoxerFeelImpl::SmoothTo(WsY, WY, 14.f, DtS);
+	Dip = BoxerFeelImpl::SmoothTo(Dip, DipT * FOOT_STEP_DIP * Rs, 18.f, DtS);
 	FVector PelOffW(WsX * 100.f * IkW, WsY * 100.f * IkW, -CrouchCm * IkW);
 
 	// Нога не дотягивается до стоящей ступни: пятка встаёт (носок на настиле), остаток — таз чуть ниже.
@@ -1091,7 +1273,7 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 		float Lack = 0.f;
 		if (Now[I].U < 0.f)
 		{
-			const FVector H = CS(Pose, Thigh[S]).GetLocation() + OffCS0;
+			const FVector H = BoxerFeelImpl::CS(Pose, Thigh[S]).GetLocation() + OffCS0;
 			const FVector T = C2W.InverseTransformPosition(FVector(Now[I].X * 100.f, Now[I].Y * 100.f, StAnkW[S].Z));
 			const FVector D = T - H;
 			const float Up = FVector::DotProduct(-D, UpCS);
@@ -1100,16 +1282,16 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 			Lack = FMath::Max(0.f, Up - FMath::Sqrt(FMath::Max(0.f, Reach * Reach - Hor * Hor)));
 		}
 		const float Heel = FMath::Asin(FMath::Min(FMath::Sin(FOOT_REACH_HEEL_MAX), Lack / FMath::Max(1e-3f, ToeLenCS)));
-		ReachHeel[I] = SmoothTo(ReachHeel[I], Heel, Heel > ReachHeel[I] ? 60.f : 10.f, DtS);
+		ReachHeel[I] = BoxerFeelImpl::SmoothTo(ReachHeel[I], Heel, Heel > ReachHeel[I] ? 60.f : 10.f, DtS);
 		Need = FMath::Max(Need, Lack - ToeLenCS * FMath::Sin(Heel));
 	}
 	const float Drop = FMath::Min(FOOT_HIP_DROP_MAX * Rs, Need * Scale / 100.f);
-	HipDrop = SmoothTo(HipDrop, Drop, Drop > HipDrop ? 45.f : 8.f, DtS);
+	HipDrop = BoxerFeelImpl::SmoothTo(HipDrop, Drop, Drop > HipDrop ? 45.f : 8.f, DtS);
 	PelOffW.Z -= (HipDrop + Dip) * 100.f * IkW;
 	const FVector OffCS = C2W.InverseTransformVector(PelOffW);
 	if (!OffCS.IsNearlyZero(0.01f))
 	{
-		Pose[Pelvis].AddToTranslation(ParentRotCS(Pose, Pelvis).UnrotateVector(OffCS));
+		Pose[Pelvis].AddToTranslation(BoxerFeelImpl::ParentRotCS(Pose, Pelvis).UnrotateVector(OffCS));
 	}
 
 	// Не хватило и этого (корпус резко ушёл от стоящей ступни): ступня подтягивается по настилу (волоком), не быстрее DRAG_V.
@@ -1121,7 +1303,7 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 			continue;
 		}
 		const int32 S = SideOf[I];
-		const FVector H = CS(Pose, Thigh[S]).GetLocation();
+		const FVector H = BoxerFeelImpl::CS(Pose, Thigh[S]).GetLocation();
 		const FVector T = C2W.InverseTransformPosition(FVector(F.X * 100.f, F.Y * 100.f, StAnkW[S].Z));
 		const FVector D = T - H;
 		const float Up = FVector::DotProduct(-D, UpCS) - ToeLenCS * FMath::Sin(ReachHeel[I]);
@@ -1155,7 +1337,7 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 		}
 		for (int32 I = 0; I < 2; ++I)
 		{
-			Twist[I] = SmoothTo(Twist[I], Tw[I], 24.f, DtS);
+			Twist[I] = BoxerFeelImpl::SmoothTo(Twist[I], Tw[I], 24.f, DtS);
 		}
 	}
 
@@ -1181,11 +1363,11 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 		TW.Z += A * Sh - B * (1.f - Ch);
 		TW += FyDir * (A * (1.f - Ch) + B * Sh);
 
-		const FTransform ThCS = CS(Pose, Thigh[S]);
-		const FTransform CaCS = CS(Pose, Calf[S]);
+		const FTransform ThCS = BoxerFeelImpl::CS(Pose, Thigh[S]);
+		const FTransform CaCS = BoxerFeelImpl::CS(Pose, Calf[S]);
 		const FVector Hip = ThCS.GetLocation();
 		const FVector Knee = CaCS.GetLocation();
-		const FVector Ank = CS(Pose, Foot[S]).GetLocation();
+		const FVector Ank = BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation();
 		const FVector Goal = FMath::Lerp(Ank, C2W.InverseTransformPosition(TW), IkW);
 		const float L1 = FVector::Dist(Hip, Knee);
 		const float L2 = FVector::Dist(Knee, Ank);
@@ -1195,25 +1377,55 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 			continue;
 		}
 		D.Normalize();
-		// Плоскость сгиба: колено клипа (отступ от линии бедро→цель) + курс ступни (колено над носком).
-		const FVector V1 = Knee - Hip;
-		FVector N = V1 - D * FVector::DotProduct(V1, D);
-		const float Bent = FMath::Min(1.f, static_cast<float>(N.Size()) / (0.04f * (L1 + L2))) * 0.6f * (1.f - Wm);
-		N = N.GetSafeNormal() * Bent;
-		FVector FF = C2W.InverseTransformVectorNoScale(FyDir);
-		FF -= D * FVector::DotProduct(FF, D);
-		N += FF.GetSafeNormal() * (1.f - Bent);
-		N -= D * FVector::DotProduct(N, D);
-		N = N.GetSafeNormal();
+		// Плоскость сгиба: колено клипа (отступ от линии бедро→цель) + курс ступни (колено над носком). S-74: колено клипа,
+		// смотрящее назад от носка (клип хода GASP назад заносит ногу, а ступня стоит), не в счёт; итог — не дальше 35° от
+		// курса ступни (колено «разворачивалось в другую сторону» при шаге назад).
+		const FVector FootFwdCS = C2W.InverseTransformVectorNoScale(FyDir);
+		FVector Inward = BoxerFeelImpl::CS(Pose, Thigh[1 - S]).GetLocation() - Hip;
+		Inward -= UpCS * FVector::DotProduct(Inward, UpCS);
+		const FVector N = BoxerFeel::KneeBendDir(Hip, Knee, Goal, FootFwdCS, L1, L2, 1.f - Wm, bKneeGuard, 0.61f, Inward.GetSafeNormal());
+		if (OutDebug)
+		{
+			bool bOk = false;
+			const FVector Cb = BoxerFeel::BendOf(Hip, Knee, Ank);
+			const float Ca = Cb.IsNearlyZero() ? 0.f : BoxerFeel::BendAngle(Ank - Hip, Cb, FootFwdCS, bOk);
+			OutDebug->ClipKneeDeg[S] = bOk ? FMath::RadiansToDegrees(Ca) : KNEE_DEG_NONE;
+		}
 		const FVector Pole = (Hip + Goal) * 0.5f + N * 50.f;
 		FVector NewK, NewA;
 		AnimationCore::SolveTwoBoneIK(Hip, Knee, Ank, Pole, Goal, NewK, NewA, L1, L2, false, 1.0, 1.0);
-		const FQuat Qu = FQuat::FindBetweenNormals((Knee - Hip).GetSafeNormal(), (NewK - Hip).GetSafeNormal());
+		FQuat Qu = FQuat::FindBetweenNormals((Knee - Hip).GetSafeNormal(), (NewK - Hip).GetSafeNormal());
+		// S-74: бедро довернуть вокруг своей оси — коленная чашечка (ось из позы привязки: «вперёд» ступни) в плоскость
+		// сгиба. Иначе кратчайший поворот бедра оставлял чашечку там, где её держал клип, и колено гнулось вбок/назад.
+		const FVector ThAxis = (NewK - Hip).GetSafeNormal();
+		if (bKneeGuard && bKneeAxis && !ThAxis.IsNearlyZero())
+		{
+			bool bOk = false;
+			const FVector Cap = (Qu * ThCS.GetRotation()).RotateVector(KneeAxisLocal[S]);
+			const float CapTw = BoxerFeel::BendAngle(ThAxis, N, Cap, bOk);
+			if (bOk)
+			{
+				Qu = (FQuat(ThAxis, CapTw * IkW) * Qu).GetNormalized();
+			}
+		}
 		const FQuat NewTh = (Qu * ThCS.GetRotation()).GetNormalized();
 		const FQuat Ql = FQuat::FindBetweenNormals(Qu.RotateVector(Ank - Knee).GetSafeNormal(), (NewA - NewK).GetSafeNormal());
 		const FQuat NewCa = (Ql * Qu * CaCS.GetRotation()).GetNormalized();
-		Pose[Thigh[S]].SetRotation((ParentRotCS(Pose, Thigh[S]).Inverse() * NewTh).GetNormalized());
-		Pose[Calf[S]].SetRotation((ParentRotCS(Pose, Calf[S]).Inverse() * NewCa).GetNormalized());
+		Pose[Thigh[S]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, Thigh[S]).Inverse() * NewTh).GetNormalized());
+		Pose[Calf[S]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, Calf[S]).Inverse() * NewCa).GetNormalized());
+		if (OutDebug)
+		{
+			// S-74: колено после IK — куда согнуто относительно носка и куда смотрит чашечка относительно сгиба.
+			const FVector K2 = BoxerFeelImpl::CS(Pose, Calf[S]).GetLocation();
+			const FVector A2 = BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation();
+			const FVector Bd = BoxerFeel::BendOf(Hip, K2, A2);
+			bool bOk = false;
+			const float Dev = Bd.IsNearlyZero() ? 0.f : BoxerFeel::BendAngle(A2 - Hip, Bd, FootFwdCS, bOk);
+			OutDebug->KneeDeg[S] = bOk ? FMath::RadiansToDegrees(Dev) : KNEE_DEG_NONE;
+			bool bOk2 = false;
+			const float Cap = (bKneeAxis && !Bd.IsNearlyZero()) ? BoxerFeel::BendAngle(K2 - Hip, Bd, NewTh.RotateVector(KneeAxisLocal[S]), bOk2) : 0.f;
+			OutDebug->KneecapDeg[S] = bOk2 ? FMath::RadiansToDegrees(Cap) : KNEE_DEG_NONE;
+		}
 
 		// Ступня: стойка, довёрнутая на курс планировщика, и подъём пятки (носок вниз вокруг поперечной оси).
 		FQuat Qw = FQuat(FVector::UpVector, BoxFoot::WrapAngle(Fy - StYaw[S])) * (CQ * StFootQ[S]);
@@ -1223,15 +1435,29 @@ void FBoxerFootIk::ApplyInner(FCompactPose& Pose, const FBoxerFeelFrame& Frame, 
 			Qw = FQuat(HeelAxisW, Heel) * Qw;
 		}
 		const FQuat QcsT = (CQ.Inverse() * Qw).GetNormalized();
-		const FQuat Qcur = CS(Pose, Foot[S]).GetRotation();
+		const FQuat Qcur = BoxerFeelImpl::CS(Pose, Foot[S]).GetRotation();
 		const FQuat Qnew = FQuat::Slerp(Qcur, QcsT, IkW).GetNormalized();
-		Pose[Foot[S]].SetRotation((ParentRotCS(Pose, Foot[S]).Inverse() * Qnew).GetNormalized());
-		if (OutDebug) { OutDebug->FootErrCm[S] = FVector::Dist(C2W.TransformPosition(CS(Pose, Foot[S]).GetLocation()), TW); }
+		Pose[Foot[S]].SetRotation((BoxerFeelImpl::ParentRotCS(Pose, Foot[S]).Inverse() * Qnew).GetNormalized());
+		if (OutDebug) { OutDebug->FootErrCm[S] = FVector::Dist(C2W.TransformPosition(BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation()), TW); }
 		// Пальцы — обратно в настил: подушечка стоит, пятка поднята.
 		if (FMath::Abs(Heel) > 1e-4f)
 		{
 			const FVector AxisCS = CQ.Inverse().RotateVector(HeelAxisW);
-			RotateCS(Pose, Ball[S], FQuat(AxisCS, -Heel * IkW));
+			BoxerFeelImpl::RotateCS(Pose, Ball[S], FQuat(AxisCS, -Heel * IkW));
+		}
+		// S-74 (QA S-78 №12): подушечка не под настилом — ниже настила (уровень подушечек стойки) — носок вверх вокруг щиколотки.
+		{
+			const float FloorZ = static_cast<float>(FMath::Min(StBallW[0].Z, StBallW[1].Z));
+			const FVector BallNow = C2W.TransformPosition(BoxerFeelImpl::CS(Pose, Ball[S]).GetLocation());
+			const FVector AnkNow = C2W.TransformPosition(BoxerFeelImpl::CS(Pose, Foot[S]).GetLocation());
+			const float Under = FloorZ - static_cast<float>(BallNow.Z);
+			const float Arm = static_cast<float>(FVector::Dist(BallNow, AnkNow));
+			if (Under > 0.3f && Arm > 3.f && IkW > 0.f)
+			{
+				const FVector AxisW = FVector::CrossProduct(FVector::UpVector, (BallNow - AnkNow).GetSafeNormal2D()).GetSafeNormal();
+				const float Lift = FMath::Asin(FMath::Min(1.f, Under / Arm)) * IkW;
+				BoxerFeelImpl::RotateCS(Pose, Foot[S], FQuat(CQ.Inverse().RotateVector(AxisW), -Lift));
+			}
 		}
 	}
 

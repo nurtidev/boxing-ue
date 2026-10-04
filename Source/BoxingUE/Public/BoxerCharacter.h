@@ -22,6 +22,7 @@
 #include "BoxerFeel.h"
 #include "BoxerAnimInstances.h"
 #include "BoxerFall.h"
+#include "FaceFx.h"
 #include "BoxerCharacter.generated.h"
 
 class UAnimMontage;
@@ -451,6 +452,13 @@ public:
 	// Кадр позы для анимпотока видимого меша.
 	FBoxerSitFrame GetSitFrame() const;
 
+	// ---------- S-74: мимика и повреждения лица (FaceFx.h, реализация — FaceFx.cpp) ----------
+	FBoxerFaceCurves GetFaceCurves() const { return FaceCurves; }
+	const FBoxerFaceDamage& GetFaceDamage() const { return FaceFx.Damage; }
+	const FBoxerFaceFx& GetFaceFx() const { return FaceFx; }
+	// Автопроверка: материалы лица целы (не серые, текстура на месте, overlay скомпилирован). OutWhy — пояснение.
+	bool CheckFaceMaterials(FString& OutWhy) const;
+
 	// ---------- Падение внутри канатов (S-62, BoxerFall.h) ----------
 	// Лежит на настиле: клип падения дошёл до касания таза (а не «ещё стоит согнувшись») — для баннера HUD.
 	bool IsFloored() const;
@@ -553,6 +561,14 @@ private:
 		int32 Why[6] = {0, 0, 0, 0, 0, 0};
 		int32 Ctx[5] = {0, 0, 0, 0, 0};
 		int32 ShotsTaken = 0;          // -BoxFootShots
+		// S-74: колени по виду хода (0 — стоит, 1 — вперёд, 2 — назад, 3 — вбок): после IK, у клипа до IK; чашечка; локоть.
+		FBoxerJointStat Knee[4];
+		FBoxerJointStat ClipKnee[4];
+		FBoxerJointStat Kneecap;
+		FBoxerJointStat Elbow[3];      // по виду удара: прямой, хук, апперкот (сгиб после наведения от сгиба клипа)
+		int32 ElbowUpFrames = 0;       // локоть бьющей руки смотрит вверх (> 0.7)
+		int32 ElbowInFrames = 0;       // локоть внутрь, к другой руке (< −0.7)
+		FBoxerJointStat ElbowJump;     // скачок сгиба локтя за кадр (> 90° — переворот)
 		float VerboseT = 0.f;          // -BoxFootVerbose=С
 		// Кадры подушечек для геометрической опоры (классификация в конце: пол — 2-й перцентиль высоты).
 		struct FSample
@@ -644,6 +660,16 @@ private:
 
 	FBoxerReactionRig React;
 	FBoxerFeelFrame Feel;
+	// S-75: защита читается — руки блока (плотный блок, удар в блок, пробит), контр-окно после удачного уклона (мир, с;
+	// ядро держит 0.62 с — COUNTER_WINDOW), удар, начатый в окне, — контра (наведение «быстрее»).
+	FBoxerGuardState GuardFx;
+	double CounterOpenUntil = -1.0;
+	bool bCounterPunch = false;
+	// S-76/S-75: клинч ядра (сцепка до «Брейк!») и вес позы сцепки (набирается 0.2 с, отпускает 0.25 с).
+	bool bClinchHold = false;
+	float ClinchW = 0.f;
+	// S-78: тело соперника (голова/корпус, прошлый кадр анимпотока) — раздвижка голов и упор кулаков (BoxerContact.cpp).
+	FBoxerBodyTrack BodyTrack;
 	// Повтор нокаута (S-54).
 	bool bReplayDriven = false;
 	TArray<FTransform> ReplayBones;
@@ -689,5 +715,24 @@ private:
 	FVector2D FallOffsetNow = FVector2D::ZeroVector;
 	float FallTurnNow = 0.f;
 	FBoxerSitState Sit; // S-71
+	// S-74: мимика/повреждения лица (FaceFx.cpp).
+	FBoxerFaceFx FaceFx;
+	FBoxerFaceMap FaceMap;
+	FBoxerFaceCurves FaceCurves;
+	bool bFaceSat = false;
+	float FaceLogT = 0.f;
+	TWeakObjectPtr<class UMaterialInstanceDynamic> FaceDamageMid;
+	bool bFaceDamageTried = false;
+	bool FaceDamageBroken = false;
+	float FaceCheckT = 0.f;
+	int32 FaceCheckFails = 0, FaceChecks = 0;
+	FVector FaceSpotPos[8];
+	int32 FaceHeadBone = INDEX_NONE;
+	FQuat FaceHeadRefQ = FQuat::Identity;
+	float FaceSpotSum = -1.f;
+	void UpdateFace(float DeltaSeconds);
+	void FaceOnHit(EBoxPunchType Punch, EBoxPunchTarget Target, float Magnitude, bool bBlocked);
+	void FaceOnKnockdown();
+	void UpdateFaceMaterials();
 	float FallMaxOutCm = -1e6f; // отладка (-BoxFallLog): кости тела за канатами
 };

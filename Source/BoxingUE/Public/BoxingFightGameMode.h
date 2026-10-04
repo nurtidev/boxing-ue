@@ -28,6 +28,7 @@
 #include "BoxingFightGameMode.generated.h"
 
 class ABoxerCharacter;
+class UMaterialParameterCollection;
 
 UCLASS()
 class BOXINGUE_API ABoxingFightGameMode : public AGameModeBase
@@ -180,6 +181,16 @@ protected:
 	virtual void Tick(float DeltaSeconds) override;
 
 private:
+	// Реакция зала (S-77): параметр Excite в MPC_Crowd, 0 — сидят, 1 — встают.
+	void CrowdPeak(float Level, float HoldSeconds);
+	void UpdateCrowd(float DeltaSeconds);
+	UPROPERTY(Transient)
+	TObjectPtr<UMaterialParameterCollection> CrowdMpc;
+	float CrowdExcite = 0.f;
+	float CrowdTarget = 0.f;
+	float CrowdHold = 0.f;
+	float CrowdSent = -1.f;
+
 	void ReadCommandLine();
 	void LocateRing();
 	void StartFight();

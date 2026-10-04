@@ -198,6 +198,63 @@ namespace BoxingFightConst
 	// ---------- hud.ts ----------
 	constexpr double POSE_CONTACT = 0.5;
 
+	// ---------- S-76: почерк стиля ИИ против ЧЕЛОВЕКА (НЕТ в вебе — осознанное отличие UE, Docs/FIGHT_CORE_PORT.md) ----------
+	// В вебе стиль против человека отличался лишь темпом, миксом ударов и дистанцией: прессинг/панчер «ждали» удары по одному
+	// с телеграфом 0.56–0.66 с, и средний бот их обыгрывал. Здесь стиль — ещё и как ИИ строит атаку: серии (связки с короткой
+	// паузой, рука чередуется), ответ на удар человека, ответ после своей защиты (с бонусом контры), «ударь-уйди», стоп-джеб
+	// навстречу шагу, погоня. Всё — только при человеке в бою: в автопилоте прежний AiThink (паритет с вебом бит-в-бит).
+	struct FStyleVsHuman
+	{
+		int32 SeriesMin, SeriesMax; // длина серии (ударов)
+		double SeriesGap;           // пауза между ударами серии (после конца предыдущего), с
+		double TempoMul;            // интервал между сериями: базовый интервал стиля × длина серии × TempoMul
+		double BodySeries;          // доля ударов в корпус со 2-го удара серии
+		double Answer;              // шанс ответить на удар человека сразу после его удара (рука ещё не вернулась)
+		bool bDefCounter;           // принял удар в блок — ответ с бонусом контры (как после удачного нырка)
+		double JabProbe;            // «прощупывание» без открытия: джеб ×JabProbe, силовые ×1/JabProbe (панчер: ищет момент)
+		double OpenPower;           // открылся соперник (провалился/встряхнут/у канатов/выдохся) — силовые ×OpenPower
+		bool bHitAndMove;           // после серии — шаг с линии (назад/вбок)
+		double StopJab;             // шанс встретить шаг человека вперёд джебом
+		double FootThink;           // темп решений ног против человека (×)
+		double GuardAdd;            // прибавка к реакции защитой против человека
+	};
+	// technical, volume, puncher, pressure, counter, speed, balanced
+	constexpr FStyleVsHuman VS_HUMAN[7] = {
+		{1, 3, 0.10, 1.20, 0.10, 0.20, false, 1.0, 1.0, true, 0.45, 0.9, 0.02},  // технарь: джеб-джеб-кросс, ударил — ушёл, стоп-джеб
+		{2, 4, 0.06, 0.88, 0.30, 0.15, false, 1.0, 1.2, false, 0.0, 0.8, 0.00},  // объёмник: длинные серии, голова-корпус, темп
+		{1, 2, 0.12, 1.15, 0.25, 0.40, true, 2.2, 2.5, false, 0.0, 1.0, 0.03},   // панчер: прощупывает джебом, на открытие — силовой
+		{2, 4, 0.08, 0.88, 0.35, 0.20, false, 1.0, 1.3, false, 0.0, 0.6, 0.00},   // прессинг: серии в корпус, режет ринг, погоня
+		{1, 2, 0.08, 1.95, 0.15, 0.40, true, 1.3, 1.6, false, 0.25, 1.0, 0.00}, // контровик: ждёт и наказывает
+		{2, 3, 0.04, 0.90, 0.08, 0.30, false, 1.0, 1.0, true, 0.35, 0.8, 0.02},   // скоростной: быстрые двойки-тройки, ушёл
+		{1, 3, 0.10, 0.92, 0.15, 0.25, false, 1.0, 1.2, false, 0.15, 1.0, 0.00},  // универсал
+	};
+	constexpr double ANSWER_DELAY = 0.03;     // ответ — через столько после конца удара человека
+	constexpr double DEF_COUNTER_DELAY = 0.06; // ответ после своего блока/нырка
+	constexpr double CHASE_GAP = 0.15;        // прессинг: соперник дальше своей дистанции на столько — сразу шаг вперёд
+	constexpr double HIT_ABORT = 1.0;         // ИИ поймал удар тяжелее — серия обрывается
+	constexpr double OPEN_GASSED = 0.2;      // соперник «открыт» по стамине — ниже этой доли (полупустой бак — обычное дело)
+	constexpr int32 AI_TURTLE_SERIES = 3;    // против «черепахи» — серия не короче трёх, почти все силовые, вплотную друг к другу
+	constexpr double AI_TURTLE_POWER = 0.9;
+	constexpr double AI_TURTLE_GAP = 0.05;
+	// Ответы (на удар, после защиты, стоп-джеб) — в счёт темпа: ИИ отвечает, только если до следующей серии по графику
+	// меньше ANSWER_BORROW с (берёт её раньше), иначе темп стиля рос бы с темпом человека.
+	constexpr double ANSWER_BORROW = 1.0;
+
+	// ---------- S-76: клинч (НЕТ в вебе) ----------
+	// Размен вплотную, где бьют ОБА, «вязнет»: копится ClinchHeat (пока дистанция ≤ CLINCH_DIST и оба били за CLINCH_BOTH с),
+	// тает вне размена; дошёл до CLINCH_HEAT — сцепка. Сцепка держится CLINCH_HOLD с (удары/ноги/уклоны недоступны, блок
+	// опущен), затем рефери «Брейк!» — оба расходятся до CLINCH_SEP за CLINCH_SEP_S с, бой продолжается. Без ГСЧ.
+	constexpr double CLINCH_DIST = 1.0;
+	constexpr double CLINCH_BOTH = 0.9;
+	constexpr double CLINCH_HEAT = 1.6;   // с размена вплотную
+	constexpr double CLINCH_COOL = 1.0;   // тает за секунду вне размена
+	constexpr double CLINCH_HOLD = 1.1;   // сцепка до команды рефери
+	constexpr double CLINCH_SEP = 1.35;   // разводит до такой дистанции
+	constexpr double CLINCH_SEP_S = 0.6;  // за столько секунд
+	constexpr double CLINCH_COOLDOWN = 4.0;
+	// Встряхнутый/выдохшийся ИИ сам виснет на человеке, если тот лезет вплотную и бьёт (выживание): вдвое быстрее «вязнет».
+	constexpr double CLINCH_HOLD_ON_K = 2.0;
+
 	// ---------- S-61: профи-правила (НЕТ в вебе — осознанное отличие UE, Docs/FIGHT_CORE_PORT.md) ----------
 	// Веб профи от любителей отличает только ничьей и проекцией статов: нокдаун там — от давления раунда simulate, и у
 	// близких по уровню пар досрочек нет вовсе (0 KO за 1400 бот-боёв UE). Профи без шлема и в малых перчатках — чистый
@@ -457,6 +514,11 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	bHasResult = false;
 	bCorners = Config.bCorners;
 	bGlassJaw = Config.bGlassJaw;
+	bClinchOn = Config.bClinch && (!bAi[0] || !bAi[1]); // S-76: только при человеке в бою
+	ClinchKind = 0;
+	ClinchBy = -1;
+	ClinchT = ClinchHeat = ClinchReadyAt = 0;
+	ClinchSep = CLINCH_SEP;
 	Stage = FStageState();
 	ResumeGap = DIST_START;
 	bHasLying = false;
@@ -486,6 +548,11 @@ void FBoxingFightCore::Init(const FFightConfig& Config)
 	bPro = Config.bProRules;
 	ProShotSev = 0;
 	for (int32 K = 0; K < 3; ++K) JudgeLean[K] = bPro ? Rng.Range(-PRO_JUDGE_LEAN, PRO_JUDGE_LEAN) : 0;
+	// Вариант судейства любителей (S-76, выкл. по умолчанию): вкус судей — из ГСЧ судей, только если вариант задан.
+	bAmVariant = !bPro && !bAllowDraw && (Config.AmJudgeClear > 0 || Config.AmJudgeNoise > 0 || Config.AmJudgeLean > 0);
+	AmClear = Config.AmJudgeClear > 0 ? Config.AmJudgeClear : CLEAR_MARGIN;
+	AmNoise = Config.AmJudgeNoise > 0 ? Config.AmJudgeNoise : 1.6;
+	for (int32 K = 0; K < MAX_JUDGES; ++K) AmLean[K] = (bAmVariant && Config.AmJudgeLean > 0) ? JudgeRng.Range(-Config.AmJudgeLean, Config.AmJudgeLean) : 0;
 }
 
 // ======================================================================
@@ -527,9 +594,10 @@ void FBoxingFightCore::Tick(float DtRaw)
 
 	TimeLeft -= Dt;
 	for (int32 I = 0; I < 2; ++I) UpdateFighter(I, Dt);
+	if (bClinchOn) UpdateClinch(Dt); // S-76: без ГСЧ; в автопилоте не зовётся
 	for (int32 I = 0; I < 2; ++I)
 	{
-		if (bAi[I]) AiThink(I);
+		if (bAi[I] && !InClinch()) AiThink(I);
 	}
 	ResolvePunches();
 
@@ -598,7 +666,10 @@ bool FBoxingFightCore::ApplyAction(int32 Fighter, EFightAction Action, EPunchTar
 	case EFightAction::BlockEnd: return HumanBlock(Fighter, false);
 	case EFightAction::SlipLeft: return HumanSlip(Fighter, -1);
 	case EFightAction::SlipRight: return HumanSlip(Fighter, 1);
-	case EFightAction::StepFwd: return Phase == EFightPhase::Fighting && StartStep(Fighter, EStepKind::Fwd);
+	case EFightAction::StepFwd:
+		if (Phase != EFightPhase::Fighting || !StartStep(Fighter, EStepKind::Fwd)) return false;
+		if (bAi[1 - Fighter]) AiStopJab(1 - Fighter); // S-76: технарь/контровик встречают шаг джебом
+		return true;
 	case EFightAction::StepBack: return Phase == EFightPhase::Fighting && StartStep(Fighter, EStepKind::Back);
 	case EFightAction::StepLeft: return Phase == EFightPhase::Fighting && StartStep(Fighter, EStepKind::Left);
 	case EFightAction::StepRight: return Phase == EFightPhase::Fighting && StartStep(Fighter, EStepKind::Right);
@@ -612,7 +683,7 @@ bool FBoxingFightCore::ApplyAction(int32 Fighter, EFightAction Action, EPunchTar
 bool FBoxingFightCore::HumanPunch(int32 I, EPunchKind Kind, EPunchArm Arm, EPunchTarget Target)
 {
 	FRuntime& Me = Rt[I];
-	if (Phase != EFightPhase::Fighting) return false;
+	if (Phase != EFightPhase::Fighting || InClinch()) return false;
 	if (Me.bBlocking || Me.bHasPunch || T < Me.StaggerUntil) return false;
 	// Пустой бак — удар не выходит («нет сил»); событие не чаще раза в GASSED_FLASH_S.
 	if (Me.Stamina < STAM_COST[KindIdx(Kind)] * PLAYER_STAM_K)
@@ -628,14 +699,18 @@ bool FBoxingFightCore::HumanPunch(int32 I, EPunchKind Kind, EPunchArm Arm, EPunc
 	Me.Recent.Add(Key);
 	if (Me.Recent.Num() > READ_MEMORY) Me.Recent.RemoveAt(0);
 	const int32 Foe = 1 - I;
-	if (bAi[Foe]) AiReactToPunch(Foe, I, Reps);
+	if (bAi[Foe])
+	{
+		AiReactToPunch(Foe, I, Reps);
+		AiAnswerHuman(Foe, I); // S-76: ответ сразу после удара человека (по стилю)
+	}
 	return true;
 }
 
 bool FBoxingFightCore::HumanSlip(int32 I, int32 Dir)
 {
 	FRuntime& Me = Rt[I];
-	if (Phase != EFightPhase::Fighting) return false;
+	if (Phase != EFightPhase::Fighting || InClinch()) return false;
 	if (Me.bBlocking || Me.bHasPunch || T < Me.StaggerUntil || T < Me.SlipReadyAt) return false;
 	Me.SlipUntil = T + SLIP_WINDOW;
 	Me.SlipStart = T;
@@ -695,6 +770,7 @@ void FBoxingFightCore::StartPunch(int32 I, EPunchKind Kind, bool bHasArm, EPunch
 	P.bEmpty = !bAi[I] && R.Stamina < Cost;
 	R.Punch = P;
 	R.bHasPunch = true;
+	R.LastPunchAt = T;
 	R.Stamina = FMath::Max(0.0, R.Stamina - Cost);
 	R.bBlocking = false;
 	R.BlockUntil = 0;
@@ -767,7 +843,11 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 	bool bGuardBreak = false;
 	if (Def.bBlocking)
 	{
-		if (BlockPunch(DefIdx, AttIdx, Punch, HpDmg)) return;
+		if (BlockPunch(DefIdx, AttIdx, Punch, HpDmg))
+		{
+			if (VsHuman(DefIdx)) AiDefended(DefIdx, false); // S-76: «ждёт и наказывает»
+			return;
+		}
 		bGuardBreak = true;
 		P = FMath::Min(0.95, P + GUARD_BREAK_ACC);
 	}
@@ -797,6 +877,7 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 		E.bCaught = bCaught;
 		if (bCounter) Att.CounterUntil = 0;
 		if (HpDmg > 2.2) Def.StaggerUntil = T + 0.28;
+		if (VsHuman(DefIdx) && HpDmg > HIT_ABORT) Def.SeriesLeft = 0; // S-76: поймал тяжёлый — серия сорвана
 		TryKnockdown(AttIdx, DefIdx, Punch.Kind, FormAtt,
 			(bBody ? BODY_KD : 1) * ArmPow * (0.6 + 0.4 * Rf) * (Punch.bEmpty ? EMPTY_POW : 1));
 		// Dev glassJaw: здоровье в ноль — падение неизбежно (и уже без подъёма).
@@ -819,7 +900,7 @@ void FBoxingFightCore::ResolveContact(int32 AttIdx, const FPunchAct& Punch)
 // ======================================================================
 void FBoxingFightCore::TryRaiseBlock(FRuntime& R)
 {
-	if (Phase != EFightPhase::Fighting || R.bHasPunch || T < R.StaggerUntil || T < R.BlockReadyAt) return;
+	if (Phase != EFightPhase::Fighting || InClinch() || R.bHasPunch || T < R.StaggerUntil || T < R.BlockReadyAt) return;
 	R.bBlocking = true;
 }
 
@@ -847,6 +928,7 @@ bool FBoxingFightCore::TrySlip(int32 AttIdx, EPunchKind Kind, EPunchArm Arm, boo
 		Att.WhiffTimes.RemoveAll([Now](const double& X) { return !(Now - X < AI_SHORT_MEMORY); });
 		Att.WhiffTimes.Add(T);
 		if (bAi[AttIdx] && Att.WhiffTimes.Num() >= AI_SHORT_AFTER) Att.ShortUntil = T + AI_SHORT_FOR;
+		if (VsHuman(DefIdx)) AiDefended(DefIdx, true); // S-76: увёл нырком — ответ
 		FFightEvent& E = PushEvent(EFightEventKind::Slipped, AttIdx, DefIdx, 0);
 		E.Punch = ToPublicPunch(Kind, Arm);
 		E.Arm = Arm;
@@ -981,6 +1063,9 @@ void FBoxingFightCore::Knockdown(int32 AttIdx, int32 DefIdx)
 	Def.bBlocking = false;
 	Def.Step = EStepKind::None;
 	Rt[AttIdx].Step = EStepKind::None;
+	ClinchKind = 0; // S-76: из клинча не падают, но удар «на входе» мог долететь
+	ClinchBy = -1;
+	ClinchHeat = 0;
 	PushEvent(EFightEventKind::Knockdown, AttIdx, DefIdx, 1);
 	// Три нокдауна за бой — остановка (RSC).
 	if (Def.Kd >= 3)
@@ -1118,6 +1203,9 @@ bool FBoxingFightCore::Proceed()
 		R.StepUntil = 0;
 		R.StepReadyAt = 0;
 		R.AngleUntil = 0;
+		R.SeriesLeft = 0; // S-76
+		R.bCounterShot = R.bJabNext = R.bExitAfter = false;
+		R.LastPunchAt = -9;
 	}
 	// Гонг: из углов к центру (бой — когда сойдутся); без постановки — сразу на стартовую дистанцию.
 	if (bCorners)
@@ -1136,6 +1224,9 @@ bool FBoxingFightCore::Proceed()
 
 void FBoxingFightCore::EndRound()
 {
+	ClinchKind = 0; // S-76: гонг разнимает
+	ClinchBy = -1;
+	ClinchHeat = 0;
 	ScoreRound();
 	PushEvent(EFightEventKind::RoundEnd, -1, -1, 0);
 	// Любители: RSC-H — вчистую перебит по попаданиям и принял тяжёлый раунд.
@@ -1205,7 +1296,18 @@ void FBoxingFightCore::ScoreRound()
 			FBoxingRng& JR = Jd < 3 ? Rng : JudgeRng;
 			double View;    // восприятие раунда судьёй: + — за красного
 			int32 Loser = 9;
-			if (RoundKd[0] != RoundKd[1])
+			// Вариант судейства (S-76, выкл. по умолчанию): перевес раунда глазами этого судьи (его вкус) и шире «близкий» раунд.
+			// Раунд, близкий и по умолчанию, тянет разброс из того же ГСЧ, что раньше (поток боя прежний); ставший близким лишь в
+			// варианте — из ГСЧ судей.
+			const double L = AmLean[Jd];
+			const double Mj = bAmVariant ? ((Landed[0] - Landed[1]) * (1 - L) + (DmgTaken[1] - DmgTaken[0]) * 0.6 * (1 + L)) * S : Margin;
+			if (bAmVariant && RoundKd[0] == RoundKd[1] && RoundKd[0] == 0 && FMath::Abs(Margin) < AmClear)
+			{
+				const bool bWasClose = FMath::Abs(Margin) < CLEAR_MARGIN;
+				const double Noise = (bWasClose ? JR : JudgeRng).Range(-1.0, 1.0) * AmNoise;
+				View = Mj + Noise + SeasonBias;
+			}
+			else if (RoundKd[0] != RoundKd[1])
 			{
 				// Больше нокдаунов — проиграл раунд: 10-8, второй лишний нокдаун — 10-7 (как прежде у веба: 8 − (kd − 1)).
 				const int32 Diff = FMath::Abs(RoundKd[0] - RoundKd[1]);
@@ -1361,6 +1463,8 @@ void FBoxingFightCore::BuildResult(int32 WinnerIndex, EFightMethod Method, EDeci
 	bHasResult = true;
 	Phase = EFightPhase::Over;
 	EndStage(); // KO на счёте: стоящий остаётся, где был, — лицом к лежащему
+	ClinchKind = 0; // S-76: бой окончен (сдача/досрочка) — сцепки нет
+	ClinchBy = -1;
 	PushEvent(EFightEventKind::FightEnd, WinnerIndex, WinnerIndex < 0 ? -1 : 1 - WinnerIndex, 0);
 }
 
@@ -1496,7 +1600,7 @@ bool FBoxingFightCore::StartStep(int32 I, EStepKind Kind, const FVec2* Aim)
 {
 	FRuntime& R = Rt[I];
 	if (Kind == EStepKind::None) return false;
-	if (T < R.StaggerUntil || T < R.StepReadyAt) return false;
+	if (T < R.StaggerUntil || T < R.StepReadyAt || InClinch()) return false;
 	if (Kind == EStepKind::Back && !Aim && !CanRetreat(I)) return false; // спиной в канаты — «пойман»
 	R.bHasAim = Aim != nullptr;
 	if (Aim)
@@ -1568,6 +1672,11 @@ void FBoxingFightCore::AiThink(int32 Me)
 	if (T < Ai.StaggerUntil || Ai.bHasPunch) return;
 	AiFootwork(Me);
 	if (Ai.bBlocking) return;
+	if (!bAi[Foe])
+	{
+		AiThinkVsHuman(Me); // S-76: почерк стиля против человека; автопилот — прежний код ниже (паритет)
+		return;
+	}
 	const int32 Style = StyleIdx(Ai.Prof.Style);
 	// Контратакёр/панчер ловят промах соперника встречным (сдвиг удара, не лишний удар).
 	const double LastMiss = LastMissAt[Foe];
@@ -1591,19 +1700,220 @@ void FBoxingFightCore::AiThink(int32 Me)
 	const EPunchTarget Target = Rng.Next() < BodyP ? EPunchTarget::Body : EPunchTarget::Head;
 	StartPunch(Me, Kind, bRound, Arm, Target);
 	const double Jitter = 0.75 + Rng.Range(0, 0.6);
-	double Interval = (Base * Jitter) / FMath::Max(0.4, Agg);
-	// Против ЧЕЛОВЕКА: давит выдохшегося, бережёт дыхание, ломает «черепаху».
-	if (!bAi[Foe])
+	const double Interval = (Base * Jitter) / FMath::Max(0.4, Agg);
+	// Поправки «против человека» (давит выдохшегося, бережёт дыхание, ломает «черепаху») — в AiThinkVsHuman (S-76).
+	const double From = bPunish ? FMath::Max(T, Ai.NextAiAt) : T;
+	Ai.NextAiAt = From + Interval;
+}
+
+// ---------- S-76: ИИ против человека (в вебе нет) ----------
+// Соперник открылся: провалился (нырок ИИ / пробитый блок — стан), тяжело встряхнут, у канатов, выдохся или побит.
+// Обычный промах — не открытие (он почти каждый второй): его ловит отдельное «наказание промаха» контровика/панчера.
+bool FBoxingFightCore::AiOpening(int32 Me) const
+{
+	const FRuntime& Op = Rt[1 - Me];
+	return T < Op.WhiffOpenUntil || T < Op.StaggerUntil || (T < Op.HurtUntil && Op.HurtMag >= 0.6) || RopeLevel(1 - Me) > 0 ||
+		Op.Stamina / Op.MaxStam < OPEN_GASSED || Op.Health() < 50;
+}
+
+// Выбор удара против человека: микс стиля × дистанция (как AiPickType), плюс почерк — ответ силовым, связка с чередованием
+// рук, «прощупывание» панчера джебом, стоп-джеб. Рука хука/апперкота — здесь же (в серии — чередуется).
+EPunchKind FBoxingFightCore::AiPickVsHuman(int32 Me, bool bOpening, EPunchArm& OutArm, bool& bHasArm)
+{
+	FRuntime& Ai = Rt[Me];
+	const int32 Style = StyleIdx(Ai.Prof.Style);
+	const FStyleVsHuman& V = VS_HUMAN[Style];
+	const double Dist = Distance();
+	const double Reach = Ai.Prof.ReachCm;
+	const bool bDiver = IsDiver(1 - Me);
+	const bool bInSeries = Ai.SeriesIdx > 0 && Ai.SeriesLeft >= 0;
+	bHasArm = false;
+	OutArm = EPunchArm::Lead;
+	if (Ai.bJabNext && RangeFactor(EPunchKind::Jab, Dist, Reach) > 0)
 	{
+		Ai.bJabNext = false;
+		return EPunchKind::Jab;
+	}
+	Ai.bJabNext = false;
+	double W[4];
+	double Sum = 0;
+	for (int32 K = 0; K < 4; ++K)
+	{
+		const double DiverMul = !bDiver ? 1 : (K == 3 ? 3 : (K == 0 ? AI_DIVER_JAB : 1));
+		double M = AI_MIX[Style][K] * RangeFactor(static_cast<EPunchKind>(K), Dist, Reach) * DiverMul;
+		if (Ai.bCounterShot || (bOpening && V.OpenPower != 1))
+		{
+			// Ответ / открытие — силовой (технарь и скоростной отвечают и джебом-кроссом).
+			if (K == 0) M *= Ai.bCounterShot ? 1 / FMath::Max(1.0, V.OpenPower) : 1 / V.OpenPower;
+			else M *= Ai.bCounterShot ? FMath::Max(1.0, V.OpenPower) : V.OpenPower;
+		}
+		else if (V.JabProbe != 1 && !bInSeries)
+		{
+			M *= K == 0 ? V.JabProbe : 1 / V.JabProbe; // ищет момент: прощупывает джебом
+		}
+		if (bInSeries)
+		{
+			// Связка: рука чередуется (джеб-кросс, кросс-хук), джеб за джебом — у технаря и скоростного.
+			const bool bPrevLead = Ai.SeriesPrevArm == EPunchArm::Lead;
+			const bool bLeadOnly = K == 0;   // джеб — только передней
+			const bool bRearOnly = K == 1;   // кросс — только дальней
+			if (bPrevLead && bLeadOnly) M *= (Style == 0 || Style == 5) ? 0.8 : 0.3;
+			if (!bPrevLead && bRearOnly) M *= 0.2;
+		}
+		W[K] = M;
+		Sum += W[K];
+	}
+	const double Rv = Rng.Next() * Sum;
+	EPunchKind Kind = EPunchKind::Cross;
+	if (Sum <= 0) Kind = EPunchKind::Jab;
+	else
+	{
+		double Acc = 0;
+		for (int32 K = 0; K < 4; ++K)
+		{
+			Acc += W[K];
+			if (Rv < Acc)
+			{
+				Kind = static_cast<EPunchKind>(K);
+				break;
+			}
+		}
+	}
+	if (Kind == EPunchKind::Hook || Kind == EPunchKind::Uppercut)
+	{
+		bHasArm = true;
+		// В связке — рукой, противоположной предыдущей; иначе — наугад.
+		OutArm = bInSeries ? (Ai.SeriesPrevArm == EPunchArm::Lead ? EPunchArm::Rear : EPunchArm::Lead)
+			: (Rng.Next() < 0.5 ? EPunchArm::Lead : EPunchArm::Rear);
+	}
+	return Kind;
+}
+
+void FBoxingFightCore::AiThinkVsHuman(int32 Me)
+{
+	FRuntime& Ai = Rt[Me];
+	const int32 Foe = 1 - Me;
+	const FRuntime& Op = Rt[Foe];
+	const int32 Style = StyleIdx(Ai.Prof.Style);
+	const FStyleVsHuman& V = VS_HUMAN[Style];
+	// Контратакёр/панчер ловят промах соперника встречным (как веб).
+	const double LastMiss = LastMissAt[Foe];
+	const bool bPunish = (Ai.Prof.Style == EBoxStyle::Counter || Ai.Prof.Style == EBoxStyle::Puncher) &&
+		LastMiss >= 0 && T - LastMiss < 0.5 && T >= Ai.PunishReadyAt;
+	const bool bTurtling = Op.bBlocking && Op.BlockSince >= 0 && T - Op.BlockSince > AI_TURTLE_AFTER;
+	// «Черепаха»: не ждать графика — серия силовых через AI_TURTLE_INTERVAL (как веб ломал её каждым ударом).
+	if (bTurtling && Ai.SeriesLeft <= 0 && Ai.NextAiAt - T > AI_TURTLE_INTERVAL)
+	{
+		Ai.NextAiAt = T + AI_TURTLE_INTERVAL;
+		Ai.SeriesNext = FMath::Min(Ai.SeriesNext, Ai.NextAiAt);
+	}
+	if (!bPunish && T < Ai.NextAiAt) return;
+	if (bPunish)
+	{
+		Ai.PunishReadyAt = T + PUNISH_COOLDOWN;
+		Ai.bCounterShot = true;
+		Ai.SeriesLeft = 0;
+	}
+	const bool bStartSeries = Ai.SeriesLeft <= 0;
+	if (bStartSeries) Ai.SeriesIdx = 0;
+	const bool bOpening = AiOpening(Me);
+	EPunchArm Arm = EPunchArm::Lead;
+	bool bHasArm = false;
+	EPunchKind Kind = AiPickVsHuman(Me, bOpening, Arm, bHasArm);
+	if (bTurtling && Kind == EPunchKind::Jab && Rng.Next() < AI_TURTLE_POWER)
+	{
+		Kind = Distance() < 1.15 ? EPunchKind::Hook : EPunchKind::Cross;
+		bHasArm = Kind == EPunchKind::Hook;
+		Arm = Kind == EPunchKind::Hook ? EPunchArm::Lead : EPunchArm::Rear;
+	}
+	if (!bHasArm) Arm = ArmFor(Kind);
+	const bool bDiver = IsDiver(Foe);
+	const double BodyP = (Ai.SeriesIdx > 0 ? V.BodySeries : AI_BODY[Style]) + (bDiver ? AI_DIVER_BODY : 0);
+	const EPunchTarget Target = Rng.Next() < BodyP ? EPunchTarget::Body : EPunchTarget::Head;
+	const bool bCounterShot = Ai.bCounterShot;
+	Ai.bCounterShot = false;
+	StartPunch(Me, Kind, bHasArm, Arm, Target);
+	Ai.SeriesPrev = Kind;
+	Ai.SeriesPrevArm = Ai.Punch.Arm;
+
+	if (bStartSeries)
+	{
+		// Новая серия: длина по стилю (ответ — 1–2 удара, на открытие — на удар длиннее), интервал до следующей — на всю серию.
+		int32 Len = V.SeriesMin + FMath::Min(V.SeriesMax - V.SeriesMin, static_cast<int32>(Rng.Next() * (V.SeriesMax - V.SeriesMin + 1)));
+		if (bCounterShot) Len = FMath::Min(Len, 2);
+		else if (bOpening && Len < V.SeriesMax) Len += 1;
+		if (bTurtling) Len = FMath::Max(Len, AI_TURTLE_SERIES); // «черепаху» ломают серией силовых (давление блока ≥ 2.6 — пробит)
+		const double Base = AiInterval(Style);
+		const double HealthF = 0.9 + 0.1 * (Ai.Health() / 100);
+		const double HurtF = T < Ai.HurtUntil ? HURT_AGG : 1;
+		const double Agg = Form[Me] * Ai.FatigueForm() * HealthF * HurtF;
+		const double Jitter = 0.75 + Rng.Range(0, 0.6);
+		double Interval = (Base * Jitter * Len * V.TempoMul) / FMath::Max(0.4, Agg);
+		// Против человека (как веб): давит выдохшегося, бережёт дыхание, ломает «черепаху».
 		const double OpSt = Op.Stamina / Op.MaxStam;
 		if (OpSt < GASSED_AT) Interval *= 1 - GASSED_PUSH * (1 - OpSt / GASSED_AT);
 		const double MySt = Ai.Stamina / Ai.MaxStam;
 		const bool bFinishing = T < Op.HurtUntil || Op.Health() < 30;
 		if (MySt < AI_PACE_AT && !bFinishing) Interval *= 1 + AI_PACE_K * (1 - MySt / AI_PACE_AT);
-		if (bTurtling) Interval = FMath::Min(Interval, AI_TURTLE_INTERVAL * (0.8 + Rng.Range(0, 0.4)));
+		if (bTurtling) Interval = FMath::Min(Interval, AI_TURTLE_INTERVAL * Len * (0.8 + Rng.Range(0, 0.4)));
+		Ai.SeriesLeft = Len - 1;
+		// Наказание промаха (как punish веба) — «вне очереди», график не сдвигается; ответ на удар / после защиты — в счёт темпа.
+		// Ранний старт (ответ раньше графика) занимает следующий слот: темп стиля тот же, меняется лишь КОГДА он бьёт.
+		Ai.SeriesNext = bPunish ? FMath::Max(Ai.SeriesNext, T + 0.3) : FMath::Max(T, Ai.SeriesNext) + Interval;
 	}
-	const double From = bPunish ? FMath::Max(T, Ai.NextAiAt) : T;
-	Ai.NextAiAt = From + Interval;
+	else
+	{
+		Ai.SeriesLeft -= 1;
+	}
+	Ai.SeriesIdx += 1;
+	if (Ai.SeriesLeft > 0)
+	{
+		Ai.NextAiAt = Ai.Punch.End + (bTurtling ? AI_TURTLE_GAP : V.SeriesGap);
+	}
+	else
+	{
+		Ai.NextAiAt = FMath::Max(Ai.Punch.End + V.SeriesGap, Ai.SeriesNext);
+		Ai.bExitAfter = V.bHitAndMove;
+	}
+}
+
+// Человек ударил: ИИ по стилю отвечает сразу после его удара (рука ещё не вернулась). Без ГСЧ, если стиль не отвечает.
+void FBoxingFightCore::AiAnswerHuman(int32 AiIdx, int32 HumanIdx)
+{
+	FRuntime& Ai = Rt[AiIdx];
+	const FRuntime& Hu = Rt[HumanIdx];
+	const FStyleVsHuman& V = VS_HUMAN[StyleIdx(Ai.Prof.Style)];
+	if (V.Answer <= 0 || !Hu.bHasPunch || Ai.bHasPunch || T < Ai.StaggerUntil || Ai.SeriesNext - T > ANSWER_BORROW) return;
+	if (Rng.Next() >= V.Answer) return;
+	Ai.NextAiAt = FMath::Min(Ai.NextAiAt, Hu.Punch.End + ANSWER_DELAY);
+	Ai.bCounterShot = true;
+	Ai.SeriesLeft = 0;
+}
+
+// ИИ принял удар человека в блок / увёл нырком: ответ сразу (после нырка — всегда, после блока — у тех, кто «ждёт и
+// наказывает»: контровик, панчер; с бонусом контры, как после удачного нырка).
+void FBoxingFightCore::AiDefended(int32 AiIdx, bool bSlip)
+{
+	FRuntime& Ai = Rt[AiIdx];
+	const FStyleVsHuman& V = VS_HUMAN[StyleIdx(Ai.Prof.Style)];
+	if ((!bSlip && !V.bDefCounter) || Ai.SeriesNext - T > ANSWER_BORROW) return;
+	if (!bSlip) Ai.CounterUntil = FMath::Max(Ai.CounterUntil, T + COUNTER_WINDOW);
+	Ai.NextAiAt = FMath::Min(Ai.NextAiAt, T + DEF_COUNTER_DELAY);
+	Ai.bCounterShot = true;
+	Ai.SeriesLeft = 0;
+}
+
+// Человек шагнул вперёд: технарь/скоростной/контровик встречают джебом (если джеб достанет после шага).
+void FBoxingFightCore::AiStopJab(int32 AiIdx)
+{
+	FRuntime& Ai = Rt[AiIdx];
+	const FStyleVsHuman& V = VS_HUMAN[StyleIdx(Ai.Prof.Style)];
+	if (V.StopJab <= 0 || Ai.bHasPunch || T < Ai.StaggerUntil || Ai.bBlocking || Ai.SeriesNext - T > ANSWER_BORROW) return;
+	if (RangeFactor(EPunchKind::Jab, Distance() - STEP_LEN, Ai.Prof.ReachCm) < 0.5) return;
+	if (Rng.Next() >= V.StopJab) return;
+	Ai.NextAiAt = FMath::Min(Ai.NextAiAt, T + 0.06);
+	Ai.bJabNext = true;
+	Ai.SeriesLeft = 0;
 }
 
 // Человек часто ныряет (2+ уклона за 2.5 с)?
@@ -1650,7 +1960,9 @@ void FBoxingFightCore::AiFootwork(int32 Me)
 	const FRuntime& Op = Rt[1 - Me];
 	if (T < Ai.StaggerUntil || T < Ai.NextStepAt || T < Ai.StepReadyAt) return;
 	const double Fw = Ai.Prof.Stats.Footwork;
-	const double Think = (0.62 - ClampD((Fw - 50) / 150, 0, 0.3)) * (0.8 + Rng.Range(0, 0.4));
+	const bool bVsHuman = !bAi[1 - Me]; // S-76: почерк ног стиля против человека (автопилот — как веб)
+	double Think = (0.62 - ClampD((Fw - 50) / 150, 0, 0.3)) * (0.8 + Rng.Range(0, 0.4));
+	if (bVsHuman) Think *= VS_HUMAN[StyleIdx(Ai.Prof.Style)].FootThink;
 	Ai.NextStepAt = T + Think;
 	if (Ai.Stamina < STEP_STAM * 2) return;
 	const EBoxStyle Style = Ai.Prof.Style;
@@ -1727,6 +2039,24 @@ void FBoxingFightCore::AiFootwork(int32 Me)
 			return;
 		}
 	}
+	// S-76, против человека: технарь/скоростной после серии сходят с линии («ударь-уйди»), давящие не дают отдышаться —
+	// соперник отошёл дальше своей дистанции — сразу шаг вперёд, без паузы «осесть».
+	if (bVsHuman && Ai.bExitAfter)
+	{
+		Ai.bExitAfter = false;
+		if (D < Pref + 0.1)
+		{
+			if (CanRetreat(Me) && D < Pref - 0.05) Straight(EStepKind::Back, true);
+			else StartStep(Me, BestSideRope(false));
+			return;
+		}
+	}
+	if (bVsHuman && bCutter && !bHurt && D - Pref > CHASE_GAP)
+	{
+		Ai.DistDir = 1;
+		Straight(EStepKind::Fwd, true);
+		return;
+	}
 	// 3) Дистанция стиля — серией с гистерезисом.
 	const double Err = D - Pref;
 	if (Ai.DistDir != 0 && Ai.DistDir * Err <= DIST_DONE_TH)
@@ -1772,7 +2102,8 @@ void FBoxingFightCore::AiReactToPunch(int32 AiIdx, int32 HumanIdx, int32 Reps)
 	if (T < Ai.WhiffOpenUntil) return;
 	const double Read = FMath::Min(READ_MAX, Reps * READ_STEP);
 	const double Base = FMath::Min(0.6,
-		(static_cast<double>(Ai.Prof.Stats.Defense) * 0.6 + Ai.Prof.Stats.Footwork * 0.4) / 220 + AI_GUARD_BONUS[StyleIdx(Ai.Prof.Style)]);
+		(static_cast<double>(Ai.Prof.Stats.Defense) * 0.6 + Ai.Prof.Stats.Footwork * 0.4) / 220 + AI_GUARD_BONUS[StyleIdx(Ai.Prof.Style)] +
+		VS_HUMAN[StyleIdx(Ai.Prof.Style)].GuardAdd); // S-76 (реакция бывает только против человека)
 	const double Guard = FMath::Max(0.08, FMath::Min(AI_GUARD_CAP, Base + Read));
 	if (Rng.Next() >= Guard * (1 - ANGLE_GUARD_PEN * AngleOf(HumanIdx))) return;
 	const double SlipP = FMath::Min(0.75, (Ai.Prof.Stats.Footwork > 70 ? 0.4 : 0) + Read);
@@ -1793,6 +2124,93 @@ void FBoxingFightCore::AiReactToPunch(int32 AiIdx, int32 HumanIdx, int32 Reps)
 		const double At = Hu.Punch.Contact + AI_BLOCK_HOLD + 0.02;
 		Ai.NextAiAt = FMath::Min(Ai.NextAiAt, At);
 		Ai.CounterUntil = FMath::Max(Ai.CounterUntil, At + COUNTER_WINDOW);
+	}
+}
+
+// ======================================================================
+// Клинч (S-76; в вебе нет) — без ГСЧ, только при человеке в бою
+// ======================================================================
+void FBoxingFightCore::BeginClinch(int32 By)
+{
+	ClinchKind = 1;
+	ClinchBy = By;
+	ClinchT = 0;
+	ClinchHeat = 0;
+	for (int32 I = 0; I < 2; ++I)
+	{
+		FRuntime& R = Rt[I];
+		R.bBlocking = false; // сцепились: руки заняты (кнопка блока запомнится — поднимется после разведения)
+		R.BlockUntil = 0;
+		R.Step = EStepKind::None;
+		R.SlipUntil = 0;
+		R.SeriesLeft = 0;
+		R.bCounterShot = false;
+		R.bJabNext = false;
+	}
+	PushEvent(EFightEventKind::Clinch, By, By >= 0 ? 1 - By : -1, 0);
+}
+
+void FBoxingFightCore::UpdateClinch(double Dt)
+{
+	if (Phase != EFightPhase::Fighting) return;
+	if (ClinchKind == 0)
+	{
+		if (T < ClinchReadyAt) return;
+		const double D = Distance();
+		const bool bBoth = T - Rt[0].LastPunchAt < CLINCH_BOTH && T - Rt[1].LastPunchAt < CLINCH_BOTH;
+		if (D <= CLINCH_DIST && bBoth)
+		{
+			// Встряхнутый/выдохшийся ИИ сам виснет на сопернике — «вязнет» вдвое быстрее (он и вошёл в клинч).
+			int32 HoldOn = -1;
+			for (int32 I = 0; I < 2; ++I)
+			{
+				const FRuntime& R = Rt[I];
+				if (bAi[I] && ((T < R.HurtUntil && R.Health() < 60) || R.Stamina / R.MaxStam < 0.25)) HoldOn = I;
+			}
+			ClinchHeat += Dt * (HoldOn >= 0 ? CLINCH_HOLD_ON_K : 1);
+			if (ClinchHeat >= CLINCH_HEAT) BeginClinch(HoldOn);
+		}
+		else
+		{
+			ClinchHeat = FMath::Max(0.0, ClinchHeat - CLINCH_COOL * Dt);
+		}
+		return;
+	}
+	ClinchT += Dt;
+	for (int32 I = 0; I < 2; ++I) Rt[I].Step = EStepKind::None;
+	if (ClinchKind == 1)
+	{
+		if (ClinchT < CLINCH_HOLD) return;
+		ClinchKind = 2; // «Брейк!» — разводит
+		ClinchSep = FMath::Max(CLINCH_SEP, Distance());
+		PushEvent(EFightEventKind::Break, -1, -1, 0);
+		return;
+	}
+	// Разведение: оба отходят по оси пары; кто упёрся в канаты — второй добирает.
+	const double Need = ClinchSep - Distance();
+	if (Need <= 1e-3 || ClinchT >= CLINCH_HOLD + CLINCH_SEP_S + 0.5)
+	{
+		ClinchKind = 0;
+		ClinchBy = -1;
+		ClinchReadyAt = T + CLINCH_COOLDOWN;
+		for (int32 I = 0; I < 2; ++I)
+		{
+			if (bAi[I]) Rt[I].NextAiAt = FMath::Max(Rt[I].NextAiAt, T + 0.25);
+		}
+		return;
+	}
+	const double Step = FMath::Min(Need, (CLINCH_SEP - CLINCH_DIST) / CLINCH_SEP_S * Dt); // м за тик на двоих
+	for (int32 Pass = 0; Pass < 2; ++Pass)
+	{
+		for (int32 I = 0; I < 2; ++I)
+		{
+			const double Left = ClinchSep - Distance();
+			if (Left <= 1e-3) return;
+			const FVec2 U = Axis(I);
+			const double Amt = FMath::Min(Left, Step * 0.5);
+			MoveTo(I, Rt[I].X - U.X * Amt, Rt[I].Z - U.Z * Amt);
+		}
+		if (ClinchSep - Distance() <= Need - Step + 1e-6) return; // за тик разошлись на свой шаг
 	}
 }
 
@@ -1832,6 +2250,10 @@ FFightSnapshot FBoxingFightCore::GetSnapshot() const
 	S.NumJudges = NumJudges;
 	S.bHasResult = bHasResult;
 	S.bCorners = bCorners;
+	S.bClinch = ClinchKind != 0; // S-76
+	S.ClinchTime = static_cast<float>(ClinchKind != 0 ? ClinchT : 0.0);
+	S.ClinchBreakIn = static_cast<float>(ClinchKind != 0 ? CLINCH_HOLD - ClinchT : 0.0);
+	S.ClinchBy = ClinchKind != 0 ? ClinchBy : -1;
 	S.Stage.Kind = Stage.Kind;
 	S.Stage.T = static_cast<float>(Stage.T);
 	for (int32 I = 0; I < 2; ++I)

@@ -33,10 +33,13 @@ namespace BoxRef
 		constexpr double GRAB_T = 0.55;
 		constexpr double SHOULDER_LAT = 0.19;
 		constexpr double SHOULDER_Y = 1.42;
-		constexpr double WRIST_HIGH = 2.05;
+		constexpr double WRIST_HIGH = 1.95; // S-78: ниже его поднятых перчаток (держит запястье, а не сквозь руку)
 		constexpr double WRIST_LOW = 1.0;
-		constexpr double WRIST_NEAR = 0.12;
-		constexpr double ANNOUNCE_GAP = 0.66;
+		constexpr double WRIST_NEAR = 0.26; // S-78: запястье на ближней стороне бойца (было 0.12 — над его головой, сквозь его руки)
+		// S-78: плечо и предплечье до запястья (м) — сгиб локтя, когда запястье ближе длины руки.
+		constexpr double ARM_UPPER = 0.29;
+		constexpr double ARM_FORE = 0.26;
+		constexpr double ANNOUNCE_GAP = 0.76; // S-78: было 0.66 — опущенная перчатка проигравшего упиралась в бедро рефери
 		constexpr double DETOUR_PAIR_MAX = 2.4;
 		// UE: сглаживание доли жеста в руке (1/с).
 		constexpr double ARMW_RATE = 8;
@@ -67,7 +70,9 @@ namespace BoxRef
 		FArm ArmCountUp(double S) { return MkArm(S, FV3(0.25, 0.55, 0.8), FV3(0.12, 0.88, 0.45)); }
 		FArm ArmCountDown(double S) { return MkArm(S, FV3(0.18, -0.3, 0.93), FV3(0.1, -0.72, 0.68)); }
 		FArm ArmKnee(double S) { return MkArm(S, FV3(0.15, -0.88, 0.45), FV3(0.05, -0.55, 0.83)); }
-		FArm ArmCross(double S) { return MkArm(S, FV3(-0.32, 0.12, 0.94), FV3(-0.45, 0.1, 0.89)); }
+		FArm ArmCross(double S) { return MkArm(S, FV3(-0.32, 0.12 + 0.1 * S, 0.94), FV3(-0.45, 0.1 + 0.1 * S, 0.89)); } // S-78: левая выше — кисти не сквозь друг друга
+		// S-78: «Брейк!» — ладони вперёд между бойцами, каждая со своей стороны (не крест: кисти проходили одна сквозь другую).
+		FArm ArmPart(double S) { return MkArm(S, FV3(0.2, -0.02, 0.98), FV3(0.08, 0.1, 0.99)); }
 		FArm ArmSpread(double S) { return MkArm(S, FV3(0.95, 0.1, 0.3), FV3(0.97, 0.05, 0.22)); }
 		FArm MixArm(const FArm& A, const FArm& B, double K)
 		{
@@ -557,6 +562,21 @@ namespace BoxRef
 		FArm A;
 		A.Upper = Norm(FV3(V.X, V.Y - 0.12, V.Z));
 		A.Fore = V;
+		// S-78: запястье проигравшего близко (ближе длины руки) — локоть сгибается вниз-наружу, кисть останавливается у его
+		// запястья, а не уходит прямой рукой ему в бедро.
+		const double Dist = FMath::Sqrt(LatW * LatW + (H - SHOULDER_Y) * (H - SHOULDER_Y) + Fwd * Fwd);
+		if (!bHigh && Dist < ARM_UPPER + ARM_FORE - 0.01)
+		{
+			const double D = FMath::Max(0.05, Dist);
+			const double CosA = FMath::Clamp((ARM_UPPER * ARM_UPPER + D * D - ARM_FORE * ARM_FORE) / (2 * ARM_UPPER * D), -1.0, 1.0);
+			const double Ang = FMath::Acos(CosA);
+			FV3 P(S * 0.6, -1, 0);
+			const double Pv = P.X * V.X + P.Y * V.Y + P.Z * V.Z;
+			P = Norm(FV3(P.X - V.X * Pv, P.Y - V.Y * Pv, P.Z - V.Z * Pv));
+			const FV3 U = Norm(FV3(V.X * FMath::Cos(Ang) + P.X * FMath::Sin(Ang), V.Y * FMath::Cos(Ang) + P.Y * FMath::Sin(Ang), V.Z * FMath::Cos(Ang) + P.Z * FMath::Sin(Ang)));
+			A.Upper = U;
+			A.Fore = Norm(FV3(V.X * D - U.X * ARM_UPPER, V.Y * D - U.Y * ARM_UPPER, V.Z * D - U.Z * ARM_UPPER));
+		}
 		return A;
 	}
 
@@ -610,6 +630,9 @@ namespace BoxRef
 			}
 			In.Down.bArrived = K == ERingStageKind::Neutral ? S.Stage.bArrived[Up] : true;
 		}
+		// S-76/S-75: клинч — рефери подходит к паре, на «Брейк!» разводит.
+		In.bClinch = In.Phase == EPhase::Fight && S.bClinch;
+		In.bBreak = In.bClinch && S.ClinchBreakIn <= 0.f;
 		if (S.Phase == EFightPhase::Over && Result)
 		{
 			In.Over.bValid = true;
@@ -648,7 +671,8 @@ namespace BoxRef
 			if (In.Over.bStanding && Mode == EMode::Stop && ModeT > STOP_DELAY + WAVE_TIME + 0.2) bStopDone = true;
 			return bStopDone && In.Over.bStanding ? EMode::Announce : EMode::Stop;
 		default:
-			return EMode::Side;
+			// S-76/S-75: клинч — к паре, на «Брейк!» разводит.
+			return In.Phase == EPhase::Fight && In.bClinch ? EMode::Clinch : EMode::Side;
 		}
 	}
 
@@ -662,6 +686,10 @@ namespace BoxRef
 			Yaw = YawTo(Pos, In.Camera);
 		}
 		const EMode NewMode = PickMode(In);
+		if (NewMode != EMode::Clinch)
+		{
+			ClinchSide = 0;
+		}
 		if (NewMode != Mode)
 		{
 			Mode = NewMode;
@@ -787,6 +815,23 @@ namespace BoxRef
 		{
 			Target = AnnounceSpot(F0, F1, In.Camera);
 			PushFighters(0.6);
+		}
+		else if (Mode == EMode::Clinch)
+		{
+			// S-76/S-75: сбоку от сцепки на CLINCH_REF_OFF от середины пары, с той стороны оси пары, где уже стоит (не обходит
+			// пару и не проходит перед камерой); стоит ровно на оси — с дальней от камеры.
+			const FV M((F0.X + F1.X) / 2, (F0.Z + F1.Z) / 2);
+			const double L = Or1(Hyp(F0, F1));
+			const FV Pp(-(F1.Z - F0.Z) / L, (F1.X - F0.X) / L);
+			if (ClinchSide == 0)
+			{
+				const double Mine = (Pos.X - M.X) * Pp.X + (Pos.Z - M.Z) * Pp.Z;
+				const double CamS = (In.Camera.X - M.X) * Pp.X + (In.Camera.Z - M.Z) * Pp.Z;
+				ClinchSide = FMath::Abs(Mine) > 0.15 ? (Mine > 0 ? 1 : -1) : (CamS > 0 ? -1 : 1);
+			}
+			constexpr double CLINCH_REF_OFF = 0.72;
+			Target = FV(M.X + Pp.X * ClinchSide * CLINCH_REF_OFF, M.Z + Pp.Z * ClinchSide * CLINCH_REF_OFF);
+			PushFighters(0.42);
 		}
 		else
 		{
@@ -1005,6 +1050,31 @@ namespace BoxRef
 				G.Lean = 0.3;
 			}
 			G.Free[0] = G.Free[1] = false;
+		}
+		if (Mode == EMode::Clinch)
+		{
+			// S-76/S-75: подходит — руки вперёд к паре; «Брейк!» — ладони между бойцами и в стороны (разводит), ~0.45 с.
+			BreakT = In.bBreak ? (BreakT < 0 ? 0 : BreakT + Dt) : -1;
+			if (BreakT >= 0)
+			{
+				const double W = FMath::Clamp((BreakT - 0.1) / 0.35, 0.0, 1.0);
+				G.Arms[0] = MixArm(ArmPart(1), ArmSpread(1), W);
+				G.Arms[1] = MixArm(ArmPart(-1), ArmSpread(-1), W);
+				G.Rates[0] = G.Rates[1] = 14;
+				G.Hands[0] = G.Hands[1] = EHand::Open;
+				G.Lean = 0.18 * (1 - W);
+			}
+			else
+			{
+				G.Arms[0] = ArmReady(1);
+				G.Arms[1] = ArmReady(-1);
+				G.Lean = 0.08;
+			}
+			G.Free[0] = G.Free[1] = false;
+		}
+		else
+		{
+			BreakT = -1;
 		}
 		if (Mode == EMode::Announce)
 		{
